@@ -70,8 +70,17 @@ DashScope WS 事件映射（Worker 目前按以下策略解析）：
 - `GET /v1/sessions/:id/events?stream_role=...&limit=...`
 - `GET /v1/sessions/:id/state`
 - `GET /v1/sessions/:id/utterances?stream_role=...&view=raw|merged&limit=...`
+- `POST /v1/sessions/:id/enrollment/start`
+- `POST /v1/sessions/:id/enrollment/stop`
+- `GET /v1/sessions/:id/enrollment/state`
+- `POST /v1/sessions/:id/cluster-map`（`stream_role=students`）
+- `GET /v1/sessions/:id/unresolved-clusters`
 - `POST /v1/sessions/:id/asr-run?stream_role=...&max_windows=...`（补算）
 - `POST /v1/sessions/:id/asr-reset?stream_role=...`
+
+Inference 对应新增：
+- `POST /speaker/enroll`
+- `POST /speaker/resolve`（语义约束：不允许 `decision=confirm` 且 `speaker_name=null`）
 
 ## 6. 验收命令
 
@@ -128,6 +137,9 @@ curl -sS "https://api.frontierace.ai/v1/sessions/<session_id>/events?limit=50" |
 - `state.capture_by_stream.students.capture_state`
 - `state.capture_by_stream.students.recover_attempts`
 - `state.capture_by_stream.teacher.echo_suppressed_chunks`
+- `state.enrollment_state.mode`
+- `state.participant_profiles`
+- `state.cluster_binding_meta`
 
 5) merged 视图差异：
 
@@ -143,3 +155,6 @@ curl -sS "https://api.frontierace.ai/v1/sessions/<session_id>/utterances?stream_
 - 有效语料下，`merged.count` 小于 `raw.count`
 - teacher 事件具备 `identity_source` 且优先级符合：
   `teams_participants > preconfig > name_extract > teacher`
+- `confirm_without_name_count = 0`（不再出现 `confirm + null`）
+- 开场 enrollment 后，`participant_profiles` 至少 1 个进入 `ready`
+- 手动兜底后，`unresolved-clusters` 可收敛到 0

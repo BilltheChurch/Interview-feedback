@@ -11,8 +11,8 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - `/Users/billthechurch/Interview-feedback/docs/mvp/*.md`
 
 ## 1. 当前阶段
-- Current Phase: **Phase 2.3（双流上传 + ASR 联动）**
-- Why: Phase 2.2（FunASR 模型纠偏 + 全量补算）已完成，进入双流协议与说话人联动阶段。
+- Current Phase: **Phase 2.3.1（Enrollment 主链 + 手动映射兜底）**
+- Why: Phase 2.3 实时主链已稳定，需要解决 `confirm/null` 语义漏洞并把 participants 升级为可匹配的声纹档案。
 
 ## 2. 里程碑总览（来自《开发计划》）
 - Phase 0: 账号/环境
@@ -45,11 +45,19 @@ Workspace: `/Users/billthechurch/Interview-feedback`
     - 在真实 Teams 双流会话中完成 5~10 分钟端到端验证（teacher/students）
     - 实机会中验证 `P95<=5s`（目标 `<=3s`）并固化性能门禁
 - Phase 3: 说话人日志 + enrollment
-  - Status: **PARTIAL**
+  - Status: **IN_PROGRESS**
   - Done:
     - Inference MVP-A（VAD+SV+聚类+姓名绑定）
+    - `decision=confirm` 且 `speaker_name=null` 语义漏洞已修复（Inference 端强约束降级为 `unknown`）
+    - Enrollment API 已接入：
+      - Worker: `POST /enrollment/start|stop`, `GET /enrollment/state`
+      - Worker: `POST /cluster-map`, `GET /unresolved-clusters`
+      - Inference: `POST /speaker/enroll`
+    - Worker 状态扩展已落地：`participant_profiles`、`cluster_binding_meta`、`enrollment_state`
+    - Desktop 已新增 Enrollment 控件和 Cluster Mapping 面板
   - Pending:
-    - 与 Electron/ASR 端到端联动、映射 UI
+    - 真实 Teams 会议执行开场 enrollment 并验证命中率/unknown ratio 门禁
+    - 手动映射 + lock 的实机闭环验收（直到 unresolved cluster 为 0）
 - Phase 4: 反馈模式
   - Status: **TODO**
 
@@ -75,6 +83,18 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [x] Students 事件稳定展示：无 `speaker_name` 时前端展示 `cluster:<id>`，避免误判“全部 unknown”
 - [x] Teacher 去串音阈值重调：`hard+soft` 双判定 + teacher 主导保护，增强无耳机场景抑制
 
+### Phase 2.3.1 任务（Enrollment + Mapping）
+- [x] Inference `BinderPolicy` 强约束：禁止 `confirm + null`，无可命名结果统一 `unknown`
+- [x] Inference 新增 `POST /speaker/enroll` 与 `SessionState.participant_profiles`
+- [x] Inference resolve 顺序升级：`locked manual binding > existing binding > enrollment profile > roster name extract > unknown`
+- [x] Worker 新增 enrollment 接口：`start/stop/state`
+- [x] Worker 新增手动映射接口：`POST /cluster-map`（支持 `lock`）与 `GET /unresolved-clusters`
+- [x] Worker resolve 音频窗口改为尾窗策略：`INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS=6`
+- [x] Worker 事件扩展：`identity_source` 支持 `enrollment_match|manual_map`，`metadata` 带 profile/binding 信息
+- [x] Desktop 增加 Enrollment Start/Stop 与 unresolved cluster 映射 UI
+- [ ] 实机验收：5~10 分钟 Teams 会话执行 enrollment 后 `students unknown_ratio <= 15%`
+- [ ] 实机验收：人工映射兜底后未绑定 cluster = 0
+
 ### Phase 2.3 验收标准（当前）
 - [x] `health` 显示 `asr_realtime_enabled=true`
 - [x] 双流并发 smoke 下 teacher/students 均 `received_chunks` 连续增长
@@ -85,6 +105,7 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [ ] 真实 Teams 容错验证：手动触发 system/mic track ended 后，另一流持续上传且可 re-init 恢复双流
 - [ ] 真实 Teams 无耳机验收：teacher/students 重复转写率下降 >= 60%
 - [ ] `teams-test2` 修复回归：`echo_suppressed_chunks > 0` 且 students 事件不再出现“全 unknown”视觉假象
+- [ ] Phase 2.3.1 实机门禁：`confirm_without_name_count = 0`
 
 ## 4. 已完成基础能力（供后续阶段复用）
 - [x] Inference FastAPI + Docker + 模型版本固定 + smoke 回归
@@ -97,6 +118,17 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 ## 5. 最新验证记录（完成后才允许打勾）
 Validation Date: 2026-02-11
 
+- [x] `cd inference && pytest -q`（Phase 2.3.1 enrollment/profile tests）-> `22 passed`
+- [x] `cd edge/worker && npm run typecheck`（Phase 2.3.1 routes/types）-> 通过
+- [x] `cd desktop && node --check renderer.js main.js preload.js`（Enrollment/Cluster Mapping UI）-> 通过
+- [x] `cd inference && docker compose up -d --build`（Phase 2.3.1）-> 容器重建并启动
+- [x] `cd edge/worker && npm run deploy`（Phase 2.3.1 enrollment/mapping）-> 已发布（Version ID: `f7b3a2e4-23dc-4161-9569-9065449c70fc`）
+- [x] API 联调 smoke（`phase231-smoke-1770824078`）：
+  - `POST /config` -> `roster_count=2`
+  - `POST /enrollment/start` -> `enrollment_state.mode=collecting`
+  - `GET /enrollment/state` 可见进度结构
+  - `POST /cluster-map` -> `binding_locked=true`
+  - `GET /state` -> `cluster_binding_meta.c-test.source=manual_map`
 - [x] `curl https://if.frontierace.ai/health` -> 200 + JSON
 - [x] `curl https://api.frontierace.ai/health` -> 200 + JSON
 - [x] `cd inference && pytest -q` -> `13 passed`
@@ -252,6 +284,7 @@ Validation Date: 2026-02-11
 未通过验证的任务，不允许标记为完成。
 
 ## 8. 下一步（立即执行）
-- Phase 2.3 实机验收：桌面端真实 Teams 双流上传（teacher/students）5~10 分钟，确认 `asr_by_stream` 延迟指标。
-- Phase 2.3 实机身份验收：检查 teacher 事件 `identity_source` 命中顺序（Teams参会者优先）。
+- Phase 2.3.1 实机 enrollment：开场 2~3 分钟完成 participants 引导采样，检查 `participant_profiles.status=ready`。
+- Phase 2.3.1 实机映射：对 unresolved clusters 执行 `cluster-map lock=true`，验证 events 展示 `identity_source=manual_map`。
+- Phase 2.3.1 门禁复核：`confirm_without_name_count=0`、`students unknown_ratio<=15%`、人工兜底后未绑定 cluster=0。
 - Phase 2.4：Graph 自动拉取参会者（企业应用 + OAuth + attendees）接入 `teams_participants`。

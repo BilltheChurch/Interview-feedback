@@ -58,8 +58,11 @@
         <p id="capture-health" class="muted">Capture health initializing...</p>
         <div class="actions">
           <button id="btn-save-session-config">Save Session Config</button>
+          <button id="btn-enrollment-start">Start Enrollment</button>
+          <button id="btn-enrollment-stop">Stop Enrollment</button>
           <button id="btn-refresh-live">Refresh Live View</button>
         </div>
+        <pre id="enrollment-status" class="result-box">Enrollment idle.</pre>
       </section>
 
       <section class="panel">
@@ -136,6 +139,14 @@
       <section class="panel">
         <h2>Speaker Events</h2>
         <pre id="speaker-events" class="result-box">No events yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Cluster Mapping (Students)</h2>
+        <div class="actions">
+          <button id="btn-refresh-clusters" type="button">Refresh Unresolved Clusters</button>
+        </div>
+        <div id="cluster-map-list" class="cluster-map-list"></div>
       </section>
 
       <section class="panel">

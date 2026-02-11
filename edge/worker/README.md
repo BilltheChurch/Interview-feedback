@@ -37,6 +37,8 @@ wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 - `ASR_STREAM_CHUNK_BYTES=12800`
 - `ASR_SEND_PACING_MS=0`
 - `ASR_DEBUG_LOG_EVENTS=false`
+- `INFERENCE_ENROLL_PATH=/speaker/enroll`
+- `INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS=6`
 
 Legacy backfill path still available:
 - `ASR_WINDOW_SECONDS`
@@ -52,7 +54,12 @@ Legacy backfill path still available:
     - `teams_participants: [{name,email?}] | ["name1","name2"]`
     - `teams_interviewer_name`
     - `interviewer_name`
+- `POST /v1/sessions/:session_id/enrollment/start`
+- `POST /v1/sessions/:session_id/enrollment/stop`
+- `GET /v1/sessions/:session_id/enrollment/state`
 - `GET /v1/sessions/:session_id/events?stream_role=...&limit=...`
+- `POST /v1/sessions/:session_id/cluster-map`
+- `GET /v1/sessions/:session_id/unresolved-clusters`
 - `GET /v1/sessions/:session_id/state`
 - `GET /v1/sessions/:session_id/utterances?stream_role=...&view=raw|merged&limit=...`
 - `POST /v1/sessions/:session_id/resolve?stream_role=...`
@@ -81,6 +88,11 @@ Legacy backfill path still available:
   - `capture_by_stream.teacher.echo_suppression_recent_rate`
 - ingest WS supports `capture_status` frames from desktop and persists them into session state.
 - `utterances view=merged` uses overlap-aware merge (`merged v2`), not exact-string-only dedup.
+- `confirm + null` is blocked in inference policy; unnamed outcomes are normalized to `unknown`.
+- enrollment and mapping state is persisted in:
+  - `state.participant_profiles`
+  - `state.cluster_binding_meta`
+  - `state.enrollment_state`
 
 ## 6. Smoke Commands
 
@@ -105,6 +117,16 @@ python /Users/billthechurch/Interview-feedback/scripts/smoke_asr_worker.py \
   --view merged \
   --min-utterances 50 \
   --max-windows 1
+```
+
+Enrollment + manual mapping:
+
+```bash
+curl -sS -X POST "https://api.frontierace.ai/v1/sessions/<session_id>/enrollment/start" \
+  -H "content-type: application/json" \
+  -d '{"participants":[{"name":"Alice"},{"name":"Bob"}]}' | jq
+
+curl -sS "https://api.frontierace.ai/v1/sessions/<session_id>/unresolved-clusters" | jq
 ```
 
 ## 7. Deploy

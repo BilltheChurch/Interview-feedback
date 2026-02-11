@@ -79,7 +79,7 @@ class BinderPolicy:
                 decision = "auto"
                 speaker_name = existing_name
             else:
-                decision = "confirm"
+                decision = "unknown"
                 speaker_name = None
         else:
             if candidate_name is not None:

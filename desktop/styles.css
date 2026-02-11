@@ -109,6 +109,43 @@ body {
   margin: 0;
 }
 
+.cluster-map-list {
+  display: grid;
+  gap: 10px;
+}
+
+.cluster-map-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.7fr) minmax(260px, 1fr);
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: #f9fbff;
+}
+
+.cluster-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.cluster-actions {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.cluster-actions select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.small {
+  font-size: 12px;
+}
+
 .advanced-box {
   margin: 8px 0 10px;
   padding: 8px 10px;
@@ -225,6 +262,10 @@ audio {
   }
 
   .participant-row {
+    grid-template-columns: 1fr;
+  }
+
+  .cluster-map-row {
     grid-template-columns: 1fr;
   }
 }

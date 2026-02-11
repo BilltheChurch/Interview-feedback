@@ -16,6 +16,8 @@ artifacts/
 # Secrets / local config
 inference/.env
 cloudflare/tunnel/config.yml
+cloudflare/tunnel/*.log
+cloudflare/tunnel/*.pid
 
 # Large model cache and runtime artifacts
 .cache/

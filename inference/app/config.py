@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     sv_t_low: float = Field(default=0.45, alias="SV_T_LOW")
     sv_t_high: float = Field(default=0.70, alias="SV_T_HIGH")
     cluster_match_threshold: float = Field(default=0.45, alias="CLUSTER_MATCH_THRESHOLD")
+    profile_auto_threshold: float = Field(default=0.72, alias="PROFILE_AUTO_THRESHOLD")
+    profile_confirm_threshold: float = Field(default=0.60, alias="PROFILE_CONFIRM_THRESHOLD")
+    profile_margin_threshold: float = Field(default=0.08, alias="PROFILE_MARGIN_THRESHOLD")
+    enrollment_ready_seconds: float = Field(default=12.0, alias="ENROLLMENT_READY_SECONDS")
+    enrollment_ready_samples: int = Field(default=3, alias="ENROLLMENT_READY_SAMPLES")
 
     audio_sr: int = Field(default=16000, alias="AUDIO_SR")
     max_audio_seconds: int = Field(default=30, alias="MAX_AUDIO_SECONDS")
@@ -50,6 +55,12 @@ def get_settings() -> Settings:
     settings = Settings()
     if settings.sv_t_high <= settings.sv_t_low:
         raise ValueError("SV_T_HIGH must be greater than SV_T_LOW")
+    if settings.profile_auto_threshold < settings.profile_confirm_threshold:
+        raise ValueError("PROFILE_AUTO_THRESHOLD must be >= PROFILE_CONFIRM_THRESHOLD")
+    if settings.enrollment_ready_seconds <= 0:
+        raise ValueError("ENROLLMENT_READY_SECONDS must be greater than 0")
+    if settings.enrollment_ready_samples <= 0:
+        raise ValueError("ENROLLMENT_READY_SAMPLES must be greater than 0")
     if settings.vad_frame_ms not in {10, 20, 30}:
         raise ValueError("VAD_FRAME_MS must be one of: 10, 20, 30")
     if settings.max_request_body_bytes <= 0:

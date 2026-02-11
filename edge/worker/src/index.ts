@@ -28,12 +28,53 @@ interface ClusterState {
   bound_name?: string | null;
 }
 
+interface ParticipantProfile {
+  name: string;
+  email?: string | null;
+  centroid: number[];
+  sample_count: number;
+  sample_seconds: number;
+  status: "collecting" | "ready";
+}
+
+interface BindingMeta {
+  participant_name: string;
+  source: "enrollment_match" | "name_extract" | "manual_map";
+  confidence: number;
+  locked: boolean;
+  updated_at: string;
+}
+
+interface EnrollmentParticipantProgress {
+  name: string;
+  sample_seconds: number;
+  sample_count: number;
+  status: "collecting" | "ready";
+}
+
+interface EnrollmentUnassignedProgress {
+  sample_seconds: number;
+  sample_count: number;
+}
+
+interface EnrollmentState {
+  mode: "idle" | "collecting" | "ready" | "closed";
+  started_at?: string | null;
+  stopped_at?: string | null;
+  participants: Record<string, EnrollmentParticipantProgress>;
+  unassigned_clusters: Record<string, EnrollmentUnassignedProgress>;
+  updated_at: string;
+}
+
 interface SessionState {
   clusters: ClusterState[];
   bindings: Record<string, string>;
   roster?: RosterEntry[];
   capture_by_stream?: Record<StreamRole, CaptureState>;
   config: Record<string, string | number | boolean>;
+  participant_profiles: ParticipantProfile[];
+  cluster_binding_meta: Record<string, BindingMeta>;
+  enrollment_state: EnrollmentState;
 }
 
 interface SessionConfigRequest {
@@ -59,6 +100,11 @@ interface ResolveEvidence {
   segment_count: number;
   name_hit?: string | null;
   roster_hit?: boolean | null;
+  profile_top_name?: string | null;
+  profile_top_score?: number | null;
+  profile_margin?: number | null;
+  binding_source?: string | null;
+  reason?: string | null;
 }
 
 interface ResolveResponse {
@@ -73,14 +119,53 @@ interface ResolveResponse {
 interface SpeakerEvent {
   ts: string;
   stream_role: StreamRole;
-  source: "inference_resolve" | "teacher_direct";
-  identity_source?: "teams_participants" | "preconfig" | "name_extract" | "teacher" | "inference_resolve" | null;
+  source: "inference_resolve" | "teacher_direct" | "manual_map";
+  identity_source?:
+    | "teams_participants"
+    | "preconfig"
+    | "name_extract"
+    | "teacher"
+    | "inference_resolve"
+    | "enrollment_match"
+    | "manual_map"
+    | null;
   utterance_id?: string | null;
   cluster_id?: string | null;
   speaker_name?: string | null;
   decision?: "auto" | "confirm" | "unknown" | null;
   evidence?: ResolveEvidence | null;
   note?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+interface EnrollmentStartRequest {
+  participants?: Array<RosterEntry | string>;
+  teams_participants?: Array<RosterEntry | string>;
+  interviewer_name?: string;
+  teams_interviewer_name?: string;
+}
+
+interface ClusterMapRequest {
+  stream_role?: StreamRole;
+  cluster_id: string;
+  participant_name: string;
+  lock?: boolean;
+}
+
+interface InferenceEnrollRequest {
+  session_id: string;
+  participant_name: string;
+  audio: AudioPayload;
+  state: SessionState;
+}
+
+interface InferenceEnrollResponse {
+  session_id: string;
+  participant_name: string;
+  embedding_dim: number;
+  sample_seconds: number;
+  profile_updated: boolean;
+  updated_state: SessionState;
 }
 
 interface FinalizeRequest {
@@ -218,6 +303,8 @@ interface Env {
   INFERENCE_API_KEY?: string;
   INFERENCE_TIMEOUT_MS?: string;
   INFERENCE_RESOLVE_PATH?: string;
+  INFERENCE_ENROLL_PATH?: string;
+  INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
   ASR_ENABLED?: string;
   ASR_MODEL?: string;
@@ -237,10 +324,14 @@ const DEFAULT_STATE: SessionState = {
   clusters: [],
   bindings: {},
   capture_by_stream: defaultCaptureByStream(),
-  config: {}
+  config: {},
+  participant_profiles: [],
+  cluster_binding_meta: {},
+  enrollment_state: buildDefaultEnrollmentState()
 };
 
-const SESSION_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events)$/;
+const SESSION_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters)$/;
+const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state)$/;
 const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
 const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
 
@@ -429,6 +520,20 @@ function truncatePcm16WavToSeconds(
   }
 
   return pcm16ToWavBytes(pcm.subarray(0, maxPcmBytes), sampleRate, channels);
+}
+
+function tailPcm16BytesToWavForSeconds(
+  pcmBytes: Uint8Array,
+  seconds: number,
+  sampleRate = TARGET_SAMPLE_RATE,
+  channels = TARGET_CHANNELS
+): Uint8Array {
+  const maxPcmBytes = Math.max(ONE_SECOND_PCM_BYTES, Math.floor(seconds * sampleRate * channels * 2));
+  if (pcmBytes.byteLength <= maxPcmBytes) {
+    return pcm16ToWavBytes(pcmBytes, sampleRate, channels);
+  }
+  const offset = Math.max(0, pcmBytes.byteLength - maxPcmBytes);
+  return pcm16ToWavBytes(pcmBytes.subarray(offset), sampleRate, channels);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -797,6 +902,16 @@ function parseCaptureStatusPayload(
   };
 }
 
+function identitySourceFromBindingSource(
+  value: string | null | undefined
+): SpeakerEvent["identity_source"] {
+  if (!value) return "inference_resolve";
+  if (value === "enrollment_match") return "enrollment_match";
+  if (value === "name_extract") return "name_extract";
+  if (value === "manual_map") return "manual_map";
+  return "inference_resolve";
+}
+
 function buildIngestState(sessionId: string): IngestState {
   const now = new Date().toISOString();
   return {
@@ -845,6 +960,17 @@ function buildDefaultCaptureState(): CaptureState {
   };
 }
 
+function buildDefaultEnrollmentState(): EnrollmentState {
+  return {
+    mode: "idle",
+    started_at: null,
+    stopped_at: null,
+    participants: {},
+    unassigned_clusters: {},
+    updated_at: new Date().toISOString()
+  };
+}
+
 function defaultCaptureByStream(): Record<StreamRole, CaptureState> {
   return {
     mixed: buildDefaultCaptureState(),
@@ -878,6 +1004,23 @@ function normalizeSessionState(state: SessionState | null | undefined): SessionS
   merged.clusters = Array.isArray(merged.clusters) ? merged.clusters : [];
   merged.bindings = merged.bindings && typeof merged.bindings === "object" ? merged.bindings : {};
   merged.config = merged.config && typeof merged.config === "object" ? merged.config : {};
+  merged.participant_profiles = Array.isArray(merged.participant_profiles) ? merged.participant_profiles : [];
+  merged.cluster_binding_meta =
+    merged.cluster_binding_meta && typeof merged.cluster_binding_meta === "object" ? merged.cluster_binding_meta : {};
+  const enrollment = merged.enrollment_state ?? buildDefaultEnrollmentState();
+  merged.enrollment_state = {
+    mode: ["idle", "collecting", "ready", "closed"].includes(String(enrollment.mode))
+      ? enrollment.mode
+      : "idle",
+    started_at: enrollment.started_at ?? null,
+    stopped_at: enrollment.stopped_at ?? null,
+    participants: enrollment.participants && typeof enrollment.participants === "object" ? enrollment.participants : {},
+    unassigned_clusters:
+      enrollment.unassigned_clusters && typeof enrollment.unassigned_clusters === "object"
+        ? enrollment.unassigned_clusters
+        : {},
+    updated_at: new Date().toISOString()
+  };
   const capture = merged.capture_by_stream ?? defaultCaptureByStream();
   merged.capture_by_stream = {
     mixed: sanitizeCaptureState(capture.mixed),
@@ -1012,6 +1155,29 @@ export default {
       return proxyWebSocketToDO(request, env, sessionId, "mixed");
     }
 
+    const enrollMatch = path.match(SESSION_ENROLL_ROUTE_REGEX);
+    if (enrollMatch) {
+      const [, rawSessionId, enrollAction] = enrollMatch;
+      let sessionId: string;
+      try {
+        sessionId = safeSessionId(rawSessionId);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+
+      const action = `enrollment-${enrollAction}`;
+      if (action === "enrollment-start" && request.method !== "POST") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      if (action === "enrollment-stop" && request.method !== "POST") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      if (action === "enrollment-state" && request.method !== "GET") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      return proxyToDO(request, env, sessionId, action);
+    }
+
     const match = path.match(SESSION_ROUTE_REGEX);
     if (!match) {
       return jsonResponse({ detail: "route not found" }, 404);
@@ -1048,6 +1214,12 @@ export default {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
     if (action === "events" && request.method !== "GET") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "cluster-map" && request.method !== "POST") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "unresolved-clusters" && request.method !== "GET") {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
 
@@ -1088,6 +1260,129 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   private asrDebugEnabled(): boolean {
     return parseBool(this.env.ASR_DEBUG_LOG_EVENTS, false);
+  }
+
+  private resolveAudioWindowSeconds(): number {
+    const configured = parsePositiveInt(this.env.INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS, 6);
+    return Math.max(1, Math.min(INFERENCE_MAX_AUDIO_SECONDS, configured));
+  }
+
+  private currentIsoTs(): string {
+    return new Date().toISOString();
+  }
+
+  private scoreNumber(value: number | null | undefined): number {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return -1;
+    }
+    return value;
+  }
+
+  private participantProgressFromProfiles(state: SessionState): Record<string, EnrollmentParticipantProgress> {
+    const out: Record<string, EnrollmentParticipantProgress> = {};
+    for (const profile of state.participant_profiles ?? []) {
+      const key = profile.name.trim().toLowerCase();
+      if (!key) continue;
+      out[key] = {
+        name: profile.name,
+        sample_seconds: Number.isFinite(profile.sample_seconds) ? Number(profile.sample_seconds) : 0,
+        sample_count: Number.isFinite(profile.sample_count) ? Number(profile.sample_count) : 0,
+        status: profile.status === "ready" ? "ready" : "collecting"
+      };
+    }
+    return out;
+  }
+
+  private refreshEnrollmentMode(state: SessionState): void {
+    const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
+    const participants = enrollment.participants ?? {};
+    const keys = Object.keys(participants);
+    const allReady = keys.length > 0 && keys.every((key) => participants[key].status === "ready");
+    if (enrollment.mode === "collecting" && allReady) {
+      enrollment.mode = "ready";
+    }
+    enrollment.updated_at = this.currentIsoTs();
+    state.enrollment_state = enrollment;
+  }
+
+  private rosterNameByCandidate(state: SessionState, candidate: string | null): string | null {
+    if (!candidate) return null;
+    const normalized = candidate.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (!normalized) return null;
+    const roster = state.roster ?? [];
+    let fuzzy: string | null = null;
+    for (const item of roster) {
+      const rosterNorm = item.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+      if (!rosterNorm) continue;
+      if (rosterNorm === normalized) {
+        return item.name;
+      }
+      if (normalized.length >= 4 && (normalized.includes(rosterNorm) || rosterNorm.includes(normalized))) {
+        fuzzy = item.name;
+      }
+    }
+    return fuzzy;
+  }
+
+  private inferParticipantFromText(state: SessionState, asrText: string): string | null {
+    const extracted = extractNameFromText(asrText);
+    return this.rosterNameByCandidate(state, extracted);
+  }
+
+  private updateUnassignedEnrollmentByCluster(
+    state: SessionState,
+    clusterId: string | null | undefined,
+    durationSeconds: number
+  ): void {
+    if (!clusterId || durationSeconds <= 0) return;
+    const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
+    const current = enrollment.unassigned_clusters[clusterId] ?? { sample_seconds: 0, sample_count: 0 };
+    current.sample_seconds += durationSeconds;
+    current.sample_count += 1;
+    enrollment.unassigned_clusters[clusterId] = current;
+    enrollment.updated_at = this.currentIsoTs();
+    state.enrollment_state = enrollment;
+  }
+
+  private async callInferenceEnroll(
+    sessionId: string,
+    participantName: string,
+    audio: AudioPayload,
+    state: SessionState
+  ): Promise<InferenceEnrollResponse> {
+    const enrollPath = this.env.INFERENCE_ENROLL_PATH ?? "/speaker/enroll";
+    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(baseUrl + enrollPath, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.env.INFERENCE_API_KEY ? { "x-api-key": this.env.INFERENCE_API_KEY } : {})
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          participant_name: participantName,
+          audio,
+          state
+        } satisfies InferenceEnrollRequest),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    const payloadText = await response.text();
+    if (!response.ok) {
+      throw new Error(`inference enroll non-success: status=${response.status} body=${payloadText.slice(0, 240)}`);
+    }
+    try {
+      return JSON.parse(payloadText) as InferenceEnrollResponse;
+    } catch {
+      throw new Error("inference enroll returned non-JSON response");
+    }
   }
 
   private buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime {
@@ -1621,10 +1916,21 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
 
     if (streamRole === "students") {
+      let resolvedInfo:
+        | {
+            cluster_id: string;
+            speaker_name: string | null;
+            decision: "auto" | "confirm" | "unknown";
+            evidence: ResolveEvidence | null;
+          }
+        | null = null;
       try {
         const chunkRange = await this.loadChunkRange(sessionId, streamRole, startSeq, endSeq);
-        const wavBytes = pcm16ToWavBytes(concatUint8Arrays(chunkRange));
-        await this.autoResolveStudentsUtterance(sessionId, utterance, wavBytes);
+        const mergedPcm = concatUint8Arrays(chunkRange);
+        const resolveWav = tailPcm16BytesToWavForSeconds(mergedPcm, this.resolveAudioWindowSeconds());
+        resolvedInfo = await this.autoResolveStudentsUtterance(sessionId, utterance, resolveWav);
+        const enrollWav = pcm16ToWavBytes(mergedPcm);
+        await this.maybeAutoEnrollStudentsUtterance(sessionId, utterance, enrollWav, resolvedInfo);
       } catch (error) {
         await this.appendSpeakerEvent({
           ts: new Date().toISOString(),
@@ -1636,7 +1942,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
           speaker_name: null,
           decision: "unknown",
           evidence: null,
-          note: `students auto-resolve failed: ${(error as Error).message}`
+          note: `students auto-resolve failed: ${(error as Error).message}`,
+          metadata: {
+            profile_score: resolvedInfo?.evidence?.profile_top_score ?? null,
+            profile_margin: resolvedInfo?.evidence?.profile_margin ?? null,
+            binding_locked: false
+          }
         });
       }
     } else if (streamRole === "teacher") {
@@ -2044,13 +2355,18 @@ export class MeetingSessionDO extends DurableObject<Env> {
     sessionId: string,
     utterance: UtteranceRaw,
     wavBytes: Uint8Array
-  ): Promise<void> {
+  ): Promise<{
+    cluster_id: string;
+    speaker_name: string | null;
+    decision: "auto" | "confirm" | "unknown";
+    evidence: ResolveEvidence | null;
+  } | null> {
     if (!utterance.text.trim()) {
-      return;
+      return null;
     }
 
     const currentState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-    const safeWavBytes = truncatePcm16WavToSeconds(wavBytes, INFERENCE_MAX_AUDIO_SECONDS);
+    const safeWavBytes = truncatePcm16WavToSeconds(wavBytes, this.resolveAudioWindowSeconds());
     const audioPayload: AudioPayload = {
       content_b64: bytesToBase64(safeWavBytes),
       format: "wav",
@@ -2075,13 +2391,79 @@ export class MeetingSessionDO extends DurableObject<Env> {
       ts: new Date().toISOString(),
       stream_role: "students",
       source: "inference_resolve",
-      identity_source: "inference_resolve",
+      identity_source: identitySourceFromBindingSource(resolved.evidence.binding_source),
       utterance_id: utterance.utterance_id,
       cluster_id: resolved.cluster_id,
       speaker_name: boundSpeakerName,
       decision: resolved.decision,
-      evidence: resolved.evidence
+      evidence: resolved.evidence,
+      metadata: {
+        profile_score: resolved.evidence.profile_top_score ?? null,
+        profile_margin: resolved.evidence.profile_margin ?? null,
+        binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false
+      }
     });
+    return {
+      cluster_id: resolved.cluster_id,
+      speaker_name: boundSpeakerName,
+      decision: resolved.decision,
+      evidence: resolved.evidence ?? null
+    };
+  }
+
+  private async maybeAutoEnrollStudentsUtterance(
+    sessionId: string,
+    utterance: UtteranceRaw,
+    wavBytes: Uint8Array,
+    resolved:
+      | {
+          cluster_id: string;
+          speaker_name: string | null;
+          decision: "auto" | "confirm" | "unknown";
+          evidence: ResolveEvidence | null;
+        }
+      | null
+  ): Promise<void> {
+    const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+    const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
+    if (enrollment.mode !== "collecting" && enrollment.mode !== "ready") {
+      return;
+    }
+    const durationSeconds = Math.max(1, utterance.duration_ms / 1000);
+    let participantName =
+      this.inferParticipantFromText(state, utterance.text) ??
+      (resolved?.speaker_name ? this.rosterNameByCandidate(state, resolved.speaker_name) : null);
+
+    if (!participantName) {
+      this.updateUnassignedEnrollmentByCluster(state, resolved?.cluster_id, durationSeconds);
+      await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+      await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+      return;
+    }
+
+    const enrollAudio: AudioPayload = {
+      content_b64: bytesToBase64(truncatePcm16WavToSeconds(wavBytes, INFERENCE_MAX_AUDIO_SECONDS)),
+      format: "wav",
+      sample_rate: TARGET_SAMPLE_RATE,
+      channels: TARGET_CHANNELS
+    };
+    const enrollResult = await this.callInferenceEnroll(sessionId, participantName, enrollAudio, state);
+    const nextState = normalizeSessionState({
+      ...enrollResult.updated_state,
+      capture_by_stream: state.capture_by_stream
+    });
+    const progress = this.participantProgressFromProfiles(nextState);
+    nextState.enrollment_state = {
+      ...(nextState.enrollment_state ?? buildDefaultEnrollmentState()),
+      mode: "collecting",
+      started_at: nextState.enrollment_state?.started_at ?? this.currentIsoTs(),
+      stopped_at: null,
+      participants: progress,
+      updated_at: this.currentIsoTs()
+    };
+    this.refreshEnrollmentMode(nextState);
+    await this.ctx.storage.put(STORAGE_KEY_STATE, nextState);
+    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
   }
 
   private resolveTeacherIdentity(state: SessionState, asrText: string): { speakerName: string; identitySource: NonNullable<SpeakerEvent["identity_source"]> } {
@@ -2672,6 +3054,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
         ingest: ingestStatusPayload(sessionId, "mixed", ingestByStream.mixed),
         ingest_by_stream: this.ingestByStreamPayload(sessionId, ingestByStream),
         capture_by_stream: normalizedState.capture_by_stream,
+        enrollment_state: normalizedState.enrollment_state,
+        participant_profiles: normalizedState.participant_profiles,
+        cluster_binding_meta: normalizedState.cluster_binding_meta,
         asr: asrByStream.mixed,
         asr_by_stream: asrByStream,
         utterance_count: utteranceCountByStream.mixed,
@@ -2718,6 +3103,193 @@ export class MeetingSessionDO extends DurableObject<Env> {
           config: state.config,
           roster: state.roster ?? []
         });
+      });
+    }
+
+    if (action === "enrollment-start" && request.method === "POST") {
+      let payload: EnrollmentStartRequest;
+      try {
+        payload = await readJson<EnrollmentStartRequest>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      return this.enqueueMutation(async () => {
+        const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const config = { ...(state.config ?? {}) };
+        const teamsInterviewerName = valueAsString(payload.teams_interviewer_name);
+        const interviewerName = valueAsString(payload.interviewer_name);
+        if (teamsInterviewerName) {
+          config.teams_interviewer_name = teamsInterviewerName;
+        }
+        if (interviewerName) {
+          config.interviewer_name = interviewerName;
+          if (!teamsInterviewerName) {
+            config.teams_interviewer_name = interviewerName;
+          }
+        }
+        state.config = config;
+
+        const roster = parseRosterEntries(payload.participants ?? payload.teams_participants);
+        if (roster.length > 0) {
+          state.roster = roster;
+        }
+
+        const participants: Record<string, EnrollmentParticipantProgress> = {};
+        for (const item of state.roster ?? []) {
+          const key = item.name.trim().toLowerCase();
+          if (!key) continue;
+          participants[key] = {
+            name: item.name,
+            sample_seconds: 0,
+            sample_count: 0,
+            status: "collecting"
+          };
+        }
+
+        state.enrollment_state = {
+          mode: "collecting",
+          started_at: this.currentIsoTs(),
+          stopped_at: null,
+          participants,
+          unassigned_clusters: {},
+          updated_at: this.currentIsoTs()
+        };
+        await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+        await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+        return jsonResponse({
+          session_id: sessionId,
+          enrollment_state: state.enrollment_state,
+          roster_count: state.roster?.length ?? 0
+        });
+      });
+    }
+
+    if (action === "enrollment-stop" && request.method === "POST") {
+      return this.enqueueMutation(async () => {
+        const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
+        enrollment.mode = "closed";
+        enrollment.stopped_at = this.currentIsoTs();
+        enrollment.updated_at = this.currentIsoTs();
+        state.enrollment_state = enrollment;
+        await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+        await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+        return jsonResponse({
+          session_id: sessionId,
+          enrollment_state: state.enrollment_state
+        });
+      });
+    }
+
+    if (action === "enrollment-state" && request.method === "GET") {
+      const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+      const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
+      return jsonResponse({
+        session_id: sessionId,
+        enrollment_state: enrollment,
+        participant_profiles: state.participant_profiles
+      });
+    }
+
+    if (action === "cluster-map" && request.method === "POST") {
+      let payload: ClusterMapRequest;
+      try {
+        payload = await readJson<ClusterMapRequest>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      const streamRole = parseStreamRole(payload.stream_role ?? "students", "students");
+      if (streamRole !== "students") {
+        return badRequest("cluster-map only supports stream_role=students");
+      }
+      const clusterId = String(payload.cluster_id ?? "").trim();
+      const participantNameRaw = String(payload.participant_name ?? "").trim();
+      if (!clusterId || !participantNameRaw) {
+        return badRequest("cluster_id and participant_name are required");
+      }
+      return this.enqueueMutation(async () => {
+        const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const participantName = this.rosterNameByCandidate(state, participantNameRaw) ?? participantNameRaw;
+        const now = this.currentIsoTs();
+        state.bindings[clusterId] = participantName;
+        for (const cluster of state.clusters) {
+          if (cluster.cluster_id === clusterId) {
+            cluster.bound_name = participantName;
+            break;
+          }
+        }
+        state.cluster_binding_meta[clusterId] = {
+          participant_name: participantName,
+          source: "manual_map",
+          confidence: 1,
+          locked: payload.lock !== false,
+          updated_at: now
+        };
+        if (state.enrollment_state?.unassigned_clusters?.[clusterId]) {
+          delete state.enrollment_state.unassigned_clusters[clusterId];
+          state.enrollment_state.updated_at = now;
+        }
+        await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+        await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, now);
+        await this.appendSpeakerEvent({
+          ts: now,
+          stream_role: "students",
+          source: "manual_map",
+          identity_source: "manual_map",
+          utterance_id: null,
+          cluster_id: clusterId,
+          speaker_name: participantName,
+          decision: "auto",
+          evidence: null,
+          note: `cluster ${clusterId} mapped to ${participantName}`,
+          metadata: {
+            binding_locked: payload.lock !== false
+          }
+        });
+        return jsonResponse({
+          session_id: sessionId,
+          cluster_id: clusterId,
+          participant_name: participantName,
+          binding_locked: payload.lock !== false,
+          cluster_binding_meta: state.cluster_binding_meta[clusterId]
+        });
+      });
+    }
+
+    if (action === "unresolved-clusters" && request.method === "GET") {
+      const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+      const events = await this.loadSpeakerEvents();
+      const utterances = await this.loadUtterancesRawByStream();
+      const utteranceById = new Map(utterances.students.map((item) => [item.utterance_id, item]));
+      const recentStudentEvents = events.filter((item) => item.stream_role === "students");
+      const latestByCluster = new Map<string, SpeakerEvent>();
+      for (const event of recentStudentEvents) {
+        if (!event.cluster_id) continue;
+        latestByCluster.set(event.cluster_id, event);
+      }
+      const items = state.clusters
+        .map((cluster) => {
+          const meta = state.cluster_binding_meta[cluster.cluster_id];
+          const latest = latestByCluster.get(cluster.cluster_id);
+          const utterance =
+            latest?.utterance_id && utteranceById.has(latest.utterance_id) ? utteranceById.get(latest.utterance_id) : null;
+          const unresolved = !state.bindings[cluster.cluster_id] || (meta ? !meta.locked : true);
+          return {
+            cluster_id: cluster.cluster_id,
+            sample_count: cluster.sample_count,
+            bound_name: cluster.bound_name ?? null,
+            unresolved,
+            binding_meta: meta ?? null,
+            latest_decision: latest?.decision ?? null,
+            latest_text: utterance?.text ?? null,
+            latest_ts: latest?.ts ?? null
+          };
+        })
+        .filter((item) => item.unresolved || item.latest_decision === "unknown");
+      return jsonResponse({
+        session_id: sessionId,
+        count: items.length,
+        items
       });
     }
 
@@ -2906,12 +3478,17 @@ export class MeetingSessionDO extends DurableObject<Env> {
           ts: new Date().toISOString(),
           stream_role: streamRole,
           source: "inference_resolve",
-          identity_source: "inference_resolve",
+          identity_source: identitySourceFromBindingSource(resolved.evidence.binding_source),
           utterance_id: null,
           cluster_id: resolved.cluster_id,
           speaker_name: boundSpeakerName,
           decision: resolved.decision,
-          evidence: resolved.evidence
+          evidence: resolved.evidence,
+          metadata: {
+            profile_score: resolved.evidence.profile_top_score ?? null,
+            profile_margin: resolved.evidence.profile_margin ?? null,
+            binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false
+          }
         });
 
         if (scopedIdemKey) {
@@ -2953,6 +3530,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
         ingest: ingestStatusPayload(sessionId, "mixed", ingestByStream.mixed),
         ingest_by_stream: this.ingestByStreamPayload(sessionId, ingestByStream),
         capture_by_stream: normalizedState.capture_by_stream,
+        enrollment_state: normalizedState.enrollment_state,
+        participant_profiles: normalizedState.participant_profiles,
+        cluster_binding_meta: normalizedState.cluster_binding_meta,
         asr: asrByStream.mixed,
         asr_by_stream: asrByStream,
         utterances_raw: rawByStream.mixed,

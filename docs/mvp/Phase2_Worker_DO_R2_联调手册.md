@@ -34,7 +34,12 @@ wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 - `GET /v1/audio/ws/:session_id`
 - `GET /v1/audio/ws/:session_id/:stream_role`
 - `POST /v1/sessions/:session_id/config`
+- `POST /v1/sessions/:session_id/enrollment/start`
+- `POST /v1/sessions/:session_id/enrollment/stop`
+- `GET /v1/sessions/:session_id/enrollment/state`
 - `GET /v1/sessions/:session_id/events?stream_role=...&limit=...`
+- `POST /v1/sessions/:session_id/cluster-map`
+- `GET /v1/sessions/:session_id/unresolved-clusters`
 - `GET /v1/sessions/:session_id/state`
 - `GET /v1/sessions/:session_id/utterances?stream_role=...&view=raw|merged&limit=...`
 - `POST /v1/sessions/:session_id/resolve?stream_role=...`
@@ -63,6 +68,17 @@ wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 - `teams_interviewer_name`
 - `interviewer_name`
 
+Enrollment 启动请求（开场引导采样）：
+
+```bash
+curl -sS -X POST "https://api.frontierace.ai/v1/sessions/<session_id>/enrollment/start" \
+  -H "content-type: application/json" \
+  -d '{
+    "participants":[{"name":"Alice"},{"name":"Bob"}],
+    "interviewer_name":"Bill"
+  }' | jq
+```
+
 WS 运行时可追加上报：
 - `type=capture_status`（Desktop 采集健康指标）
 
@@ -85,6 +101,11 @@ WS 运行时可追加上报：
 - `echo_suppressed_chunks`（teacher）
 - `echo_suppression_recent_rate`（teacher）
 
+`state` 还包含：
+- `participant_profiles`
+- `cluster_binding_meta`
+- `enrollment_state`
+
 ## 7. 联调步骤
 
 1) 启动/部署 Worker。
@@ -95,6 +116,7 @@ WS 运行时可追加上报：
 6) `GET /utterances` 查看 `raw|merged`。
 7) `GET /events` 查看 `identity_source`。
 8) `POST /finalize`，在 R2 确认 `result.json`。
+9) 对未绑定 cluster 使用 `GET /unresolved-clusters` + `POST /cluster-map` 做人工兜底。
 
 ## 8. 验收重点
 
@@ -104,5 +126,5 @@ WS 运行时可追加上报：
 - students 自动 resolve 失败不阻断 ASR 主链
 - capture 状态可追踪（students 自动恢复计数、teacher 去串音抑制计数）
 - 事件阅读口径：
-  - `decision=confirm` 且 `speaker_name=null` 不等于失败；应结合 `cluster_id` 解读
-  - UI 层应以 `speaker_name || cluster_id` 展示，避免把“未命名 cluster”误读为“全部 unknown”
+  - `decision=confirm` 不允许 `speaker_name=null`（Inference 已强约束）
+  - 手动映射后应出现 `identity_source=manual_map` 且 `cluster_binding_meta.<id>.locked=true`

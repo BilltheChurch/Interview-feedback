@@ -16,6 +16,8 @@ from app.exceptions import (
 )
 from app.runtime import build_runtime
 from app.schemas import (
+    EnrollRequest,
+    EnrollResponse,
     DiarizeRequest,
     DiarizeResponse,
     ErrorResponse,
@@ -165,6 +167,16 @@ async def resolve_speaker(req: ResolveRequest) -> ResolveResponse:
         session_id=req.session_id,
         audio_payload=req.audio,
         asr_text=req.asr_text,
+        state=req.state,
+    )
+
+
+@app.post("/speaker/enroll", response_model=EnrollResponse)
+async def enroll_speaker(req: EnrollRequest) -> EnrollResponse:
+    return runtime.orchestrator.enroll(
+        session_id=req.session_id,
+        participant_name=req.participant_name,
+        audio_payload=req.audio,
         state=req.state,
     )
 

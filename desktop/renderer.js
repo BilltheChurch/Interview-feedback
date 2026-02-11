@@ -29,6 +29,8 @@ const playbackEl = document.querySelector("#playback");
 const selectedFileEl = document.querySelector("#selected-file");
 const interviewerNameEl = document.querySelector("#interviewer-name");
 const captureHealthEl = document.querySelector("#capture-health");
+const enrollmentStatusEl = document.querySelector("#enrollment-status");
+const clusterMapListEl = document.querySelector("#cluster-map-list");
 const participantListEl = document.querySelector("#participant-list");
 const btnParticipantAdd = document.querySelector("#btn-participant-add");
 const btnParticipantImport = document.querySelector("#btn-participant-import");
@@ -55,7 +57,10 @@ const btnStartUpload = document.querySelector("#btn-start-upload");
 const btnStopUpload = document.querySelector("#btn-stop-upload");
 const btnFetchUploadStatus = document.querySelector("#btn-fetch-upload-status");
 const btnSaveSessionConfig = document.querySelector("#btn-save-session-config");
+const btnEnrollmentStart = document.querySelector("#btn-enrollment-start");
+const btnEnrollmentStop = document.querySelector("#btn-enrollment-stop");
 const btnRefreshLive = document.querySelector("#btn-refresh-live");
+const btnRefreshClusters = document.querySelector("#btn-refresh-clusters");
 
 let micStream;
 let systemCaptureStream;
@@ -250,6 +255,15 @@ function parseParticipantsFromUI() {
     out.push(email ? { name, email } : { name });
   }
   return out;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function effectiveInterviewerNames() {
@@ -1356,6 +1370,135 @@ function formatEvents(response) {
   return [header, ...lines].join("\n");
 }
 
+function renderEnrollmentStatus(payload) {
+  if (!enrollmentStatusEl) return;
+  const state = payload?.enrollment_state || {};
+  const participants = state.participants || {};
+  const rows = Object.values(participants)
+    .slice(0, 20)
+    .map((item) => {
+      const seconds = Number.isFinite(item.sample_seconds) ? Number(item.sample_seconds).toFixed(1) : "0.0";
+      const count = Number.isFinite(item.sample_count) ? Number(item.sample_count) : 0;
+      return `${item.name}: ${seconds}s / ${count} samples / ${item.status}`;
+    });
+  enrollmentStatusEl.textContent = [
+    `mode=${state.mode || "idle"}`,
+    `started_at=${state.started_at || "-"}`,
+    `stopped_at=${state.stopped_at || "-"}`,
+    ...rows
+  ].join("\n");
+}
+
+function participantNamesForMapping(statePayload) {
+  const names = [];
+  const seen = new Set();
+  const fromUi = parseParticipantsFromUI();
+  for (const item of fromUi) {
+    const name = String(item.name || "").trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  const roster = statePayload?.state?.roster || [];
+  for (const item of roster) {
+    const name = String(item?.name || "").trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+}
+
+function renderClusterMappings(unresolvedPayload, statePayload) {
+  if (!clusterMapListEl) return;
+  const items = unresolvedPayload?.items || [];
+  const candidates = participantNamesForMapping(statePayload);
+  if (!items.length) {
+    clusterMapListEl.innerHTML = `<p class="muted">No unresolved clusters.</p>`;
+    return;
+  }
+  const optionsHtml = candidates
+    .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
+    .join("");
+  const rows = items.map((item) => {
+    const suggested = String(item.bound_name || item.binding_meta?.participant_name || "");
+    const selectedValue = suggested ? `data-selected="${escapeHtml(suggested)}"` : "";
+    const text = item.latest_text ? escapeHtml(item.latest_text).slice(0, 200) : "";
+    const locked = item.binding_meta?.locked === true;
+    return `
+      <div class="cluster-map-row">
+        <div class="cluster-meta">
+          <div><strong>${escapeHtml(item.cluster_id)}</strong> sample_count=${escapeHtml(item.sample_count)}</div>
+          <div class="muted small">latest_decision=${escapeHtml(item.latest_decision || "-")} latest_ts=${escapeHtml(item.latest_ts || "-")}</div>
+          <div class="muted small">latest_text=${text || "-"}</div>
+        </div>
+        <div class="cluster-actions">
+          <select class="cluster-map-select" ${selectedValue}>${optionsHtml}</select>
+          <label class="switch-line"><input class="cluster-map-lock" type="checkbox" ${locked ? "checked" : ""} /> lock</label>
+          <button class="cluster-map-apply" data-cluster-id="${escapeHtml(item.cluster_id)}">Bind</button>
+        </div>
+      </div>
+    `;
+  });
+  clusterMapListEl.innerHTML = rows.join("");
+  for (const selectEl of clusterMapListEl.querySelectorAll(".cluster-map-select")) {
+    const selected = selectEl.getAttribute("data-selected");
+    if (selected) {
+      selectEl.value = selected;
+    }
+  }
+}
+
+async function startEnrollment() {
+  const names = effectiveInterviewerNames();
+  const body = {
+    participants: validateParticipantsInput(),
+    interviewer_name: names.interviewerName,
+    teams_interviewer_name: names.teamsInterviewerName
+  };
+  const payload = await apiRequest("enrollment/start", "POST", body);
+  renderEnrollmentStatus(payload);
+  setResultPayload(payload);
+  logLine(`Enrollment started. participants=${Object.keys(payload.enrollment_state?.participants || {}).length}`);
+}
+
+async function stopEnrollment() {
+  const payload = await apiRequest("enrollment/stop", "POST", {});
+  renderEnrollmentStatus(payload);
+  setResultPayload(payload);
+  logLine(`Enrollment stopped. mode=${payload.enrollment_state?.mode || "unknown"}`);
+}
+
+async function refreshUnresolvedClusters(statePayload = null) {
+  const unresolved = await apiRequest("unresolved-clusters", "GET");
+  renderClusterMappings(unresolved, statePayload);
+  return unresolved;
+}
+
+async function applyClusterMappingFromButton(buttonEl) {
+  const rowEl = buttonEl.closest(".cluster-map-row");
+  if (!rowEl) return;
+  const clusterId = String(buttonEl.dataset.clusterId || "").trim();
+  const selectEl = rowEl.querySelector(".cluster-map-select");
+  const lockEl = rowEl.querySelector(".cluster-map-lock");
+  const participantName = String(selectEl?.value || "").trim();
+  if (!clusterId || !participantName) {
+    throw new Error("cluster_id or participant_name is empty");
+  }
+  const payload = await apiRequest("cluster-map", "POST", {
+    stream_role: "students",
+    cluster_id: clusterId,
+    participant_name: participantName,
+    lock: Boolean(lockEl?.checked)
+  });
+  setResultPayload(payload);
+  logLine(`Cluster mapped: ${clusterId} -> ${participantName} lock=${Boolean(lockEl?.checked)}`);
+}
+
 async function saveSessionConfig() {
   const names = effectiveInterviewerNames();
   const body = {
@@ -1369,13 +1512,15 @@ async function saveSessionConfig() {
 }
 
 async function refreshLiveView() {
-  const [state, teacherRaw, teacherMerged, studentsRaw, studentsMerged, events] = await Promise.all([
+  const [state, teacherRaw, teacherMerged, studentsRaw, studentsMerged, events, enrollmentState, unresolved] = await Promise.all([
     apiRequest("state", "GET"),
     apiRequest("utterances?stream_role=teacher&view=raw&limit=50", "GET"),
     apiRequest("utterances?stream_role=teacher&view=merged&limit=50", "GET"),
     apiRequest("utterances?stream_role=students&view=raw&limit=50", "GET"),
     apiRequest("utterances?stream_role=students&view=merged&limit=50", "GET"),
-    apiRequest("events?limit=100", "GET")
+    apiRequest("events?limit=100", "GET"),
+    apiRequest("enrollment/state", "GET"),
+    apiRequest("unresolved-clusters", "GET")
   ]);
 
   liveTranscriptEl.textContent = [
@@ -1394,6 +1539,8 @@ async function refreshLiveView() {
     `ASR Students: ${JSON.stringify(state.asr_by_stream?.students || {})}`
   ].join("\n");
   speakerEventsEl.textContent = formatEvents(events);
+  renderEnrollmentStatus(enrollmentState);
+  renderClusterMappings(unresolved, state);
   setResultPayload(state);
 }
 
@@ -1580,6 +1727,30 @@ function bindEvents() {
     }
   });
 
+  if (btnEnrollmentStart) {
+    btnEnrollmentStart.addEventListener("click", async () => {
+      try {
+        await startEnrollment();
+        await refreshLiveView();
+      } catch (error) {
+        logLine(`Start enrollment failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnEnrollmentStop) {
+    btnEnrollmentStop.addEventListener("click", async () => {
+      try {
+        await stopEnrollment();
+        await refreshLiveView();
+      } catch (error) {
+        logLine(`Stop enrollment failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
   btnRefreshLive.addEventListener("click", async () => {
     try {
       await refreshLiveView();
@@ -1602,6 +1773,34 @@ function bindEvents() {
       if (pasted === null) return;
       const count = importParticipantsFromLines(pasted);
       logLine(`Imported participants: ${count}`);
+    });
+  }
+
+  if (btnRefreshClusters) {
+    btnRefreshClusters.addEventListener("click", async () => {
+      try {
+        await refreshUnresolvedClusters();
+        logLine("Unresolved clusters refreshed.");
+      } catch (error) {
+        logLine(`Refresh unresolved clusters failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (clusterMapListEl) {
+    clusterMapListEl.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const buttonEl = target.closest(".cluster-map-apply");
+      if (!buttonEl) return;
+      try {
+        await applyClusterMappingFromButton(buttonEl);
+        await refreshLiveView();
+      } catch (error) {
+        logLine(`Apply cluster mapping failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
     });
   }
 }

@@ -60,6 +60,8 @@ Desktop capture requirement (from PRD): run dual-input capture in meeting mode.
   - `students`: system stream
 - Desktop Phase 2.3 view now includes:
   - `Session Config` (single interviewer + participants list UI; no JSON typing required)
+  - `Enrollment` controls (start/stop + participant progress)
+  - `Cluster Mapping` (unresolved students cluster -> participant bind/lock)
   - `Live Transcript` (`raw` + `merged`)
   - `Speaker Events` (with `identity_source`)
   - capture health (`capture_by_stream`) and auto-recovery status
@@ -128,6 +130,25 @@ node /Users/billthechurch/Interview-feedback/scripts/ws_ingest_smoke.mjs \
 ```bash
 curl -sS "https://api.frontierace.ai/v1/sessions/realtime-check/state" | jq
 curl -sS "https://api.frontierace.ai/v1/sessions/realtime-check/events?limit=50" | jq
+```
+
+## Enrollment + Mapping (Phase 2.3.1)
+
+```bash
+curl -sS -X POST "https://api.frontierace.ai/v1/sessions/realtime-check/enrollment/start" \
+  -H "content-type: application/json" \
+  -d '{"participants":[{"name":"Alice"},{"name":"Bob"}],"interviewer_name":"Bill"}' | jq
+```
+
+```bash
+curl -sS "https://api.frontierace.ai/v1/sessions/realtime-check/enrollment/state" | jq
+curl -sS "https://api.frontierace.ai/v1/sessions/realtime-check/unresolved-clusters" | jq
+```
+
+```bash
+curl -sS -X POST "https://api.frontierace.ai/v1/sessions/realtime-check/cluster-map" \
+  -H "content-type: application/json" \
+  -d '{"stream_role":"students","cluster_id":"c2","participant_name":"Alice","lock":true}' | jq
 ```
 
 ## Worker ASR Backfill (Model Re-run)

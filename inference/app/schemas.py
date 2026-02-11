@@ -39,6 +39,23 @@ class RosterEntry(BaseModel):
     email: str | None = None
 
 
+class ParticipantProfile(BaseModel):
+    name: str
+    email: str | None = None
+    centroid: list[float]
+    sample_count: int = Field(default=1, ge=1)
+    sample_seconds: float = Field(default=0, ge=0)
+    status: Literal["collecting", "ready"] = "collecting"
+
+
+class BindingMeta(BaseModel):
+    participant_name: str
+    source: Literal["enrollment_match", "name_extract", "manual_map"]
+    confidence: float = Field(default=0, ge=-1, le=1)
+    locked: bool = False
+    updated_at: str
+
+
 class ClusterState(BaseModel):
     cluster_id: str
     centroid: list[float]
@@ -51,6 +68,8 @@ class SessionState(BaseModel):
     bindings: dict[str, str] = Field(default_factory=dict)
     roster: list[RosterEntry] | None = None
     config: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    participant_profiles: list[ParticipantProfile] = Field(default_factory=list)
+    cluster_binding_meta: dict[str, BindingMeta] = Field(default_factory=dict)
 
 
 class ResolveRequest(BaseModel):
@@ -67,6 +86,11 @@ class ResolveEvidence(BaseModel):
     segment_count: int
     name_hit: str | None = None
     roster_hit: bool | None = None
+    profile_top_name: str | None = None
+    profile_top_score: float | None = None
+    profile_margin: float | None = None
+    binding_source: str | None = None
+    reason: str | None = None
 
 
 class ResolveResponse(BaseModel):
@@ -75,6 +99,22 @@ class ResolveResponse(BaseModel):
     speaker_name: str | None = None
     decision: Literal["auto", "confirm", "unknown"]
     evidence: ResolveEvidence
+    updated_state: SessionState
+
+
+class EnrollRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    participant_name: str = Field(min_length=1, max_length=128)
+    audio: AudioPayload
+    state: SessionState = Field(default_factory=SessionState)
+
+
+class EnrollResponse(BaseModel):
+    session_id: str
+    participant_name: str
+    embedding_dim: int
+    sample_seconds: float
+    profile_updated: bool
     updated_state: SessionState
 
 
