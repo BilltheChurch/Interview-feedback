@@ -39,6 +39,7 @@ def test_binder_confirm_when_mid_score_with_name() -> None:
 
     assert result.decision == "confirm"
     assert result.speaker_name == "Bob"
+    assert "c2" not in state.bindings
 
 
 def test_binder_unknown_when_low_score() -> None:
@@ -76,3 +77,22 @@ def test_binder_confirm_when_low_score_with_name() -> None:
 
     assert result.decision == "confirm"
     assert result.speaker_name == "Bob"
+
+
+def test_binder_does_not_persist_low_confidence_confirm_name() -> None:
+    policy = BinderPolicy(threshold_low=0.45, threshold_high=0.70)
+    state = SessionState(
+        clusters=[ClusterState(cluster_id="c5", centroid=[0.3, 0.7], sample_count=1)],
+        bindings={},
+    )
+
+    result = policy.decide(
+        state=state,
+        cluster_id="c5",
+        sv_score=0.55,
+        name_candidates=[NameCandidate(name="Maybe Name", confidence=0.60)],
+    )
+
+    assert result.decision == "confirm"
+    assert result.speaker_name == "Maybe Name"
+    assert "c5" not in state.bindings

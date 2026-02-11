@@ -2065,6 +2065,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     });
     await this.ctx.storage.put(STORAGE_KEY_STATE, mergedState);
     await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
+    const boundSpeakerName =
+      resolved.speaker_name ??
+      mergedState.bindings[resolved.cluster_id] ??
+      mergedState.clusters.find((item) => item.cluster_id === resolved.cluster_id)?.bound_name ??
+      null;
 
     await this.appendSpeakerEvent({
       ts: new Date().toISOString(),
@@ -2073,7 +2078,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       identity_source: "inference_resolve",
       utterance_id: utterance.utterance_id,
       cluster_id: resolved.cluster_id,
-      speaker_name: resolved.speaker_name ?? null,
+      speaker_name: boundSpeakerName,
       decision: resolved.decision,
       evidence: resolved.evidence
     });
@@ -2888,6 +2893,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
           capture_by_stream: currentState.capture_by_stream
         });
         resolved.updated_state = mergedState;
+        const boundSpeakerName =
+          resolved.speaker_name ??
+          mergedState.bindings[resolved.cluster_id] ??
+          mergedState.clusters.find((item) => item.cluster_id === resolved.cluster_id)?.bound_name ??
+          null;
+        resolved.speaker_name = boundSpeakerName;
         await this.ctx.storage.put(STORAGE_KEY_STATE, mergedState);
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
 
@@ -2898,7 +2909,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           identity_source: "inference_resolve",
           utterance_id: null,
           cluster_id: resolved.cluster_id,
-          speaker_name: resolved.speaker_name ?? null,
+          speaker_name: boundSpeakerName,
           decision: resolved.decision,
           evidence: resolved.evidence
         });

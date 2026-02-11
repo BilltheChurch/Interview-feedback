@@ -103,3 +103,6 @@ WS 运行时可追加上报：
 - teacher 事件身份来源可追踪（`identity_source`）
 - students 自动 resolve 失败不阻断 ASR 主链
 - capture 状态可追踪（students 自动恢复计数、teacher 去串音抑制计数）
+- 事件阅读口径：
+  - `decision=confirm` 且 `speaker_name=null` 不等于失败；应结合 `cluster_id` 解读
+  - UI 层应以 `speaker_name || cluster_id` 展示，避免把“未命名 cluster”误读为“全部 unknown”

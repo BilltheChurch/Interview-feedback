@@ -7,9 +7,12 @@ const CHUNK_SAMPLES = 16000; // 1 second @ 16kHz mono
 const RECORDING_TIMEOUT_MS = 30_000;
 const CAPTURE_STALL_TIMEOUT_MS = 5_000;
 const RECOVERY_BACKOFF_MS = [1000, 2000, 5000];
-const ECHO_CORR_THRESHOLD = 0.82;
-const ECHO_MAX_LAG_MS = 120;
-const ECHO_TEACHER_STUDENT_RMS_RATIO = 0.8;
+const ECHO_CORR_THRESHOLD = 0.72;
+const ECHO_STRONG_CORR_THRESHOLD = 0.90;
+const ECHO_MAX_LAG_MS = 180;
+const ECHO_TEACHER_STUDENT_RMS_RATIO = 1.35;
+const ECHO_TEACHER_DOMINANT_RMS_RATIO = 2.20;
+const ECHO_STUDENT_MIN_RMS = 0.010;
 const ECHO_RECENT_WINDOW = 120;
 const UPLOAD_STREAM_ROLES = ["teacher", "students"];
 
@@ -794,11 +797,20 @@ function maybeSuppressTeacherChunk(samples, timestampMs) {
     }
   }
 
+  const hasStudentEnergy = best.studentRms >= ECHO_STUDENT_MIN_RMS;
   const ratioThreshold = best.studentRms > 0 ? best.studentRms * ECHO_TEACHER_STUDENT_RMS_RATIO : 0;
-  const shouldSuppress =
+  const teacherDominant =
+    best.studentRms > 0 && teacherRms >= best.studentRms * ECHO_TEACHER_DOMINANT_RMS_RATIO;
+  const hardLeak =
+    hasStudentEnergy &&
+    best.corr >= ECHO_STRONG_CORR_THRESHOLD &&
+    Math.abs(best.lagMs) <= ECHO_MAX_LAG_MS;
+  const softLeak =
+    hasStudentEnergy &&
     best.corr >= ECHO_CORR_THRESHOLD &&
     Math.abs(best.lagMs) <= ECHO_MAX_LAG_MS &&
     teacherRms <= ratioThreshold;
+  const shouldSuppress = !teacherDominant && (hardLeak || softLeak);
 
   markEchoSuppression(shouldSuppress);
   if (!shouldSuppress) {
@@ -814,9 +826,12 @@ function maybeSuppressTeacherChunk(samples, timestampMs) {
     },
     { skipTimestamp: true }
   );
+  const rmsRatio = best.studentRms > 0 ? teacherRms / best.studentRms : Number.POSITIVE_INFINITY;
+  const mode = hardLeak ? "hard" : "soft";
   logLine(
-    `Teacher echo suppressed: corr=${best.corr.toFixed(3)} lag_ms=${Math.round(best.lagMs)} ` +
-      `teacher_rms=${teacherRms.toFixed(4)} student_rms=${best.studentRms.toFixed(4)}`
+    `Teacher echo suppressed (${mode}): corr=${best.corr.toFixed(3)} lag_ms=${Math.round(best.lagMs)} ` +
+      `teacher_rms=${teacherRms.toFixed(4)} student_rms=${best.studentRms.toFixed(4)} ratio=` +
+      `${Number.isFinite(rmsRatio) ? rmsRatio.toFixed(2) : "inf"}`
   );
   return { chunk: new Int16Array(samples.length), suppressed: true };
 }
@@ -1334,7 +1349,7 @@ function formatEvents(response) {
   const header = `events count=${response.count}`;
   const lines = (response.items || []).slice(-20).map((item) => {
     const source = item.identity_source ? `/${item.identity_source}` : "";
-    const name = item.speaker_name || "unknown";
+    const name = item.speaker_name || (item.cluster_id ? `cluster:${item.cluster_id}` : "unknown");
     const decision = item.decision || "n/a";
     return `${item.ts} [${item.stream_role}] ${item.source}${source} -> ${name} (${decision})`;
   });

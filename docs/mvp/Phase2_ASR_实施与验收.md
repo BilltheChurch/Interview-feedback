@@ -41,6 +41,21 @@ DashScope WS 事件映射（Worker 目前按以下策略解析）：
 - `echo_suppressed_chunks`（teacher）
 - `echo_suppression_recent_rate`（teacher）
 
+## 3.2 teams-test2 复盘与修正（2026-02-11）
+
+已确认问题：
+- 无耳机场景下 teacher/students 文本高重合，`teams-test2` 中重合比例约 `21/23`（students utterance 与 teacher 同时段高相似）。
+- students 事件并非“后半段全 unknown”，真实统计是 `confirm=21`、`unknown=2`；但当 `speaker_name` 为空时 UI 显示为 `unknown`，造成误读。
+
+已落地修正：
+- Desktop 去串音改为双策略：
+  - hard suppress：高相关强抑制
+  - soft suppress：中相关 + RMS 比判定
+  - teacher 主导保护：teacher RMS 显著高于 students 时不抑制，避免误杀
+- Inference 姓名抽取规则收紧：过滤非姓名短语（如 `studying in...` / `from ...`）。
+- Binder 增强：高置信度自我介绍姓名（`>=0.93`）可在 `confirm` 决策下固化到 cluster 绑定。
+- Desktop Speaker Events 展示：无 `speaker_name` 时显示 `cluster:<id>`，避免视觉“全 unknown”。
+
 ## 4. merged v2（展示视图）
 
 - `raw`：保持原始 utterance（不可改写）

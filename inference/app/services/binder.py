@@ -47,7 +47,9 @@ class BinderPolicy:
     ) -> BindResult:
         cluster = self._find_cluster(state.clusters, cluster_id)
         existing_name = state.bindings.get(cluster_id) or (cluster.bound_name if cluster else None)
-        candidate_name = name_candidates[0].name if name_candidates else None
+        top_candidate = name_candidates[0] if name_candidates else None
+        candidate_name = top_candidate.name if top_candidate else None
+        candidate_confidence = top_candidate.confidence if top_candidate else 0.0
 
         name_hit = candidate_name or existing_name
         roster_hit = self._roster_hit(candidate_name, state)
@@ -90,7 +92,14 @@ class BinderPolicy:
                 decision = "unknown"
                 speaker_name = None
 
-        if cluster and speaker_name and decision == "auto":
+        should_persist_binding = decision == "auto" or (
+            decision == "confirm"
+            and existing_name is None
+            and candidate_name is not None
+            and speaker_name == candidate_name
+            and candidate_confidence >= 0.93
+        )
+        if cluster and speaker_name and should_persist_binding:
             cluster.bound_name = speaker_name
             state.bindings[cluster_id] = speaker_name
 

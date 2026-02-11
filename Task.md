@@ -71,6 +71,9 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [x] Session Config UX 去 JSON 化：单 interviewer 字段 + participants 列表增删/批量导入
 - [x] Worker 状态扩展：`state.capture_by_stream` + ingest WS `capture_status` 上报
 - [x] Worker 配置兼容：`teams_participants` 支持 `[{name,email?}]` 与 `string[]`
+- [x] Inference 姓名抽取纠偏：过滤非姓名短语（如 `studying in...`），减少误绑定
+- [x] Students 事件稳定展示：无 `speaker_name` 时前端展示 `cluster:<id>`，避免误判“全部 unknown”
+- [x] Teacher 去串音阈值重调：`hard+soft` 双判定 + teacher 主导保护，增强无耳机场景抑制
 
 ### Phase 2.3 验收标准（当前）
 - [x] `health` 显示 `asr_realtime_enabled=true`
@@ -81,6 +84,7 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [ ] 真实 Teams 5~10 分钟实机验证（含 latency 门禁）
 - [ ] 真实 Teams 容错验证：手动触发 system/mic track ended 后，另一流持续上传且可 re-init 恢复双流
 - [ ] 真实 Teams 无耳机验收：teacher/students 重复转写率下降 >= 60%
+- [ ] `teams-test2` 修复回归：`echo_suppressed_chunks > 0` 且 students 事件不再出现“全 unknown”视觉假象
 
 ## 4. 已完成基础能力（供后续阶段复用）
 - [x] Inference FastAPI + Docker + 模型版本固定 + smoke 回归
@@ -216,6 +220,15 @@ Validation Date: 2026-02-11
   - `GET /state` -> `capture_by_stream.students.capture_state=recovering`, `recover_attempts=3`
   - `GET /state` -> `capture_by_stream.teacher.echo_suppressed_chunks=17`
   - `finalize result.json` 含 `capture_by_stream`
+- [x] `cd inference && pytest -q`（name resolver + binder hotfix）-> `16 passed`
+- [x] `cd edge/worker && npm run typecheck`（students event bound name 回填）-> 通过
+- [x] `cd desktop && node --check renderer.js`（echo suppression 阈值重调）-> 通过
+- [x] `cd inference && docker compose up -d --build` -> 本地推理容器已重建并启动
+- [x] `cd edge/worker && npm run deploy`（teams-test2 hotfix）-> 已发布（Version ID: `6ccf270a-5037-4e1a-8490-56985148047e`）
+- [x] 线上诊断 `teams-test2`（会话复盘）：
+  - `students raw=23`，与 `teacher` 同时段高重合（Jaccard>=0.6）`21/23`，确认串音显著
+  - `students events`：`confirm=21`、`unknown=2`，并非后半段全部 unknown
+  - 根因之一：`speaker_name` 为空时前端统一显示 `unknown`，已修复为显示 `cluster:<id>`
 
 ## 6. 当前阻塞与处理
 - `pnpm` 在 Node v25 + corepack 环境出现签名校验错误（keyid mismatch）。
