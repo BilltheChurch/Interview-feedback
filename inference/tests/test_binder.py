@@ -57,3 +57,22 @@ def test_binder_unknown_when_low_score() -> None:
 
     assert result.decision == "unknown"
     assert result.speaker_name is None
+
+
+def test_binder_confirm_when_low_score_with_name() -> None:
+    policy = BinderPolicy(threshold_low=0.45, threshold_high=0.70)
+    state = SessionState(
+        clusters=[ClusterState(cluster_id="c4", centroid=[0.2, 0.8], sample_count=1)],
+        bindings={},
+        roster=[RosterEntry(name="Bob", email=None)],
+    )
+
+    result = policy.decide(
+        state=state,
+        cluster_id="c4",
+        sv_score=0.2,
+        name_candidates=[NameCandidate(name="Bob", confidence=0.9)],
+    )
+
+    assert result.decision == "confirm"
+    assert result.speaker_name == "Bob"

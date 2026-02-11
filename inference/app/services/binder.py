@@ -56,8 +56,15 @@ class BinderPolicy:
         speaker_name: str | None = existing_name
 
         if sv_score < self._threshold_low:
-            decision = "unknown"
-            speaker_name = existing_name
+            if candidate_name is not None:
+                decision = "confirm"
+                speaker_name = candidate_name
+            elif existing_name is not None:
+                decision = "confirm"
+                speaker_name = existing_name
+            else:
+                decision = "unknown"
+                speaker_name = None
         elif sv_score >= self._threshold_high:
             if candidate_name is not None:
                 if roster_hit is False:

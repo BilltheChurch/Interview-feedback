@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
 import threading
 import wave
 from dataclasses import dataclass
@@ -95,6 +96,7 @@ class ModelScopeSVBackend:
             preferred_keys = (
                 "embedding",
                 "embeddings",
+                "embs",
                 "spk_embedding",
                 "speaker_embedding",
                 "xvector",
@@ -129,30 +131,39 @@ class ModelScopeSVBackend:
 
         pipeline = self._ensure_pipeline()
         wav_bytes = self._pack_wav(samples=samples, sample_rate=sample_rate)
+        audio_array = np.ascontiguousarray(samples.astype(np.float32))
+
+        temp_wav_path: str | None = None
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(wav_bytes)
+            temp_wav_path = tmp_file.name
 
         request_variants = [
-            {"audio": wav_bytes, "sample_rate": sample_rate, "output_embedding": True},
-            {"audio": wav_bytes, "output_embedding": True},
-            wav_bytes,
+            [audio_array],
+            [temp_wav_path],
         ]
 
         last_error: Exception | None = None
-        for request in request_variants:
-            try:
-                output = pipeline(request)
-                embedding = self._find_embedding(output)
-                if embedding is None:
+        try:
+            for request in request_variants:
+                try:
+                    output = pipeline(request, output_emb=True)
+                    embedding = self._find_embedding(output)
+                    if embedding is None:
+                        continue
+                    if embedding.ndim != 1:
+                        embedding = embedding.reshape(-1)
+                    if embedding.size == 0:
+                        continue
+                    vector = embedding.astype(np.float32)
+                    self._embedding_dim = int(vector.size)
+                    return vector
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
                     continue
-                if embedding.ndim != 1:
-                    embedding = embedding.reshape(-1)
-                if embedding.size == 0:
-                    continue
-                vector = embedding.astype(np.float32)
-                self._embedding_dim = int(vector.size)
-                return vector
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                continue
+        finally:
+            if temp_wav_path and os.path.exists(temp_wav_path):
+                os.unlink(temp_wav_path)
 
         if last_error is not None:
             raise SVBackendError(f"speaker embedding extraction failed: {last_error}") from last_error
