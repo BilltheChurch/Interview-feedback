@@ -5,6 +5,12 @@ const TARGET_CHANNELS = 1;
 const TARGET_FORMAT = "pcm_s16le";
 const CHUNK_SAMPLES = 16000; // 1 second @ 16kHz mono
 const RECORDING_TIMEOUT_MS = 30_000;
+const CAPTURE_STALL_TIMEOUT_MS = 5_000;
+const RECOVERY_BACKOFF_MS = [1000, 2000, 5000];
+const ECHO_CORR_THRESHOLD = 0.82;
+const ECHO_MAX_LAG_MS = 120;
+const ECHO_TEACHER_STUDENT_RMS_RATIO = 0.8;
+const ECHO_RECENT_WINDOW = 120;
 const UPLOAD_STREAM_ROLES = ["teacher", "students"];
 
 const appInfoEl = document.querySelector("#app-info");
@@ -19,8 +25,14 @@ const logsEl = document.querySelector("#logs");
 const playbackEl = document.querySelector("#playback");
 const selectedFileEl = document.querySelector("#selected-file");
 const interviewerNameEl = document.querySelector("#interviewer-name");
+const captureHealthEl = document.querySelector("#capture-health");
+const participantListEl = document.querySelector("#participant-list");
+const btnParticipantAdd = document.querySelector("#btn-participant-add");
+const btnParticipantImport = document.querySelector("#btn-participant-import");
 const teamsInterviewerNameEl = document.querySelector("#teams-interviewer-name");
-const teamsParticipantsEl = document.querySelector("#teams-participants");
+const micAecEl = document.querySelector("#mic-aec");
+const micNsEl = document.querySelector("#mic-ns");
+const micAgcEl = document.querySelector("#mic-agc");
 
 const meterMicBarEl = document.querySelector("#meter-mic-bar");
 const meterMicValueEl = document.querySelector("#meter-mic-value");
@@ -77,6 +89,29 @@ const uploadQueue = { teacher: [], students: [] };
 const uploadQueueSamples = { teacher: 0, students: 0 };
 const uploadStartedAtMs = { teacher: 0, students: 0 };
 const uploadClosing = { teacher: false, students: false };
+const lastAudioProcessAtMs = { teacher: 0, students: 0 };
+const recentStudentsChunks = [];
+const recentEchoSuppression = [];
+let lastCaptureHealthTickMs = 0;
+let suppressAutoRecover = false;
+let studentsRecoveryTimer;
+
+const captureMetrics = {
+  teacher: {
+    capture_state: "idle",
+    recover_attempts: 0,
+    last_recover_at: null,
+    last_recover_error: null,
+    echo_suppressed_chunks: 0,
+    echo_suppression_recent_rate: 0
+  },
+  students: {
+    capture_state: "idle",
+    recover_attempts: 0,
+    last_recover_at: null,
+    last_recover_error: null
+  }
+};
 let livePollTimer;
 
 function logLine(message) {
@@ -139,11 +174,96 @@ function updateButtons() {
   }
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function renderCaptureHealth() {
+  if (!captureHealthEl) return;
+  const teacher = captureMetrics.teacher;
+  const students = captureMetrics.students;
+  const lines = [
+    `teacher=${teacher.capture_state}, suppressed=${teacher.echo_suppressed_chunks}, recent_rate=${(teacher.echo_suppression_recent_rate * 100).toFixed(1)}%`,
+    `students=${students.capture_state}, recover_attempts=${students.recover_attempts}, last_recover_error=${students.last_recover_error || "none"}`
+  ];
+  captureHealthEl.textContent = lines.join(" | ");
+}
+
+function updateCaptureMetrics(role, patch, options = {}) {
+  const target = captureMetrics[role];
+  Object.assign(target, patch);
+  if (!options.skipTimestamp && (patch.capture_state || patch.last_recover_error !== undefined)) {
+    target.last_recover_at = nowIso();
+  }
+  renderCaptureHealth();
+  emitCaptureStatus(role);
+}
+
+function participantRows() {
+  if (!participantListEl) return [];
+  return Array.from(participantListEl.querySelectorAll(".participant-row"));
+}
+
+function addParticipantRow(initial = {}) {
+  if (!participantListEl) return;
+  const row = document.createElement("div");
+  row.className = "participant-row";
+  row.innerHTML = `
+    <input class="participant-name" type="text" placeholder="Name" value="${String(initial.name || "").replace(/"/g, "&quot;")}" />
+    <input class="participant-email" type="text" placeholder="Email (optional)" value="${String(initial.email || "").replace(/"/g, "&quot;")}" />
+    <button type="button" class="participant-remove">Remove</button>
+  `;
+  const removeBtn = row.querySelector(".participant-remove");
+  removeBtn.addEventListener("click", () => {
+    row.remove();
+  });
+  participantListEl.appendChild(row);
+}
+
+function importParticipantsFromLines(rawText) {
+  const lines = String(rawText || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!lines.length) return 0;
+  for (const line of lines) {
+    addParticipantRow({ name: line });
+  }
+  return lines.length;
+}
+
+function parseParticipantsFromUI() {
+  const out = [];
+  const dedup = new Set();
+  for (const row of participantRows()) {
+    const nameInput = row.querySelector(".participant-name");
+    const emailInput = row.querySelector(".participant-email");
+    const name = String(nameInput?.value || "").trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (dedup.has(key)) continue;
+    dedup.add(key);
+    const email = String(emailInput?.value || "").trim();
+    out.push(email ? { name, email } : { name });
+  }
+  return out;
+}
+
+function effectiveInterviewerNames() {
+  const interviewerName = String(interviewerNameEl.value || "").trim();
+  const teamsInterviewerInput = String(teamsInterviewerNameEl.value || "").trim();
+  const teamsInterviewerName = teamsInterviewerInput || interviewerName || undefined;
+  return {
+    interviewerName: interviewerName || undefined,
+    teamsInterviewerName
+  };
+}
+
 function setMeter(analyser, barEl, valueEl) {
   if (!analyser) {
     barEl.style.width = "0%";
     valueEl.textContent = "0%";
-    return;
+    return 0;
   }
 
   const sampleArray = new Uint8Array(analyser.fftSize);
@@ -159,12 +279,72 @@ function setMeter(analyser, barEl, valueEl) {
   const percent = Math.min(100, Math.max(0, Math.round(rms * 220)));
   barEl.style.width = `${percent}%`;
   valueEl.textContent = `${percent}%`;
+  return percent;
+}
+
+function isStudentsSocketWritable() {
+  const ws = uploadSockets.students;
+  return Boolean(ws && uploadSocketReady.students && ws.readyState === window.WebSocket.OPEN);
+}
+
+function scheduleStudentsRecovery(reason) {
+  if (studentsRecoveryTimer || suppressAutoRecover) {
+    return;
+  }
+  const attempts = captureMetrics.students.recover_attempts + 1;
+  const backoffIdx = Math.min(RECOVERY_BACKOFF_MS.length - 1, Math.max(0, attempts - 1));
+  const delay = RECOVERY_BACKOFF_MS[backoffIdx];
+  captureMetrics.students.recover_attempts = attempts;
+  updateCaptureMetrics("students", {
+    capture_state: "recovering",
+    last_recover_error: reason
+  });
+  setUploadStatus(`Recovering system audio in ${Math.round(delay / 1000)}s...`);
+  logLine(`System audio recovery scheduled: attempt=${attempts}, delay_ms=${delay}, reason=${reason}`);
+
+  studentsRecoveryTimer = window.setTimeout(async () => {
+    studentsRecoveryTimer = undefined;
+    try {
+      await initSystemStream({ manual: false, reason: `auto-recover:${reason}` });
+      updateCaptureMetrics("students", {
+        capture_state: "running",
+        last_recover_error: null
+      });
+      setUploadStatus("System audio recovered.");
+      logLine("System audio recovered automatically.");
+    } catch (error) {
+      const detail = error?.message || String(error);
+      logLine(`System audio auto-recover failed: ${detail}`);
+      updateCaptureMetrics("students", {
+        capture_state: "failed",
+        last_recover_error: detail
+      });
+      if (isAnyUploadActive()) {
+        scheduleStudentsRecovery(detail);
+      }
+    }
+  }, delay);
+}
+
+function checkCaptureHealth(nowMs) {
+  if (!isAnyUploadActive()) return;
+  if (!systemAudioStream || captureMetrics.students.capture_state === "recovering") return;
+  if (!isStudentsSocketWritable()) return;
+  const stalledMs = nowMs - (lastAudioProcessAtMs.students || 0);
+  if (lastAudioProcessAtMs.students > 0 && stalledMs >= CAPTURE_STALL_TIMEOUT_MS) {
+    scheduleStudentsRecovery(`students audio callback stalled ${Math.round(stalledMs)}ms`);
+  }
 }
 
 function updateMeterLoop() {
   setMeter(micAnalyserNode, meterMicBarEl, meterMicValueEl);
   setMeter(systemAnalyserNode, meterSystemBarEl, meterSystemValueEl);
   setMeter(mixedAnalyserNode, meterMixedBarEl, meterMixedValueEl);
+  const nowMs = Date.now();
+  if (nowMs - lastCaptureHealthTickMs >= 1000) {
+    lastCaptureHealthTickMs = nowMs;
+    checkCaptureHealth(nowMs);
+  }
   meterFrameId = window.requestAnimationFrame(updateMeterLoop);
 }
 
@@ -265,6 +445,11 @@ function releaseSystemStream() {
     stopTracks(systemCaptureStream);
     systemCaptureStream = undefined;
   }
+
+  if (studentsRecoveryTimer) {
+    window.clearTimeout(studentsRecoveryTimer);
+    studentsRecoveryTimer = undefined;
+  }
 }
 
 async function initMicStream() {
@@ -274,9 +459,9 @@ async function initMicStream() {
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false
+      echoCancellation: Boolean(micAecEl?.checked ?? true),
+      noiseSuppression: Boolean(micNsEl?.checked ?? true),
+      autoGainControl: Boolean(micAgcEl?.checked ?? false)
     },
     video: false
   });
@@ -291,6 +476,10 @@ async function initMicStream() {
     logLine("Microphone track ended.");
     releaseMicStream();
     resetUploadQueue("teacher");
+    updateCaptureMetrics("teacher", {
+      capture_state: "failed",
+      last_recover_error: "microphone track ended"
+    });
     if (isAnyUploadActive()) {
       setUploadStatus("Upload degraded: mic track ended. Click Init Mic to resume teacher stream.");
     }
@@ -304,12 +493,20 @@ async function initMicStream() {
   });
 
   attachMicStream(micStream);
+  lastAudioProcessAtMs.teacher = Date.now();
+  updateCaptureMetrics("teacher", {
+    capture_state: "running",
+    last_recover_error: null
+  });
 }
 
-async function initSystemStream() {
+async function initSystemStream({ manual = true, reason = "manual-init" } = {}) {
   if (systemAudioStream) return;
 
   await ensureAudioGraph();
+  if (manual) {
+    await desktopAPI.clearPreferredCaptureSource();
+  }
   const displayStream = await navigator.mediaDevices.getDisplayMedia({
     video: true,
     audio: true
@@ -333,8 +530,13 @@ async function initSystemStream() {
     logLine("System audio track ended.");
     releaseSystemStream();
     resetUploadQueue("students");
+    updateCaptureMetrics("students", {
+      capture_state: "failed",
+      last_recover_error: "system audio track ended"
+    });
     if (isAnyUploadActive()) {
       setUploadStatus("Upload degraded: system audio ended. Click Init System Audio to resume students stream.");
+      scheduleStudentsRecovery("track-ended");
     }
     if (mediaRecorder && mediaRecorder.state === "recording") {
       stopRecordingInternal("system-track-ended").catch((error) => {
@@ -345,7 +547,33 @@ async function initSystemStream() {
     updateButtons();
   });
 
+  audioTrack.addEventListener("mute", () => {
+    logLine("System audio track muted.");
+    if (isAnyUploadActive()) {
+      scheduleStudentsRecovery("track-muted");
+    }
+  });
+
+  audioTrack.addEventListener("unmute", () => {
+    logLine("System audio track unmuted.");
+    updateCaptureMetrics("students", {
+      capture_state: "running",
+      last_recover_error: null
+    });
+  });
+
   attachSystemStream(systemAudioStream);
+  if (studentsRecoveryTimer) {
+    window.clearTimeout(studentsRecoveryTimer);
+    studentsRecoveryTimer = undefined;
+  }
+  lastAudioProcessAtMs.students = Date.now();
+  updateCaptureMetrics("students", {
+    capture_state: "running",
+    last_recover_error: null
+  });
+  const sourceInfo = await desktopAPI.getPreferredCaptureSource().catch(() => ({ preferredSourceId: null }));
+  logLine(`System audio stream initialized (${reason}); source=${sourceInfo?.preferredSourceId || "unknown"}`);
 }
 
 function ensureDualInputReady() {
@@ -459,13 +687,189 @@ function renderUploadStatus() {
   setUploadStatus(`Live upload: ${teacher} | ${students}`);
 }
 
+function int16Rms(samples) {
+  if (!samples || samples.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const normalized = samples[i] / 32768;
+    sum += normalized * normalized;
+  }
+  return Math.sqrt(sum / samples.length);
+}
+
+function downsampleInt16ForCorr(samples, targetLength = 400) {
+  const output = new Float32Array(targetLength);
+  const ratio = samples.length / targetLength;
+  for (let i = 0; i < targetLength; i += 1) {
+    const start = Math.floor(i * ratio);
+    const end = Math.max(start + 1, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    let count = 0;
+    for (let j = start; j < end && j < samples.length; j += 1) {
+      sum += samples[j] / 32768;
+      count += 1;
+    }
+    output[i] = count > 0 ? sum / count : 0;
+  }
+  return output;
+}
+
+function normalizedCrossCorrelation(a, b, maxLagSamples) {
+  let bestCorr = -1;
+  let bestLag = 0;
+  for (let lag = -maxLagSamples; lag <= maxLagSamples; lag += 1) {
+    let sumAB = 0;
+    let sumA2 = 0;
+    let sumB2 = 0;
+    for (let i = 0; i < a.length; i += 1) {
+      const j = i + lag;
+      if (j < 0 || j >= b.length) continue;
+      const av = a[i];
+      const bv = b[j];
+      sumAB += av * bv;
+      sumA2 += av * av;
+      sumB2 += bv * bv;
+    }
+    if (sumA2 <= 1e-9 || sumB2 <= 1e-9) continue;
+    const corr = sumAB / Math.sqrt(sumA2 * sumB2);
+    if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+    }
+  }
+  return {
+    corr: Number.isFinite(bestCorr) ? bestCorr : -1,
+    lagSamples: bestLag
+  };
+}
+
+function pushRecentStudentsChunk(samples, timestampMs) {
+  recentStudentsChunks.push({
+    ts: timestampMs,
+    rms: int16Rms(samples),
+    corr: downsampleInt16ForCorr(samples)
+  });
+  while (recentStudentsChunks.length > 8) {
+    recentStudentsChunks.shift();
+  }
+}
+
+function markEchoSuppression(suppressed) {
+  recentEchoSuppression.push(suppressed ? 1 : 0);
+  while (recentEchoSuppression.length > ECHO_RECENT_WINDOW) {
+    recentEchoSuppression.shift();
+  }
+  const total = recentEchoSuppression.reduce((acc, item) => acc + item, 0);
+  captureMetrics.teacher.echo_suppression_recent_rate =
+    recentEchoSuppression.length > 0 ? total / recentEchoSuppression.length : 0;
+}
+
+function maybeSuppressTeacherChunk(samples, timestampMs) {
+  if (recentStudentsChunks.length === 0) {
+    markEchoSuppression(false);
+    return { chunk: samples, suppressed: false };
+  }
+
+  const teacherRms = int16Rms(samples);
+  if (teacherRms <= 1e-4) {
+    markEchoSuppression(false);
+    return { chunk: samples, suppressed: false };
+  }
+
+  const teacherCorr = downsampleInt16ForCorr(samples);
+  const corrSampleRate = teacherCorr.length; // 1 second window.
+  const maxLagSamples = Math.round((ECHO_MAX_LAG_MS / 1000) * corrSampleRate);
+
+  let best = { corr: -1, lagMs: 0, studentRms: 0 };
+  for (const candidate of recentStudentsChunks) {
+    if (Math.abs(timestampMs - candidate.ts) > 1500) continue;
+    const corrResult = normalizedCrossCorrelation(teacherCorr, candidate.corr, maxLagSamples);
+    const lagMs = (corrResult.lagSamples / corrSampleRate) * 1000;
+    if (corrResult.corr > best.corr) {
+      best = {
+        corr: corrResult.corr,
+        lagMs,
+        studentRms: candidate.rms
+      };
+    }
+  }
+
+  const ratioThreshold = best.studentRms > 0 ? best.studentRms * ECHO_TEACHER_STUDENT_RMS_RATIO : 0;
+  const shouldSuppress =
+    best.corr >= ECHO_CORR_THRESHOLD &&
+    Math.abs(best.lagMs) <= ECHO_MAX_LAG_MS &&
+    teacherRms <= ratioThreshold;
+
+  markEchoSuppression(shouldSuppress);
+  if (!shouldSuppress) {
+    return { chunk: samples, suppressed: false };
+  }
+
+  captureMetrics.teacher.echo_suppressed_chunks += 1;
+  updateCaptureMetrics(
+    "teacher",
+    {
+      echo_suppressed_chunks: captureMetrics.teacher.echo_suppressed_chunks,
+      echo_suppression_recent_rate: captureMetrics.teacher.echo_suppression_recent_rate
+    },
+    { skipTimestamp: true }
+  );
+  logLine(
+    `Teacher echo suppressed: corr=${best.corr.toFixed(3)} lag_ms=${Math.round(best.lagMs)} ` +
+      `teacher_rms=${teacherRms.toFixed(4)} student_rms=${best.studentRms.toFixed(4)}`
+  );
+  return { chunk: new Int16Array(samples.length), suppressed: true };
+}
+
+function emitCaptureStatus(role) {
+  const ws = uploadSockets[role];
+  if (!ws || ws.readyState !== window.WebSocket.OPEN || !uploadSocketReady[role]) {
+    return;
+  }
+  const teacherPayload = {
+    capture_state: captureMetrics.teacher.capture_state,
+    echo_suppressed_chunks: captureMetrics.teacher.echo_suppressed_chunks,
+    echo_suppression_recent_rate: captureMetrics.teacher.echo_suppression_recent_rate
+  };
+  const studentsPayload = {
+    capture_state: captureMetrics.students.capture_state,
+    recover_attempts: captureMetrics.students.recover_attempts,
+    last_recover_at: captureMetrics.students.last_recover_at,
+    last_recover_error: captureMetrics.students.last_recover_error
+  };
+  const payload =
+    role === "teacher"
+      ? teacherPayload
+      : studentsPayload;
+  try {
+    ws.send(
+      JSON.stringify({
+        type: "capture_status",
+        stream_role: role,
+        payload
+      })
+    );
+  } catch (error) {
+    logLine(`capture_status send failed (${role}): ${error.message}`);
+  }
+}
+
 function processUploadQueue(role) {
   const ws = uploadSockets[role];
   if (!ws || ws.readyState !== window.WebSocket.OPEN || !uploadSocketReady[role]) return;
 
   while (uploadQueueSamples[role] >= CHUNK_SAMPLES) {
-    const oneSecond = dequeueUploadSamples(role, CHUNK_SAMPLES);
-    if (!oneSecond) break;
+    const rawChunk = dequeueUploadSamples(role, CHUNK_SAMPLES);
+    if (!rawChunk) break;
+
+    const timestampMs = Date.now();
+    let oneSecond = rawChunk;
+    if (role === "teacher") {
+      const result = maybeSuppressTeacherChunk(rawChunk, timestampMs);
+      oneSecond = result.chunk;
+    } else if (role === "students") {
+      pushRecentStudentsChunk(rawChunk, timestampMs);
+    }
 
     uploadSeq[role] += 1;
     const contentB64 = int16ToBase64(oneSecond);
@@ -474,7 +878,7 @@ function processUploadQueue(role) {
       stream_role: role,
       meeting_id: meetingIdValue(),
       seq: uploadSeq[role],
-      timestamp_ms: Date.now(),
+      timestamp_ms: timestampMs,
       sample_rate: TARGET_SAMPLE_RATE,
       channels: TARGET_CHANNELS,
       format: TARGET_FORMAT,
@@ -484,6 +888,7 @@ function processUploadQueue(role) {
     try {
       ws.send(JSON.stringify(message));
       uploadSentCount[role] += 1;
+      emitCaptureStatus(role);
     } catch (error) {
       uploadDroppedCount[role] += 1;
       logLine(`${role} WS send failed for seq=${uploadSeq[role]}: ${error.message}`);
@@ -513,6 +918,7 @@ function handleAudioProcessForRole(event, role) {
 
   const downsampled = downsampleBuffer(mono, audioContext.sampleRate, TARGET_SAMPLE_RATE);
   const pcm16 = float32ToInt16(downsampled);
+  lastAudioProcessAtMs[role] = Date.now();
   queueUploadSamples(role, pcm16);
   processUploadQueue(role);
 }
@@ -626,19 +1032,14 @@ function httpSessionUrl(pathSuffix) {
   return `${normalizeHttpBaseUrl(apiBaseUrlEl.value)}/v1/sessions/${encodeURIComponent(meetingIdValue())}/${pathSuffix}`;
 }
 
-function parseTeamsParticipantsInput() {
-  const raw = (teamsParticipantsEl.value || "").trim();
-  if (!raw) return [];
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("Teams Participants JSON is invalid");
+function validateParticipantsInput() {
+  const participants = parseParticipantsFromUI();
+  for (const item of participants) {
+    if (!item.name || item.name.length < 1) {
+      throw new Error("Participant name is required");
+    }
   }
-  if (!Array.isArray(parsed)) {
-    throw new Error("Teams Participants JSON must be an array");
-  }
-  return parsed;
+  return participants;
 }
 
 async function apiRequest(pathSuffix, method = "GET", body = undefined) {
@@ -700,6 +1101,7 @@ function closeUploadSocket(role, reason) {
       resetUploadQueue(role);
       logLine(`${role} WS close timeout fallback: local upload stopped.`);
       if (!isAnyUploadActive()) {
+        suppressAutoRecover = false;
         stopLivePolling();
         setUploadStatus("Upload stopped.");
       } else {
@@ -727,6 +1129,7 @@ function bindUploadSocketEvents(role, ws) {
       }
       uploadSocketReady[role] = true;
       logLine(`${role} WS ready: resume from seq=${uploadSeq[role] + 1}`);
+      emitCaptureStatus(role);
       processUploadQueue(role);
       renderUploadStatus();
       return;
@@ -742,6 +1145,10 @@ function bindUploadSocketEvents(role, ws) {
     if (payload.type === "status") {
       setResultPayload(payload);
       logLine(`${role} WS status: ${JSON.stringify(payload)}`);
+      return;
+    }
+
+    if (payload.type === "capture_status_ack") {
       return;
     }
 
@@ -766,6 +1173,7 @@ function bindUploadSocketEvents(role, ws) {
     uploadClosing[role] = false;
     resetUploadQueue(role);
     if (!isAnyUploadActive()) {
+      suppressAutoRecover = false;
       stopLivePolling();
       setUploadStatus(
         `Upload closed: teacher sent=${uploadSentCount.teacher},ack=${uploadAckCount.teacher}; students sent=${uploadSentCount.students},ack=${uploadAckCount.students}`
@@ -798,7 +1206,8 @@ async function openUploadSocket(role) {
     const onOpen = () => {
       if (settled) return;
       try {
-        const teamsParticipants = parseTeamsParticipantsInput();
+        const teamsParticipants = validateParticipantsInput();
+        const names = effectiveInterviewerNames();
         settled = true;
         ws.removeEventListener("error", onError);
         ws.send(
@@ -810,8 +1219,8 @@ async function openUploadSocket(role) {
             channels: TARGET_CHANNELS,
             format: TARGET_FORMAT,
             capture_mode: "dual_stream",
-            interviewer_name: (interviewerNameEl.value || "").trim() || undefined,
-            teams_interviewer_name: (teamsInterviewerNameEl.value || "").trim() || undefined,
+            interviewer_name: names.interviewerName,
+            teams_interviewer_name: names.teamsInterviewerName,
             teams_participants: teamsParticipants
           })
         );
@@ -838,6 +1247,19 @@ async function startUpload() {
   if (isAnyUploadActive()) {
     throw new Error("upload already started");
   }
+  suppressAutoRecover = false;
+  recentStudentsChunks.length = 0;
+  recentEchoSuppression.length = 0;
+  captureMetrics.teacher.echo_suppressed_chunks = 0;
+  captureMetrics.teacher.echo_suppression_recent_rate = 0;
+  updateCaptureMetrics("teacher", {
+    capture_state: "running",
+    last_recover_error: null
+  });
+  updateCaptureMetrics("students", {
+    capture_state: "running",
+    last_recover_error: null
+  });
 
   UPLOAD_STREAM_ROLES.forEach((role) => {
     uploadSeq[role] = 0;
@@ -872,8 +1294,15 @@ async function startUpload() {
 
 function stopUpload(reason = "client-stop") {
   if (!isAnyUploadActive()) return;
+  suppressAutoRecover = true;
+  if (studentsRecoveryTimer) {
+    window.clearTimeout(studentsRecoveryTimer);
+    studentsRecoveryTimer = undefined;
+  }
   logLine(`Stop Upload clicked. reason=${reason}`);
   UPLOAD_STREAM_ROLES.forEach((role) => closeUploadSocket(role, reason));
+  updateCaptureMetrics("teacher", { capture_state: micStream ? "running" : "idle" });
+  updateCaptureMetrics("students", { capture_state: systemAudioStream ? "running" : "idle" });
 }
 
 function fetchUploadStatus() {
@@ -913,10 +1342,11 @@ function formatEvents(response) {
 }
 
 async function saveSessionConfig() {
+  const names = effectiveInterviewerNames();
   const body = {
-    teams_participants: parseTeamsParticipantsInput(),
-    teams_interviewer_name: (teamsInterviewerNameEl.value || "").trim() || undefined,
-    interviewer_name: (interviewerNameEl.value || "").trim() || undefined
+    teams_participants: validateParticipantsInput(),
+    teams_interviewer_name: names.teamsInterviewerName,
+    interviewer_name: names.interviewerName
   };
   const payload = await apiRequest("config", "POST", body);
   setResultPayload(payload);
@@ -941,6 +1371,9 @@ async function refreshLiveView() {
     formatUtteranceLines("Students Raw", studentsRaw),
     "",
     formatUtteranceLines("Students Merged", studentsMerged),
+    "",
+    `Capture Teacher: ${JSON.stringify(state.capture_by_stream?.teacher || {})}`,
+    `Capture Students: ${JSON.stringify(state.capture_by_stream?.students || {})}`,
     "",
     `ASR Teacher: ${JSON.stringify(state.asr_by_stream?.teacher || {})}`,
     `ASR Students: ${JSON.stringify(state.asr_by_stream?.students || {})}`
@@ -1033,7 +1466,7 @@ function bindEvents() {
 
   btnInitSystem.addEventListener("click", async () => {
     try {
-      await initSystemStream();
+      await initSystemStream({ manual: true, reason: "manual-init" });
       updateButtons();
       logLine("System audio stream initialized.");
     } catch (error) {
@@ -1141,9 +1574,28 @@ function bindEvents() {
       setResultPayload({ error: error.message });
     }
   });
+
+  if (btnParticipantAdd) {
+    btnParticipantAdd.addEventListener("click", () => {
+      addParticipantRow();
+    });
+  }
+
+  if (btnParticipantImport) {
+    btnParticipantImport.addEventListener("click", () => {
+      const pasted = window.prompt("Paste participant names (one per line):", "");
+      if (pasted === null) return;
+      const count = importParticipantsFromLines(pasted);
+      logLine(`Imported participants: ${count}`);
+    });
+  }
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  if (participantRows().length === 0) {
+    addParticipantRow();
+  }
+  renderCaptureHealth();
   updateButtons();
   await renderRuntimeInfo();
   bindEvents();
@@ -1153,6 +1605,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  suppressAutoRecover = true;
   clearRecordingTimer();
 
   if (meterFrameId) {
@@ -1161,6 +1614,10 @@ window.addEventListener("beforeunload", () => {
 
   if (isAnyUploadActive()) {
     stopUpload("window-close");
+  }
+  if (studentsRecoveryTimer) {
+    window.clearTimeout(studentsRecoveryTimer);
+    studentsRecoveryTimer = undefined;
   }
   stopLivePolling();
 

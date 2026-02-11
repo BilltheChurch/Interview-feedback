@@ -59,9 +59,12 @@ wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 ### 5.3 会中配置下发
 
 在 `hello` 或 `/config` 中写入：
-- `teams_participants`
+- `teams_participants`（支持 `[{name,email?}]` 或 `["Alice","Bob"]`）
 - `teams_interviewer_name`
 - `interviewer_name`
+
+WS 运行时可追加上报：
+- `type=capture_status`（Desktop 采集健康指标）
 
 ## 6. 实时 ASR 状态字段
 
@@ -74,13 +77,21 @@ wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 - `ingest_to_utterance_p50_ms`
 - `ingest_to_utterance_p95_ms`
 
+`state.capture_by_stream.<role>`：
+- `capture_state` (`idle|running|recovering|failed`)
+- `recover_attempts`
+- `last_recover_at`
+- `last_recover_error`
+- `echo_suppressed_chunks`（teacher）
+- `echo_suppression_recent_rate`（teacher）
+
 ## 7. 联调步骤
 
 1) 启动/部署 Worker。
 2) `GET /health` 确认 `asr_realtime_enabled=true`。
 3) `POST /config` 写会前名单与 interviewer。
 4) teacher/students 各跑一轮 WS smoke。
-5) `GET /state` 查看 `ingest_by_stream` 与 `asr_by_stream`。
+5) `GET /state` 查看 `ingest_by_stream`、`asr_by_stream` 与 `capture_by_stream`。
 6) `GET /utterances` 查看 `raw|merged`。
 7) `GET /events` 查看 `identity_source`。
 8) `POST /finalize`，在 R2 确认 `result.json`。
@@ -91,3 +102,4 @@ wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 - merged 视图生效（不是 raw 等量拷贝）
 - teacher 事件身份来源可追踪（`identity_source`）
 - students 自动 resolve 失败不阻断 ASR 主链
+- capture 状态可追踪（students 自动恢复计数、teacher 去串音抑制计数）

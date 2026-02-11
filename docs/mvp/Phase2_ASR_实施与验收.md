@@ -9,6 +9,7 @@
 关键目标：
 - 解决原窗口重放模式产生的 `~11s` 固有延迟
 - 实时状态可观测（backlog/lag/ws_state）
+- 会中采集健康可观测（capture_state/recovery/echo suppression）
 
 ## 2. 实时协议映射（Step 0 输出）
 
@@ -30,6 +31,15 @@ DashScope WS 事件映射（Worker 目前按以下策略解析）：
 - `last_emit_at`
 - `ingest_to_utterance_p50_ms`
 - `ingest_to_utterance_p95_ms`
+
+## 3.1 采集健康字段（`state.capture_by_stream.<role>`）
+
+- `capture_state`: `idle | running | recovering | failed`
+- `recover_attempts`
+- `last_recover_at`
+- `last_recover_error`
+- `echo_suppressed_chunks`（teacher）
+- `echo_suppression_recent_rate`（teacher）
 
 ## 4. merged v2（展示视图）
 
@@ -66,7 +76,7 @@ curl -sS https://api.frontierace.ai/health | jq
 curl -sS -X POST "https://api.frontierace.ai/v1/sessions/<session_id>/config" \
   -H "content-type: application/json" \
   -d '{
-    "teams_participants":[{"name":"Bill"},{"name":"Alice"}],
+    "teams_participants":["Bill","Alice"],
     "teams_interviewer_name":"Bill",
     "interviewer_name":"Bill Pre"
   }' | jq
@@ -98,6 +108,11 @@ node /Users/billthechurch/Interview-feedback/scripts/ws_ingest_smoke.mjs \
 curl -sS "https://api.frontierace.ai/v1/sessions/<session_id>/state" | jq
 curl -sS "https://api.frontierace.ai/v1/sessions/<session_id>/events?limit=50" | jq
 ```
+
+可额外检查：
+- `state.capture_by_stream.students.capture_state`
+- `state.capture_by_stream.students.recover_attempts`
+- `state.capture_by_stream.teacher.echo_suppressed_chunks`
 
 5) merged 视图差异：
 

@@ -10,6 +10,31 @@ const {
 } = require('./lib/audioPipeline');
 
 const APP_TITLE = 'Interview Feedback Desktop (Phase 2.3)';
+let preferredDisplaySourceId = null;
+
+function pickDisplaySource(sources) {
+  if (!Array.isArray(sources) || sources.length === 0) {
+    return null;
+  }
+
+  if (preferredDisplaySourceId) {
+    const matched = sources.find((item) => item.id === preferredDisplaySourceId);
+    if (matched) {
+      return matched;
+    }
+    return null;
+  }
+
+  const screenFirst = sources
+    .slice()
+    .sort((a, b) => {
+      const aScore = a.id.startsWith('screen:') ? 0 : 1;
+      const bScore = b.id.startsWith('screen:') ? 0 : 1;
+      if (aScore !== bScore) return aScore - bScore;
+      return a.name.localeCompare(b.name);
+    });
+  return screenFirst[0];
+}
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -134,6 +159,17 @@ function registerIpcHandlers() {
       text
     };
   });
+
+  ipcMain.handle('capture:clear-preferred-source', async () => {
+    preferredDisplaySourceId = null;
+    return { ok: true };
+  });
+
+  ipcMain.handle('capture:get-preferred-source', async () => {
+    return {
+      preferredSourceId: preferredDisplaySourceId
+    };
+  });
 }
 
 app.whenReady().then(() => {
@@ -168,8 +204,19 @@ app.whenReady().then(() => {
           return;
         }
 
+        const chosen = pickDisplaySource(sources);
+        if (!chosen) {
+          callback({
+            video: null,
+            audio: null
+          });
+          return;
+        }
+
+        preferredDisplaySourceId = chosen.id;
+
         callback({
-          video: sources[0],
+          video: chosen,
           audio: 'loopback'
         });
       } catch (error) {
@@ -181,7 +228,7 @@ app.whenReady().then(() => {
       }
     },
     {
-      useSystemPicker: true
+      useSystemPicker: false
     }
   );
 

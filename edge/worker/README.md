@@ -49,7 +49,7 @@ Legacy backfill path still available:
 - `GET /v1/audio/ws/:session_id/:stream_role` (`teacher|students`)
 - `POST /v1/sessions/:session_id/config`
   - body:
-    - `teams_participants: [{name,email?}]`
+    - `teams_participants: [{name,email?}] | ["name1","name2"]`
     - `teams_interviewer_name`
     - `interviewer_name`
 - `GET /v1/sessions/:session_id/events?stream_role=...&limit=...`
@@ -72,6 +72,14 @@ Legacy backfill path still available:
   - `last_emit_at`
   - `ingest_to_utterance_p50_ms`
   - `ingest_to_utterance_p95_ms`
+- `state` now also includes:
+  - `capture_by_stream.students.capture_state`
+  - `capture_by_stream.students.recover_attempts`
+  - `capture_by_stream.students.last_recover_at`
+  - `capture_by_stream.students.last_recover_error`
+  - `capture_by_stream.teacher.echo_suppressed_chunks`
+  - `capture_by_stream.teacher.echo_suppression_recent_rate`
+- ingest WS supports `capture_status` frames from desktop and persists them into session state.
 - `utterances view=merged` uses overlap-aware merge (`merged v2`), not exact-string-only dedup.
 
 ## 6. Smoke Commands

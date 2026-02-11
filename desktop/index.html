@@ -31,17 +31,31 @@
       <section class="panel">
         <h2>Session Config</h2>
         <label class="field">
-          <span>Interviewer Name (Pre-config)</span>
+          <span>Interviewer Name</span>
           <input id="interviewer-name" type="text" placeholder="e.g. Bill" />
         </label>
-        <label class="field">
-          <span>Teams Interviewer Name</span>
-          <input id="teams-interviewer-name" type="text" placeholder="e.g. Bill (from Teams roster)" />
-        </label>
-        <label class="field">
-          <span>Teams Participants JSON</span>
-          <textarea id="teams-participants" rows="4" placeholder='[{"name":"Bill"},{"name":"Alice"},{"name":"Bob"}]'></textarea>
-        </label>
+        <div class="field participants-field">
+          <span>Participants</span>
+          <div id="participant-list" class="participant-list"></div>
+          <div class="actions">
+            <button id="btn-participant-add" type="button">Add Participant</button>
+            <button id="btn-participant-import" type="button">Import Names</button>
+          </div>
+        </div>
+        <details class="advanced-box">
+          <summary>Advanced</summary>
+          <label class="field">
+            <span>Teams Interviewer Name (Optional)</span>
+            <input id="teams-interviewer-name" type="text" placeholder="Leave empty to follow Interviewer Name" />
+          </label>
+          <div class="field">
+            <span>Mic Processing</span>
+            <label class="switch-line"><input id="mic-aec" type="checkbox" checked /> Echo Cancellation (AEC)</label>
+            <label class="switch-line"><input id="mic-ns" type="checkbox" checked /> Noise Suppression</label>
+            <label class="switch-line"><input id="mic-agc" type="checkbox" /> Auto Gain Control</label>
+          </div>
+        </details>
+        <p id="capture-health" class="muted">Capture health initializing...</p>
         <div class="actions">
           <button id="btn-save-session-config">Save Session Config</button>
           <button id="btn-refresh-live">Refresh Live View</button>

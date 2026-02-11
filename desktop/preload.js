@@ -6,5 +6,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   normalizeFile: (payload) => ipcRenderer.invoke('recording:normalize-file', payload),
   pickFile: () => ipcRenderer.invoke('recording:pick-file'),
   openPath: (filePath) => ipcRenderer.invoke('recording:open-path', filePath),
-  apiRequest: (payload) => ipcRenderer.invoke('api:request', payload)
+  apiRequest: (payload) => ipcRenderer.invoke('api:request', payload),
+  clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
+  getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source')
 });

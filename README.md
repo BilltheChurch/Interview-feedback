@@ -59,9 +59,10 @@ Desktop capture requirement (from PRD): run dual-input capture in meeting mode.
   - `teacher`: mic stream
   - `students`: system stream
 - Desktop Phase 2.3 view now includes:
-  - `Session Config` (`teams_participants` / interviewer fields)
+  - `Session Config` (single interviewer + participants list UI; no JSON typing required)
   - `Live Transcript` (`raw` + `merged`)
   - `Speaker Events` (with `identity_source`)
+  - capture health (`capture_by_stream`) and auto-recovery status
 
 ## Worker WS Ingest Smoke
 

@@ -32,13 +32,24 @@ interface SessionState {
   clusters: ClusterState[];
   bindings: Record<string, string>;
   roster?: RosterEntry[];
+  capture_by_stream?: Record<StreamRole, CaptureState>;
   config: Record<string, string | number | boolean>;
 }
 
 interface SessionConfigRequest {
-  teams_participants?: RosterEntry[];
+  teams_participants?: Array<RosterEntry | string>;
   teams_interviewer_name?: string;
   interviewer_name?: string;
+}
+
+interface CaptureState {
+  capture_state: "idle" | "running" | "recovering" | "failed";
+  recover_attempts?: number;
+  last_recover_at?: string | null;
+  last_recover_error?: string | null;
+  echo_suppressed_chunks?: number;
+  echo_suppression_recent_rate?: number;
+  updated_at?: string;
 }
 
 interface ResolveEvidence {
@@ -225,6 +236,7 @@ interface Env {
 const DEFAULT_STATE: SessionState = {
   clusters: [],
   bindings: {},
+  capture_by_stream: defaultCaptureByStream(),
   config: {}
 };
 
@@ -530,6 +542,12 @@ function parseRosterEntries(value: unknown): RosterEntry[] {
   if (!Array.isArray(value)) return [];
   const out: RosterEntry[] = [];
   for (const item of value) {
+    if (typeof item === "string") {
+      const name = valueAsString(item);
+      if (!name) continue;
+      out.push({ name });
+      continue;
+    }
     if (!item || typeof item !== "object") continue;
     const obj = item as Record<string, unknown>;
     const name = valueAsString(obj.name);
@@ -712,6 +730,73 @@ function parseChunkFrame(value: unknown): AudioChunkFrame {
   return frame as AudioChunkFrame;
 }
 
+function parseCaptureStatusPayload(
+  value: unknown
+): { stream_role?: StreamRole; payload: Partial<CaptureState> } {
+  if (!value || typeof value !== "object") {
+    throw new Error("capture_status payload must be an object");
+  }
+  const message = value as Record<string, unknown>;
+  if (message.type !== "capture_status") {
+    throw new Error("capture_status.type must be capture_status");
+  }
+
+  const payloadRaw = message.payload;
+  if (!payloadRaw || typeof payloadRaw !== "object") {
+    throw new Error("capture_status.payload must be an object");
+  }
+  const payload = payloadRaw as Record<string, unknown>;
+  const parsed: Partial<CaptureState> = {};
+
+  const captureState = valueAsString(payload.capture_state);
+  if (captureState) {
+    if (!["idle", "running", "recovering", "failed"].includes(captureState)) {
+      throw new Error("capture_status.capture_state must be idle|running|recovering|failed");
+    }
+    parsed.capture_state = captureState as CaptureState["capture_state"];
+  }
+
+  const recoverAttempts = Number(payload.recover_attempts);
+  if (Number.isFinite(recoverAttempts) && recoverAttempts >= 0) {
+    parsed.recover_attempts = Math.floor(recoverAttempts);
+  }
+
+  if (payload.last_recover_at === null) {
+    parsed.last_recover_at = null;
+  } else {
+    const lastRecoverAt = valueAsString(payload.last_recover_at);
+    if (lastRecoverAt) {
+      parsed.last_recover_at = lastRecoverAt;
+    }
+  }
+
+  if (payload.last_recover_error === null) {
+    parsed.last_recover_error = null;
+  } else {
+    const lastRecoverError = valueAsString(payload.last_recover_error);
+    if (lastRecoverError !== null) {
+      parsed.last_recover_error = lastRecoverError;
+    }
+  }
+
+  const echoSuppressed = Number(payload.echo_suppressed_chunks);
+  if (Number.isFinite(echoSuppressed) && echoSuppressed >= 0) {
+    parsed.echo_suppressed_chunks = Math.floor(echoSuppressed);
+  }
+
+  const echoRate = Number(payload.echo_suppression_recent_rate);
+  if (Number.isFinite(echoRate)) {
+    parsed.echo_suppression_recent_rate = Math.max(0, Math.min(1, echoRate));
+  }
+
+  const roleRaw = valueAsString(message.stream_role);
+  const role = roleRaw ? parseStreamRole(roleRaw, "mixed") : undefined;
+  return {
+    stream_role: role,
+    payload: parsed
+  };
+}
+
 function buildIngestState(sessionId: string): IngestState {
   const now = new Date().toISOString();
   return {
@@ -746,6 +831,60 @@ function valueAsString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildDefaultCaptureState(): CaptureState {
+  return {
+    capture_state: "idle",
+    recover_attempts: 0,
+    last_recover_at: null,
+    last_recover_error: null,
+    echo_suppressed_chunks: 0,
+    echo_suppression_recent_rate: 0,
+    updated_at: new Date().toISOString()
+  };
+}
+
+function defaultCaptureByStream(): Record<StreamRole, CaptureState> {
+  return {
+    mixed: buildDefaultCaptureState(),
+    teacher: buildDefaultCaptureState(),
+    students: buildDefaultCaptureState()
+  };
+}
+
+function sanitizeCaptureState(value: CaptureState | null | undefined): CaptureState {
+  const merged = {
+    ...buildDefaultCaptureState(),
+    ...(value ?? {})
+  };
+  const normalizedState = String(merged.capture_state ?? "idle");
+  merged.capture_state = ["idle", "running", "recovering", "failed"].includes(normalizedState)
+    ? (normalizedState as CaptureState["capture_state"])
+    : "idle";
+  merged.recover_attempts = Number.isFinite(merged.recover_attempts) ? Number(merged.recover_attempts) : 0;
+  merged.echo_suppressed_chunks = Number.isFinite(merged.echo_suppressed_chunks) ? Number(merged.echo_suppressed_chunks) : 0;
+  merged.echo_suppression_recent_rate = Number.isFinite(merged.echo_suppression_recent_rate)
+    ? Math.max(0, Math.min(1, Number(merged.echo_suppression_recent_rate)))
+    : 0;
+  merged.last_recover_at = merged.last_recover_at ?? null;
+  merged.last_recover_error = merged.last_recover_error ?? null;
+  merged.updated_at = new Date().toISOString();
+  return merged;
+}
+
+function normalizeSessionState(state: SessionState | null | undefined): SessionState {
+  const merged = state ? { ...state } : structuredClone(DEFAULT_STATE);
+  merged.clusters = Array.isArray(merged.clusters) ? merged.clusters : [];
+  merged.bindings = merged.bindings && typeof merged.bindings === "object" ? merged.bindings : {};
+  merged.config = merged.config && typeof merged.config === "object" ? merged.config : {};
+  const capture = merged.capture_by_stream ?? defaultCaptureByStream();
+  merged.capture_by_stream = {
+    mixed: sanitizeCaptureState(capture.mixed),
+    teacher: sanitizeCaptureState(capture.teacher),
+    students: sanitizeCaptureState(capture.students)
+  };
+  return merged;
 }
 
 async function proxyToDO(request: Request, env: Env, sessionId: string, action: string): Promise<Response> {
@@ -1910,7 +2049,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       return;
     }
 
-    const currentState = (await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)) ?? structuredClone(DEFAULT_STATE);
+    const currentState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
     const safeWavBytes = truncatePcm16WavToSeconds(wavBytes, INFERENCE_MAX_AUDIO_SECONDS);
     const audioPayload: AudioPayload = {
       content_b64: bytesToBase64(safeWavBytes),
@@ -1920,8 +2059,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     };
 
     const resolved = await this.invokeInferenceResolve(sessionId, audioPayload, utterance.text, currentState);
-
-    await this.ctx.storage.put(STORAGE_KEY_STATE, resolved.updated_state);
+    const mergedState = normalizeSessionState({
+      ...resolved.updated_state,
+      capture_by_stream: currentState.capture_by_stream
+    });
+    await this.ctx.storage.put(STORAGE_KEY_STATE, mergedState);
     await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
 
     await this.appendSpeakerEvent({
@@ -1980,7 +2122,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       return;
     }
 
-    const state = (await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)) ?? structuredClone(DEFAULT_STATE);
+    const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
     const identity = this.resolveTeacherIdentity(state, utterance.text);
 
     await this.appendSpeakerEvent({
@@ -2281,8 +2423,44 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
+  private deriveMixedCaptureState(captureByStream: Record<StreamRole, CaptureState>): CaptureState["capture_state"] {
+    const teacher = captureByStream.teacher.capture_state;
+    const students = captureByStream.students.capture_state;
+    if (teacher === "recovering" || students === "recovering") return "recovering";
+    if (teacher === "running" || students === "running") return "running";
+    if (teacher === "failed" || students === "failed") return "failed";
+    return "idle";
+  }
+
+  private async applyCaptureStatus(
+    sessionId: string,
+    streamRole: StreamRole,
+    patch: Partial<CaptureState>
+  ): Promise<CaptureState> {
+    const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+    const capture = state.capture_by_stream ?? defaultCaptureByStream();
+    const current = sanitizeCaptureState(capture[streamRole]);
+    const next = sanitizeCaptureState({
+      ...current,
+      ...patch,
+      updated_at: new Date().toISOString()
+    });
+    capture[streamRole] = next;
+    capture.mixed = sanitizeCaptureState({
+      ...capture.mixed,
+      capture_state: this.deriveMixedCaptureState(capture),
+      echo_suppressed_chunks: capture.teacher.echo_suppressed_chunks ?? 0,
+      echo_suppression_recent_rate: capture.teacher.echo_suppression_recent_rate ?? 0,
+      updated_at: new Date().toISOString()
+    });
+    state.capture_by_stream = capture;
+    await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
+    return next;
+  }
+
   private async updateSessionConfigFromHello(message: Record<string, unknown>): Promise<void> {
-    const currentState = (await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)) ?? structuredClone(DEFAULT_STATE);
+    const currentState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
     const config = { ...(currentState.config ?? {}) };
 
     const interviewer = valueAsString(message.interviewer_name);
@@ -2293,6 +2471,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const teamsInterviewer = valueAsString(message.teams_interviewer_name);
     if (teamsInterviewer) {
       config.teams_interviewer_name = teamsInterviewer;
+    } else if (interviewer) {
+      config.teams_interviewer_name = interviewer;
     }
 
     const roster = parseRosterEntries(message.teams_participants);
@@ -2385,6 +2565,21 @@ export class MeetingSessionDO extends DurableObject<Env> {
             return;
           }
 
+          if (type === "capture_status") {
+            const parsed = parseCaptureStatusPayload(message);
+            const frameRole = parsed.stream_role ?? connectionRole;
+            if (frameRole !== connectionRole) {
+              throw new Error(`capture_status.stream_role mismatch: expected ${connectionRole}, got ${frameRole}`);
+            }
+            const stored = await this.applyCaptureStatus(sessionId, frameRole, parsed.payload);
+            this.sendWsJson(server, {
+              type: "capture_status_ack",
+              stream_role: frameRole,
+              payload: stored
+            });
+            return;
+          }
+
           if (type === "close") {
             const reason = String(message.reason ?? "client-close").slice(0, 120);
             if (this.asrRealtimeEnabled()) {
@@ -2462,14 +2657,16 @@ export class MeetingSessionDO extends DurableObject<Env> {
         teacher: utterancesByStream.teacher.length,
         students: utterancesByStream.students.length
       };
+      const normalizedState = normalizeSessionState(state);
 
       return jsonResponse({
         session_id: sessionId,
-        state: state ?? DEFAULT_STATE,
+        state: normalizedState,
         event_count: events.length,
         updated_at: updatedAt ?? null,
         ingest: ingestStatusPayload(sessionId, "mixed", ingestByStream.mixed),
         ingest_by_stream: this.ingestByStreamPayload(sessionId, ingestByStream),
+        capture_by_stream: normalizedState.capture_by_stream,
         asr: asrByStream.mixed,
         asr_by_stream: asrByStream,
         utterance_count: utteranceCountByStream.mixed,
@@ -2486,7 +2683,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
 
       return this.enqueueMutation(async () => {
-        const state = (await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)) ?? structuredClone(DEFAULT_STATE);
+        const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
         const config = { ...(state.config ?? {}) };
 
         const teamsInterviewerName = valueAsString(payload.teams_interviewer_name);
@@ -2496,6 +2693,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const interviewerName = valueAsString(payload.interviewer_name);
         if (interviewerName) {
           config.interviewer_name = interviewerName;
+          if (!teamsInterviewerName) {
+            config.teams_interviewer_name = interviewerName;
+          }
         }
 
         const roster = parseRosterEntries(payload.teams_participants);
@@ -2671,7 +2871,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
 
       return this.enqueueMutation(async () => {
-        const currentState = (await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)) ?? structuredClone(DEFAULT_STATE);
+        const currentState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
         if (payload.roster && payload.roster.length > 0) {
           currentState.roster = payload.roster;
         }
@@ -2683,7 +2883,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
           return jsonResponse({ detail: `inference request failed: ${(error as Error).message}` }, 502);
         }
 
-        await this.ctx.storage.put(STORAGE_KEY_STATE, resolved.updated_state);
+        const mergedState = normalizeSessionState({
+          ...resolved.updated_state,
+          capture_by_stream: currentState.capture_by_stream
+        });
+        resolved.updated_state = mergedState;
+        await this.ctx.storage.put(STORAGE_KEY_STATE, mergedState);
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
 
         await this.appendSpeakerEvent({
@@ -2728,13 +2933,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.storeUtterancesMergedByStream(mergedByStream);
 
       const finalizedAt = new Date().toISOString();
+      const normalizedState = normalizeSessionState(state);
       const result = {
         session_id: sessionId,
         finalized_at: finalizedAt,
-        state: state ?? DEFAULT_STATE,
+        state: normalizedState,
         events,
         ingest: ingestStatusPayload(sessionId, "mixed", ingestByStream.mixed),
         ingest_by_stream: this.ingestByStreamPayload(sessionId, ingestByStream),
+        capture_by_stream: normalizedState.capture_by_stream,
         asr: asrByStream.mixed,
         asr_by_stream: asrByStream,
         utterances_raw: rawByStream.mixed,

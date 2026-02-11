@@ -65,6 +65,12 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [x] Desktop UI 增加 Session Config + Live Transcript + Speaker Events
 - [x] 双流并发 ingest 一致性修复（同 session teacher/students 不互相覆盖）
 - [x] Desktop 断流容错：单路 track ended 时不再强制全局 stop upload，改为 degraded 模式并允许手动 re-init 恢复
+- [x] Desktop System Audio 自动恢复状态机：`running/recovering/failed` + 重试退避 `1s->2s->5s`
+- [x] Desktop 来源锁定：系统音频重连优先同一 source id，手动 init 可重置来源
+- [x] 无耳机优化：Mic 默认开启 AEC/NS（AGC 可选）+ teacher 双流去串音抑制
+- [x] Session Config UX 去 JSON 化：单 interviewer 字段 + participants 列表增删/批量导入
+- [x] Worker 状态扩展：`state.capture_by_stream` + ingest WS `capture_status` 上报
+- [x] Worker 配置兼容：`teams_participants` 支持 `[{name,email?}]` 与 `string[]`
 
 ### Phase 2.3 验收标准（当前）
 - [x] `health` 显示 `asr_realtime_enabled=true`
@@ -74,6 +80,7 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [x] teacher 事件 `identity_source` 命中优先级
 - [ ] 真实 Teams 5~10 分钟实机验证（含 latency 门禁）
 - [ ] 真实 Teams 容错验证：手动触发 system/mic track ended 后，另一流持续上传且可 re-init 恢复双流
+- [ ] 真实 Teams 无耳机验收：teacher/students 重复转写率下降 >= 60%
 
 ## 4. 已完成基础能力（供后续阶段复用）
 - [x] Inference FastAPI + Docker + 模型版本固定 + smoke 回归
@@ -196,6 +203,19 @@ Validation Date: 2026-02-11
 - [x] students resolve 长音频保护（>30s 自动裁剪）：
   - Worker 已部署（Version ID: `b0cbc364-f86f-427c-b44e-a5cc97333728`）
   - 会话 `students-long-1770814903849`：`events` 正常产出，无 `422 audio duration exceeds 30s`
+- [x] `cd desktop && node --check renderer.js main.js preload.js lib/audioPipeline.js`（System Audio 自动恢复 + 去串音 + Config UX）-> 通过
+- [x] `cd edge/worker && npm run typecheck`（capture_by_stream + capture_status + roster string[]）-> 通过
+- [x] `cd edge/worker && npm run deploy`（capture 状态透传 + 配置兼容）-> 已发布（Version ID: `3a60e502-171c-4666-b386-1614042e8f2d`）
+- [x] `POST /v1/sessions/cfg-compat-177081/config` with `teams_participants=[\"Alice\",\"Bob\"]` -> `roster_count=2`
+- [x] `GET /v1/sessions/cfg-compat-177081/state` -> 返回 `capture_by_stream`，并保留配置 `teams_interviewer_name=interviewer_name`
+- [x] `ws_ingest_smoke` 回归（公网）：
+  - 会话 `ws-smoke-hybrid-teacher` -> 4/4 ACK
+  - 会话 `ws-smoke-hybrid-students` -> 4/4 ACK
+- [x] ingest WS `capture_status` 上报回归：
+  - 会话 `capture-status-177081`
+  - `GET /state` -> `capture_by_stream.students.capture_state=recovering`, `recover_attempts=3`
+  - `GET /state` -> `capture_by_stream.teacher.echo_suppressed_chunks=17`
+  - `finalize result.json` 含 `capture_by_stream`
 
 ## 6. 当前阻塞与处理
 - `pnpm` 在 Node v25 + corepack 环境出现签名校验错误（keyid mismatch）。
