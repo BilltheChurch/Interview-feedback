@@ -1,0 +1,17 @@
+services:
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: interview-inference
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ../.cache/modelscope:/modelscope-cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5

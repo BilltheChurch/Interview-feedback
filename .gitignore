@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local environments
+.venv/
+inference/.venv/
+
+# Secrets / local config
+inference/.env
+
+# Large model cache and runtime artifacts
+.cache/
+
+# OS
+.DS_Store
