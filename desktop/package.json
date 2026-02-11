@@ -1,0 +1,19 @@
+{
+  "name": "interview-feedback-desktop",
+  "version": "0.1.0",
+  "description": "Electron desktop self-check for Interview Feedback Phase 1",
+  "main": "main.js",
+  "private": true,
+  "author": "Interview Feedback Team",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "normalize:smoke": "node scripts/normalize_smoke.js"
+  },
+  "dependencies": {
+    "electron": "^31.7.7",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  }
+}

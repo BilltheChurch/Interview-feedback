@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Interview Feedback Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="header">
+        <div>
+          <h1>Interview Feedback Desktop</h1>
+          <p class="subtitle">Phase 1: Local audio self-check + 16k mono pcm_s16le normalization</p>
+        </div>
+        <div class="status-chip" id="app-info">Loading runtime info...</div>
+      </header>
+
+      <section class="panel">
+        <h2>Meeting Context</h2>
+        <label class="field">
+          <span>Meeting ID</span>
+          <input id="meeting-id" type="text" value="local-selfcheck" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Microphone Self-check</h2>
+        <div class="actions">
+          <button id="btn-init-stream">Init Mic</button>
+          <button id="btn-start-recording" disabled>Start 30s Recording</button>
+          <button id="btn-stop-recording" disabled>Stop Recording</button>
+          <button id="btn-open-last-file" disabled>Open Last WAV</button>
+        </div>
+        <div class="meter-wrap">
+          <div class="meter-label">Input level</div>
+          <div class="meter-track">
+            <div id="meter-bar" class="meter-bar"></div>
+          </div>
+          <div id="meter-value" class="meter-value">0%</div>
+        </div>
+        <audio id="playback" controls></audio>
+      </section>
+
+      <section class="panel">
+        <h2>Live Upload (WebSocket 1s Chunks)</h2>
+        <label class="field">
+          <span>Gateway WS URL</span>
+          <input id="ws-url" type="text" value="wss://api.frontierace.ai/v1/audio/ws" />
+        </label>
+        <div class="actions">
+          <button id="btn-start-upload" disabled>Start Upload</button>
+          <button id="btn-stop-upload" disabled>Stop Upload</button>
+          <button id="btn-fetch-upload-status" disabled>Fetch Upload Status</button>
+        </div>
+        <p id="upload-status" class="muted">Upload not started.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Normalize Existing Audio File (m4a/wav/mp3)</h2>
+        <div class="actions">
+          <button id="btn-pick-file">Pick File</button>
+          <button id="btn-normalize-file" disabled>Normalize Selected File</button>
+        </div>
+        <p id="selected-file" class="muted">No file selected.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Result</h2>
+        <pre id="result-json" class="result-box">No run yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Logs</h2>
+        <pre id="logs" class="logs"></pre>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

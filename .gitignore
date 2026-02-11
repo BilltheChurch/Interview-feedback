@@ -9,6 +9,8 @@ __pycache__/
 inference/.venv/
 edge/worker/node_modules/
 edge/worker/.wrangler/
+desktop/node_modules/
+desktop/artifacts/
 
 # Secrets / local config
 inference/.env

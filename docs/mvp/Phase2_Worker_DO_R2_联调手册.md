@@ -62,6 +62,11 @@ curl -s http://localhost:8787/health | jq
 ## 6. 网关接口
 
 - `GET /health`
+- `GET /v1/audio/ws/:session_id`（WebSocket）
+  - 客户端发送 `type=chunk` 帧：`meeting_id/seq/timestamp_ms/sample_rate/channels/format/content_b64`
+  - Worker/DO 校验：`16000/1ch/pcm_s16le/32000 bytes`
+  - 写入 R2：`sessions/<session_id>/chunks/<seq>.pcm`
+  - 服务端返回 `ack` 与 `status`（含 `missing_chunks/duplicate_chunks/bytes_stored`）
 - `POST /v1/sessions/:session_id/resolve`
   - 入参：`{ audio, asr_text?, roster? }`
   - 行为：DO 读取状态 -> 调用 inference `/speaker/resolve` -> 写回 updated_state + event
@@ -81,6 +86,7 @@ npm run deploy
 ## 8. 推荐联调顺序
 
 1. `Worker /health` 返回 200
-2. `POST /v1/sessions/:id/resolve` 能产出 decision
-3. `GET /v1/sessions/:id/state` 可读到 DO 中 state
-4. `POST /v1/sessions/:id/finalize` 后，在 R2 中确认 `result.json`
+2. `node scripts/ws_ingest_smoke.mjs --base-http http://127.0.0.1:8787 --base-ws ws://127.0.0.1:8787 --chunks 3` 通过
+3. `POST /v1/sessions/:id/resolve` 能产出 decision
+4. `GET /v1/sessions/:id/state` 可读到 DO 中 state/ingest
+5. `POST /v1/sessions/:id/finalize` 后，在 R2 中确认 `result.json`

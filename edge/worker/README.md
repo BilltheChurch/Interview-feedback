@@ -4,7 +4,7 @@ This worker is the next-stage gateway between clients and inference:
 
 - Worker: request auth/routing
 - Durable Object: per-session state (`clusters`, `bindings`, `events`)
-- R2: finalized `result.json` archive
+- R2: audio chunks (`sessions/<id>/chunks/<seq>.pcm`) + finalized `result.json`
 
 ## 1. Prerequisites
 
@@ -58,14 +58,27 @@ curl -s http://localhost:8787/health | jq
 ## 5. API surface
 
 - `GET /health`
+- `GET /v1/audio/ws/:session_id` (WebSocket)
+  - frame type `chunk` with `meeting_id/seq/timestamp_ms/sample_rate/channels/format/content_b64`
+  - strict validation: `16000Hz`, `mono`, `pcm_s16le`, `32000 bytes` per frame
+  - server replies `ack/status/error`
 - `POST /v1/sessions/:session_id/resolve`
   - body: `{ audio, asr_text?, roster? }`
   - forwards to inference `/speaker/resolve`
   - persists updated state + event in Durable Object
 - `GET /v1/sessions/:session_id/state`
-  - returns current DO state snapshot
+  - returns current DO state snapshot + ingest stats
 - `POST /v1/sessions/:session_id/finalize`
   - writes `sessions/<session_id>/result.json` to R2
+
+WS local smoke:
+
+```bash
+node /Users/billthechurch/Interview-feedback/scripts/ws_ingest_smoke.mjs \
+  --base-http http://127.0.0.1:8787 \
+  --base-ws ws://127.0.0.1:8787 \
+  --chunks 3
+```
 
 ## 6. Deploy
 
