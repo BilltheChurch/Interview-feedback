@@ -40,3 +40,7 @@
 - `inference/` 服务代码与 Docker 文件
 - `scripts/smoke_sv.py` 与 `scripts/prepare_samples.sh`
 - `docs/mvp` 下 API、ModelScope、Tunnel、测试验收文档
+
+## 6. 后续衔接（已启动）
+- Phase 2/3/4 的 Worker + Durable Object + R2 骨架见：
+  `/Users/billthechurch/Interview-feedback/docs/mvp/Phase2_Worker_DO_R2_联调手册.md`

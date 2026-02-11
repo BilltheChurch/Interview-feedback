@@ -7,9 +7,12 @@ __pycache__/
 # Local environments
 .venv/
 inference/.venv/
+edge/worker/node_modules/
+edge/worker/.wrangler/
 
 # Secrets / local config
 inference/.env
+cloudflare/tunnel/config.yml
 
 # Large model cache and runtime artifacts
 .cache/

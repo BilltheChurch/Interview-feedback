@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "interview-feedback-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-11",
+  "workers_dev": true,
+
+  "vars": {
+    "INFERENCE_TIMEOUT_MS": "15000",
+    "INFERENCE_RESOLVE_PATH": "/speaker/resolve"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MEETING_SESSION",
+        "class_name": "MeetingSessionDO"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MeetingSessionDO"]
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "RESULT_BUCKET",
+      "bucket_name": "interview-feedback-results"
+    }
+  ]
+}

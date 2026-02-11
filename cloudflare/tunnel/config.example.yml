@@ -1,0 +1,10 @@
+# Copy this file to cloudflare/tunnel/config.yml and replace placeholders,
+# or generate config.yml via scripts/cloudflare_tunnel_bootstrap.sh.
+
+tunnel: <TUNNEL_UUID>
+credentials-file: /Users/<you>/.cloudflared/<TUNNEL_UUID>.json
+
+ingress:
+  - hostname: api.example.com
+    service: http://localhost:8000
+  - service: http_status:404

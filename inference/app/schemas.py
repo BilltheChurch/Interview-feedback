@@ -110,6 +110,10 @@ class HealthResponse(BaseModel):
     embedding_dim: int | None
     sv_t_low: float
     sv_t_high: float
+    max_request_body_bytes: int
+    rate_limit_enabled: bool
+    rate_limit_requests: int
+    rate_limit_window_seconds: int
     segmenter_backend: Literal["vad", "diarization"]
     diarization_enabled: bool
 

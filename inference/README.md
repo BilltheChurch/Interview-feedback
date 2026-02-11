@@ -30,6 +30,9 @@ docker compose up --build
 ```
 
 If `INFERENCE_API_KEY` is set, include `x-api-key` in every request.
+The service also enforces:
+- request body cap (`MAX_REQUEST_BODY_BYTES`)
+- in-memory IP rate limiting (`RATE_LIMIT_*`)
 
 3. Health check:
 
@@ -48,3 +51,10 @@ Use `/Users/billthechurch/Interview-feedback/docs/mvp/ModelScope_模型下载与
 - `POST /sv/score`
 - `POST /speaker/resolve`
 - `POST /sd/diarize` (501)
+
+## Public Exposure
+
+Use named Cloudflare Tunnel for a stable HTTPS endpoint:
+- `/Users/billthechurch/Interview-feedback/scripts/cloudflare_tunnel_bootstrap.sh`
+- `/Users/billthechurch/Interview-feedback/scripts/cloudflare_tunnel_run.sh`
+- `/Users/billthechurch/Interview-feedback/docs/mvp/本地Docker与CloudflareTunnel联调手册.md`

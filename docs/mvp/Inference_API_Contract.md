@@ -8,10 +8,14 @@
   "status": "ok",
   "app_name": "interview-inference",
   "model_id": "iic/speech_campplus_sv_zh_en_16k-common_advanced",
-  "model_revision": "master",
+  "model_revision": "v1.0.0",
   "embedding_dim": null,
   "sv_t_low": 0.45,
   "sv_t_high": 0.70,
+  "max_request_body_bytes": 6291456,
+  "rate_limit_enabled": true,
+  "rate_limit_requests": 60,
+  "rate_limit_window_seconds": 60,
   "segmenter_backend": "vad",
   "diarization_enabled": false
 }
@@ -34,7 +38,7 @@
 ```json
 {
   "model_id": "iic/speech_campplus_sv_zh_en_16k-common_advanced",
-  "model_revision": "master",
+  "model_revision": "v1.0.0",
   "embedding_dim": 192,
   "embedding": [0.12, -0.03]
 }
@@ -55,7 +59,7 @@
 ```json
 {
   "model_id": "iic/speech_campplus_sv_zh_en_16k-common_advanced",
-  "model_revision": "master",
+  "model_revision": "v1.0.0",
   "score": 0.78
 }
 ```
@@ -115,11 +119,16 @@
 
 ## 6. 错误码
 - 400：音频解码失败（非法 base64、ffmpeg 失败等）
-- 413：预留（超大请求，可由反向代理控制）
+- 413：请求体超过 `MAX_REQUEST_BODY_BYTES`
 - 422：业务校验失败（无语音分段、时长超限等）
+- 429：超过限流窗口（`RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS`）
 - 500：SV 后端失败
 - 501：Diarization 未启用/未实现
 
 ## 7. 鉴权（可选）
 - 当环境变量 `INFERENCE_API_KEY` 非空时，所有请求必须带 `x-api-key` 请求头。
 - 鉴权失败返回 `401`。
+- 当开启限流时，响应头包含：
+  - `X-RateLimit-Limit`
+  - `X-RateLimit-Remaining`
+  - `X-RateLimit-Reset`（Unix epoch 秒）

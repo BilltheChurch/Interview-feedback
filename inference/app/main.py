@@ -27,22 +27,65 @@ from app.schemas import (
     ScoreRequest,
     ScoreResponse,
 )
+from app.security import SlidingWindowRateLimiter, extract_client_ip, rate_limit_headers
 
 settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
 
 runtime = build_runtime(settings)
+rate_limiter = (
+    SlidingWindowRateLimiter(
+        requests_per_window=settings.rate_limit_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
+    if settings.rate_limit_enabled
+    else None
+)
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
 
 @app.middleware("http")
-async def api_key_guard(request: Request, call_next):
+async def request_guard(request: Request, call_next):
     if settings.inference_api_key:
         incoming_key = request.headers.get("x-api-key", "")
         if incoming_key != settings.inference_api_key:
             raise UnauthorizedError("invalid x-api-key")
-    return await call_next(request)
+
+    if request.method in {"POST", "PUT", "PATCH"}:
+        content_length = request.headers.get("content-length", "")
+        if content_length:
+            try:
+                if int(content_length) > settings.max_request_body_bytes:
+                    raise PayloadTooLargeError(
+                        f"request body exceeds MAX_REQUEST_BODY_BYTES={settings.max_request_body_bytes}"
+                    )
+            except ValueError:
+                # Ignore malformed Content-Length and rely on actual body size check below.
+                pass
+
+        body = await request.body()
+        if len(body) > settings.max_request_body_bytes:
+            raise PayloadTooLargeError(
+                f"request body exceeds MAX_REQUEST_BODY_BYTES={settings.max_request_body_bytes}"
+            )
+
+    decision = None
+    if rate_limiter is not None and request.url.path not in {"/health", "/docs", "/openapi.json", "/redoc"}:
+        client_key = extract_client_ip(request=request, trust_proxy_headers=settings.trust_proxy_headers)
+        decision = rate_limiter.allow(client_key=client_key)
+        if not decision.allowed:
+            return JSONResponse(
+                status_code=429,
+                content=ErrorResponse(detail="rate limit exceeded").model_dump(),
+                headers=rate_limit_headers(decision),
+            )
+
+    response = await call_next(request)
+    if decision is not None:
+        for key, value in rate_limit_headers(decision).items():
+            response.headers[key] = value
+    return response
 
 
 @app.exception_handler(AudioDecodeError)
@@ -86,6 +129,10 @@ async def health() -> HealthResponse:
         embedding_dim=sv_health.embedding_dim,
         sv_t_low=settings.sv_t_low,
         sv_t_high=settings.sv_t_high,
+        max_request_body_bytes=settings.max_request_body_bytes,
+        rate_limit_enabled=settings.rate_limit_enabled,
+        rate_limit_requests=settings.rate_limit_requests,
+        rate_limit_window_seconds=settings.rate_limit_window_seconds,
         segmenter_backend=settings.segmenter_backend,
         diarization_enabled=settings.enable_diarization,
     )

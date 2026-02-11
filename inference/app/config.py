@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     inference_api_key: str = Field(default="", alias="INFERENCE_API_KEY")
+    trust_proxy_headers: bool = Field(default=True, alias="TRUST_PROXY_HEADERS")
 
     sv_model_id: str = Field(
         default="iic/speech_campplus_sv_zh_en_16k-common_advanced",
@@ -28,6 +29,11 @@ class Settings(BaseSettings):
     audio_sr: int = Field(default=16000, alias="AUDIO_SR")
     max_audio_seconds: int = Field(default=30, alias="MAX_AUDIO_SECONDS")
     max_audio_bytes: int = Field(default=5 * 1024 * 1024, alias="MAX_AUDIO_BYTES")
+    max_request_body_bytes: int = Field(default=6 * 1024 * 1024, alias="MAX_REQUEST_BODY_BYTES")
+
+    rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
+    rate_limit_requests: int = Field(default=60, alias="RATE_LIMIT_REQUESTS")
+    rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
 
     enable_diarization: bool = Field(default=False, alias="ENABLE_DIARIZATION")
     segmenter_backend: Literal["vad", "diarization"] = Field(default="vad", alias="SEGMENTER_BACKEND")
@@ -46,4 +52,10 @@ def get_settings() -> Settings:
         raise ValueError("SV_T_HIGH must be greater than SV_T_LOW")
     if settings.vad_frame_ms not in {10, 20, 30}:
         raise ValueError("VAD_FRAME_MS must be one of: 10, 20, 30")
+    if settings.max_request_body_bytes <= 0:
+        raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0")
+    if settings.rate_limit_enabled and settings.rate_limit_requests <= 0:
+        raise ValueError("RATE_LIMIT_REQUESTS must be greater than 0 when RATE_LIMIT_ENABLED=true")
+    if settings.rate_limit_enabled and settings.rate_limit_window_seconds <= 0:
+        raise ValueError("RATE_LIMIT_WINDOW_SECONDS must be greater than 0 when RATE_LIMIT_ENABLED=true")
     return settings
