@@ -176,14 +176,25 @@ Validation Date: 2026-02-11
   - 会话 `realtime-students-1770811517481`
   - `students utterances=1`（ASR 主链不被阻断）
   - 失败事件按预期写入：`decision=unknown`, `note` 含 inference 530
+- [x] inference 公网恢复验收（Tunnel 稳定）：
+  - `curl https://if.frontierace.ai/health` -> `HTTP 200`
+  - 本地 `http://127.0.0.1:8000/health` 与公网健康字段一致
+- [x] students 自动 resolve 恢复验收：
+  - 会话 `students-e2e3-1770812727878`
+  - `GET /state` -> `asr_by_stream.students.utterance_count=1`, `ingest_to_utterance_p50_ms=693`
+  - `GET /events?stream_role=students` -> `decision=confirm`, `cluster_id=c1`
+- [x] teacher 身份事件回归验收：
+  - 会话 `teacher-e2e-1770812809368`
+  - `GET /events?stream_role=teacher` -> `identity_source=preconfig`, `speaker_name=Bill`
 
 ## 6. 当前阻塞与处理
 - `pnpm` 在 Node v25 + corepack 环境出现签名校验错误（keyid mismatch）。
 - 当前已使用 `npm install` 完成 `desktop` 依赖安装与验证，不影响本阶段代码开发。
 - 当前无 Phase 2.1 阻塞；进入 Phase 2.2 参数调优与 Phase 2.3 链路联动。
-- 当前存在 inference 可用性问题（`status=530 code=1033`，students 自动 resolve 间歇失败）：
-  - 已做主链隔离（不阻断 ASR）
-  - 待在下一轮联调中修复 `INFERENCE_BASE_URL`/tunnel 稳定性
+- inference 可用性已恢复（Cloudflare Tunnel 改为 `http2` 稳定链路）：
+  - `if.frontierace.ai` 健康检查恢复为稳定 200
+  - students 自动 resolve 已恢复
+  - 保留主链隔离（即使 inference 异常也不阻断 ASR）
 
 ## 7. 更新规则（强制执行）
 每次开发迭代必须按以下顺序更新：
