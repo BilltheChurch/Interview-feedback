@@ -37,7 +37,8 @@ UI checklist:
    - `Speaker Events` (`identity_source`)
 
 Runtime rules:
-- If mic/system track ends during meeting, client auto-stops upload/recording and surfaces a warning.
+- If mic/system track ends during meeting, client enters degraded mode (does not force-stop upload), surfaces a warning, and allows re-init to recover that stream.
+- If local 30s recording is running and one track ends, recording auto-stops for data consistency.
 - Each stream has independent resume (`last_seq`) and ACK stats.
 
 ## Smoke Normalize Existing Files

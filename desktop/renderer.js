@@ -290,15 +290,16 @@ async function initMicStream() {
   micTrack.addEventListener("ended", () => {
     logLine("Microphone track ended.");
     releaseMicStream();
+    resetUploadQueue("teacher");
     if (isAnyUploadActive()) {
-      stopUpload("mic-track-ended");
+      setUploadStatus("Upload degraded: mic track ended. Click Init Mic to resume teacher stream.");
     }
     if (mediaRecorder && mediaRecorder.state === "recording") {
       stopRecordingInternal("mic-track-ended").catch((error) => {
         logLine(`Auto-stop recording failed after mic ended: ${error.message}`);
       });
     }
-    setResultPayload({ warning: "Mic track ended. Upload/recording stopped." });
+    setResultPayload({ warning: "Mic track ended. Upload continues for active streams; re-init mic to recover dual stream." });
     updateButtons();
   });
 
@@ -331,15 +332,16 @@ async function initSystemStream() {
   audioTrack.addEventListener("ended", () => {
     logLine("System audio track ended.");
     releaseSystemStream();
+    resetUploadQueue("students");
     if (isAnyUploadActive()) {
-      stopUpload("system-track-ended");
+      setUploadStatus("Upload degraded: system audio ended. Click Init System Audio to resume students stream.");
     }
     if (mediaRecorder && mediaRecorder.state === "recording") {
       stopRecordingInternal("system-track-ended").catch((error) => {
         logLine(`Auto-stop recording failed after system track ended: ${error.message}`);
       });
     }
-    setResultPayload({ warning: "System audio track ended. Upload/recording stopped." });
+    setResultPayload({ warning: "System audio track ended. Upload continues for active streams; re-init system audio to recover dual stream." });
     updateButtons();
   });
 

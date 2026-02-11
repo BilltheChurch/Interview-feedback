@@ -64,6 +64,7 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [x] teacher 身份优先级落地（Teams参会者 > 会前配置 > 转写抽名 > teacher）
 - [x] Desktop UI 增加 Session Config + Live Transcript + Speaker Events
 - [x] 双流并发 ingest 一致性修复（同 session teacher/students 不互相覆盖）
+- [x] Desktop 断流容错：单路 track ended 时不再强制全局 stop upload，改为 degraded 模式并允许手动 re-init 恢复
 
 ### Phase 2.3 验收标准（当前）
 - [x] `health` 显示 `asr_realtime_enabled=true`
@@ -72,6 +73,7 @@ Source: `/Users/billthechurch/Interview-feedback/docs/source/开发计划.md`
 - [x] merged 视图与 raw 产生差异（重叠文本场景）
 - [x] teacher 事件 `identity_source` 命中优先级
 - [ ] 真实 Teams 5~10 分钟实机验证（含 latency 门禁）
+- [ ] 真实 Teams 容错验证：手动触发 system/mic track ended 后，另一流持续上传且可 re-init 恢复双流
 
 ## 4. 已完成基础能力（供后续阶段复用）
 - [x] Inference FastAPI + Docker + 模型版本固定 + smoke 回归
@@ -186,6 +188,14 @@ Validation Date: 2026-02-11
 - [x] teacher 身份事件回归验收：
   - 会话 `teacher-e2e-1770812809368`
   - `GET /events?stream_role=teacher` -> `identity_source=preconfig`, `speaker_name=Bill`
+- [x] 会话 `teams-test1` 结果确认：
+  - `ingest_by_stream.teacher.received_chunks=275`, `students.received_chunks=273`, `missing_chunks=0`
+  - `asr_by_stream.teacher.ingest_to_utterance_p95_ms=1464`
+  - `asr_by_stream.students.ingest_to_utterance_p95_ms=1406`
+  - `POST /v1/sessions/teams-test1/finalize` -> `sessions/teams-test1/result.json`
+- [x] students resolve 长音频保护（>30s 自动裁剪）：
+  - Worker 已部署（Version ID: `b0cbc364-f86f-427c-b44e-a5cc97333728`）
+  - 会话 `students-long-1770814903849`：`events` 正常产出，无 `422 audio duration exceeds 30s`
 
 ## 6. 当前阻塞与处理
 - `pnpm` 在 Node v25 + corepack 环境出现签名校验错误（keyid mismatch）。

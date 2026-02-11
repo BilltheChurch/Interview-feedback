@@ -251,6 +251,7 @@ const TARGET_FORMAT = "pcm_s16le";
 const TARGET_SAMPLE_RATE = 16000;
 const TARGET_CHANNELS = 1;
 const ONE_SECOND_PCM_BYTES = 32000;
+const INFERENCE_MAX_AUDIO_SECONDS = 30;
 const DASHSCOPE_DEFAULT_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const DASHSCOPE_DEFAULT_MODEL = "fun-asr-realtime-2025-11-07";
 
@@ -397,6 +398,25 @@ function pcm16ToWavBytes(pcm: Uint8Array, sampleRate = TARGET_SAMPLE_RATE, chann
   view.setUint32(40, pcm.byteLength, true);
 
   return concatUint8Arrays([header, pcm]);
+}
+
+function truncatePcm16WavToSeconds(
+  wavBytes: Uint8Array,
+  maxSeconds: number,
+  sampleRate = TARGET_SAMPLE_RATE,
+  channels = TARGET_CHANNELS
+): Uint8Array {
+  const maxPcmBytes = Math.max(0, Math.floor(maxSeconds * sampleRate * channels * 2));
+  if (maxPcmBytes <= 0 || wavBytes.byteLength <= 44) {
+    return wavBytes;
+  }
+
+  const pcm = wavBytes.subarray(44);
+  if (pcm.byteLength <= maxPcmBytes) {
+    return wavBytes;
+  }
+
+  return pcm16ToWavBytes(pcm.subarray(0, maxPcmBytes), sampleRate, channels);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1891,8 +1911,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
 
     const currentState = (await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)) ?? structuredClone(DEFAULT_STATE);
+    const safeWavBytes = truncatePcm16WavToSeconds(wavBytes, INFERENCE_MAX_AUDIO_SECONDS);
     const audioPayload: AudioPayload = {
-      content_b64: bytesToBase64(wavBytes),
+      content_b64: bytesToBase64(safeWavBytes),
       format: "wav",
       sample_rate: TARGET_SAMPLE_RATE,
       channels: TARGET_CHANNELS
