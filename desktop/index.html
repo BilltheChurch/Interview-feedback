@@ -11,7 +11,7 @@
       <header class="header">
         <div>
           <h1>Interview Feedback Desktop</h1>
-          <p class="subtitle">Phase 1: Local audio self-check + 16k mono pcm_s16le normalization</p>
+          <p class="subtitle">Phase 2.3: Dual-stream ingest + realtime ASR live view</p>
         </div>
         <div class="status-chip" id="app-info">Loading runtime info...</div>
       </header>
@@ -22,28 +22,72 @@
           <span>Meeting ID</span>
           <input id="meeting-id" type="text" value="local-selfcheck" />
         </label>
+        <label class="field">
+          <span>Gateway HTTP URL</span>
+          <input id="api-base-url" type="text" value="https://api.frontierace.ai" />
+        </label>
       </section>
 
       <section class="panel">
-        <h2>Microphone Self-check</h2>
+        <h2>Session Config</h2>
+        <label class="field">
+          <span>Interviewer Name (Pre-config)</span>
+          <input id="interviewer-name" type="text" placeholder="e.g. Bill" />
+        </label>
+        <label class="field">
+          <span>Teams Interviewer Name</span>
+          <input id="teams-interviewer-name" type="text" placeholder="e.g. Bill (from Teams roster)" />
+        </label>
+        <label class="field">
+          <span>Teams Participants JSON</span>
+          <textarea id="teams-participants" rows="4" placeholder='[{"name":"Bill"},{"name":"Alice"},{"name":"Bob"}]'></textarea>
+        </label>
         <div class="actions">
-          <button id="btn-init-stream">Init Mic</button>
+          <button id="btn-save-session-config">Save Session Config</button>
+          <button id="btn-refresh-live">Refresh Live View</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Capture Self-check (Mic + System)</h2>
+        <div class="actions">
+          <button id="btn-init-mic">Init Mic</button>
+          <button id="btn-init-system">Init System Audio</button>
           <button id="btn-start-recording" disabled>Start 30s Recording</button>
           <button id="btn-stop-recording" disabled>Stop Recording</button>
           <button id="btn-open-last-file" disabled>Open Last WAV</button>
         </div>
-        <div class="meter-wrap">
-          <div class="meter-label">Input level</div>
-          <div class="meter-track">
-            <div id="meter-bar" class="meter-bar"></div>
+        <p class="muted">
+          System audio on macOS requires screen/audio capture permission. In picker, choose the active screen/window and enable system audio.
+        </p>
+        <div class="meter-grid">
+          <div class="meter-wrap">
+            <div class="meter-label">Mic level</div>
+            <div class="meter-track">
+              <div id="meter-mic-bar" class="meter-bar"></div>
+            </div>
+            <div id="meter-mic-value" class="meter-value">0%</div>
           </div>
-          <div id="meter-value" class="meter-value">0%</div>
+          <div class="meter-wrap">
+            <div class="meter-label">System level</div>
+            <div class="meter-track">
+              <div id="meter-system-bar" class="meter-bar"></div>
+            </div>
+            <div id="meter-system-value" class="meter-value">0%</div>
+          </div>
+          <div class="meter-wrap">
+            <div class="meter-label">Mixed level</div>
+            <div class="meter-track">
+              <div id="meter-mixed-bar" class="meter-bar"></div>
+            </div>
+            <div id="meter-mixed-value" class="meter-value">0%</div>
+          </div>
         </div>
         <audio id="playback" controls></audio>
       </section>
 
       <section class="panel">
-        <h2>Live Upload (WebSocket 1s Chunks)</h2>
+        <h2>Live Upload (Dual WS 1s Chunks: teacher + students)</h2>
         <label class="field">
           <span>Gateway WS URL</span>
           <input id="ws-url" type="text" value="wss://api.frontierace.ai/v1/audio/ws" />
@@ -53,7 +97,7 @@
           <button id="btn-stop-upload" disabled>Stop Upload</button>
           <button id="btn-fetch-upload-status" disabled>Fetch Upload Status</button>
         </div>
-        <p id="upload-status" class="muted">Upload not started.</p>
+        <p id="upload-status" class="muted">Upload not started. Dual input required (mic + system).</p>
       </section>
 
       <section class="panel">
@@ -68,6 +112,16 @@
       <section class="panel">
         <h2>Result</h2>
         <pre id="result-json" class="result-box">No run yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Live Transcript</h2>
+        <pre id="live-transcript" class="result-box">No transcript yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Speaker Events</h2>
+        <pre id="speaker-events" class="result-box">No events yet.</pre>
       </section>
 
       <section class="panel">

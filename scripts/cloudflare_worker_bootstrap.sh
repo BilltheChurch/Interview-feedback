@@ -8,15 +8,17 @@ WORKER_DIR="${ROOT_DIR}/edge/worker"
 BUCKET_NAME="${BUCKET_NAME:-interview-feedback-results}"
 INFERENCE_BASE_URL="${INFERENCE_BASE_URL:-}"
 INFERENCE_API_KEY="${INFERENCE_API_KEY:-}"
+DASHSCOPE_API_KEY="${DASHSCOPE_API_KEY:-}"
 
 usage() {
   cat <<USAGE
 Usage:
-  ${0##*/} --inference-base-url <https://api.example.com> [--inference-api-key <key>] [--bucket <name>]
+  ${0##*/} --inference-base-url <https://api.example.com> [--inference-api-key <key>] [--dashscope-api-key <key>] [--bucket <name>]
 
 Options:
   --inference-base-url   Required. Public base URL for inference service.
   --inference-api-key    Optional. If omitted, you will be prompted by wrangler.
+  --dashscope-api-key    Optional. DashScope key for Fun-ASR realtime.
   --bucket               R2 bucket name (default: ${BUCKET_NAME})
   -h, --help             Show help
 USAGE
@@ -34,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bucket)
       BUCKET_NAME="$2"
+      shift 2
+      ;;
+    --dashscope-api-key)
+      DASHSCOPE_API_KEY="$2"
       shift 2
       ;;
     -h|--help)
@@ -90,6 +96,14 @@ if [[ -n "${INFERENCE_API_KEY}" ]]; then
 else
   echo "INFERENCE_API_KEY not provided. Run manually if needed:"
   echo "  wrangler secret put INFERENCE_API_KEY"
+fi
+
+if [[ -n "${DASHSCOPE_API_KEY}" ]]; then
+  printf '%s' "${DASHSCOPE_API_KEY}" | wrangler secret put ALIYUN_DASHSCOPE_API_KEY >/dev/null
+  echo "Secret set: ALIYUN_DASHSCOPE_API_KEY"
+else
+  echo "DASHSCOPE_API_KEY not provided. Run manually before Phase 2 ASR:"
+  echo "  wrangler secret put ALIYUN_DASHSCOPE_API_KEY"
 fi
 
 echo

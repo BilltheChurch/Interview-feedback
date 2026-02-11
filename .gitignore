@@ -11,6 +11,7 @@ edge/worker/node_modules/
 edge/worker/.wrangler/
 desktop/node_modules/
 desktop/artifacts/
+artifacts/
 
 # Secrets / local config
 inference/.env

@@ -1,10 +1,10 @@
-# Cloudflare Worker Gateway (Phase 2/3/4 Skeleton)
+# Cloudflare Worker Gateway (Phase 2.3 Realtime)
 
-This worker is the next-stage gateway between clients and inference:
-
-- Worker: request auth/routing
-- Durable Object: per-session state (`clusters`, `bindings`, `events`)
-- R2: audio chunks (`sessions/<id>/chunks/<seq>.pcm`) + finalized `result.json`
+Gateway responsibilities:
+- WebSocket ingest for dual streams (`teacher` / `students`)
+- Durable Object session state + speaker events
+- Realtime FunASR forwarding (long-lived WS per stream)
+- R2 chunk storage + `result.json` finalization
 
 ## 1. Prerequisites
 
@@ -14,76 +14,93 @@ npm install
 wrangler whoami
 ```
 
-If `wrangler whoami` fails, login first:
+If needed:
 
 ```bash
 wrangler login
 ```
 
-## 2. Required resources
-
-- Durable Object class: `MeetingSessionDO` (managed by migration in `wrangler.jsonc`)
-- R2 bucket: `interview-feedback-results`
-
-Create bucket (idempotent):
-
-```bash
-wrangler r2 bucket create interview-feedback-results
-```
-
-## 3. Required secrets
+## 2. Required secrets
 
 ```bash
 wrangler secret put INFERENCE_BASE_URL
 wrangler secret put INFERENCE_API_KEY
+wrangler secret put ALIYUN_DASHSCOPE_API_KEY
 ```
 
-Optional runtime vars in `wrangler.jsonc`:
+## 3. Runtime vars (`wrangler.jsonc`)
 
-- `INFERENCE_TIMEOUT_MS` (default `15000`)
-- `INFERENCE_RESOLVE_PATH` (default `/speaker/resolve`)
+- `ASR_MODEL=fun-asr-realtime-2025-11-07`
+- `ASR_REALTIME_ENABLED=true`
+- `ASR_WS_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference/`
+- `ASR_TIMEOUT_MS=45000`
+- `ASR_STREAM_CHUNK_BYTES=12800`
+- `ASR_SEND_PACING_MS=0`
+- `ASR_DEBUG_LOG_EVENTS=false`
 
-## 4. Local dev
+Legacy backfill path still available:
+- `ASR_WINDOW_SECONDS`
+- `ASR_HOP_SECONDS`
 
-```bash
-npm run dev
-```
-
-Health check:
-
-```bash
-curl -s http://localhost:8787/health | jq
-```
-
-## 5. API surface
+## 4. API Surface
 
 - `GET /health`
-- `GET /v1/audio/ws/:session_id` (WebSocket)
-  - frame type `chunk` with `meeting_id/seq/timestamp_ms/sample_rate/channels/format/content_b64`
-  - strict validation: `16000Hz`, `mono`, `pcm_s16le`, `32000 bytes` per frame
-  - server replies `ack/status/error`
-- `POST /v1/sessions/:session_id/resolve`
-  - body: `{ audio, asr_text?, roster? }`
-  - forwards to inference `/speaker/resolve`
-  - persists updated state + event in Durable Object
+- `GET /v1/audio/ws/:session_id`
+- `GET /v1/audio/ws/:session_id/:stream_role` (`teacher|students`)
+- `POST /v1/sessions/:session_id/config`
+  - body:
+    - `teams_participants: [{name,email?}]`
+    - `teams_interviewer_name`
+    - `interviewer_name`
+- `GET /v1/sessions/:session_id/events?stream_role=...&limit=...`
 - `GET /v1/sessions/:session_id/state`
-  - returns current DO state snapshot + ingest stats
+- `GET /v1/sessions/:session_id/utterances?stream_role=...&view=raw|merged&limit=...`
+- `POST /v1/sessions/:session_id/resolve?stream_role=...`
+- `POST /v1/sessions/:session_id/asr-run?stream_role=...&max_windows=...` (backfill only)
+- `POST /v1/sessions/:session_id/asr-reset?stream_role=...`
 - `POST /v1/sessions/:session_id/finalize`
-  - writes `sessions/<session_id>/result.json` to R2
 
-WS local smoke:
+## 5. Realtime behavior
+
+- Main path is realtime ASR:
+  - ingest `chunk` -> enqueue -> long-lived ASR WS send (no 10s window replay)
+- `asr_by_stream` now includes:
+  - `mode`
+  - `asr_ws_state`
+  - `backlog_chunks`
+  - `ingest_lag_seconds`
+  - `last_emit_at`
+  - `ingest_to_utterance_p50_ms`
+  - `ingest_to_utterance_p95_ms`
+- `utterances view=merged` uses overlap-aware merge (`merged v2`), not exact-string-only dedup.
+
+## 6. Smoke Commands
+
+WS ingest:
 
 ```bash
 node /Users/billthechurch/Interview-feedback/scripts/ws_ingest_smoke.mjs \
-  --base-http http://127.0.0.1:8787 \
-  --base-ws ws://127.0.0.1:8787 \
-  --chunks 3
+  --base-http https://api.frontierace.ai \
+  --base-ws wss://api.frontierace.ai \
+  --session-id ws-smoke-realtime \
+  --stream-role teacher \
+  --chunks 6
 ```
 
-## 6. Deploy
+Backfill route compatibility:
+
+```bash
+python /Users/billthechurch/Interview-feedback/scripts/smoke_asr_worker.py \
+  --base-url https://api.frontierace.ai \
+  --session-id soak-20260211-02 \
+  --stream-role mixed \
+  --view merged \
+  --min-utterances 50 \
+  --max-windows 1
+```
+
+## 7. Deploy
 
 ```bash
 npm run deploy
 ```
-
-On first deploy, Wrangler applies DO migration tag `v1`.

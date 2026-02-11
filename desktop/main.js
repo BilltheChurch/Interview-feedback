@@ -1,5 +1,5 @@
 const path = require('node:path');
-const { app, BrowserWindow, dialog, ipcMain, shell, session } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, session } = require('electron');
 
 const {
   finalizeRecording,
@@ -9,7 +9,7 @@ const {
   TARGET_SAMPLE_RATE
 } = require('./lib/audioPipeline');
 
-const APP_TITLE = 'Interview Feedback Desktop (Phase 1)';
+const APP_TITLE = 'Interview Feedback Desktop (Phase 2.3)';
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -109,16 +109,81 @@ function registerIpcHandlers() {
     }
     return { ok: true };
   });
+
+  ipcMain.handle('api:request', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('api request payload is required');
+    }
+
+    const method = typeof payload.method === 'string' ? payload.method.toUpperCase() : 'GET';
+    const url = typeof payload.url === 'string' ? payload.url : '';
+    if (!url) {
+      throw new Error('api request url is required');
+    }
+
+    const headers = payload.headers && typeof payload.headers === 'object' ? payload.headers : {};
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: payload.body === undefined ? undefined : payload.body
+    });
+    const text = await response.text();
+    return {
+      ok: response.ok,
+      status: response.status,
+      text
+    };
+  });
 }
 
 app.whenReady().then(() => {
+  const allowedPermissions = new Set([
+    'media',
+    'microphone',
+    'display-capture',
+    'screen'
+  ]);
+
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    if (permission === 'media' || permission === 'microphone') {
+    if (allowedPermissions.has(permission)) {
       callback(true);
       return;
     }
     callback(false);
   });
+
+  // Required for navigator.mediaDevices.getDisplayMedia() in Electron.
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (_request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({
+          types: ['screen', 'window']
+        });
+
+        if (!sources || sources.length === 0) {
+          callback({
+            video: null,
+            audio: null
+          });
+          return;
+        }
+
+        callback({
+          video: sources[0],
+          audio: 'loopback'
+        });
+      } catch (error) {
+        console.error('setDisplayMediaRequestHandler failed:', error);
+        callback({
+          video: null,
+          audio: null
+        });
+      }
+    },
+    {
+      useSystemPicker: true
+    }
+  );
 
   registerIpcHandlers();
   createWindow();

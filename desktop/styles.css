@@ -73,11 +73,13 @@ body {
   max-width: 460px;
 }
 
-.field input {
+.field input,
+.field textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px 12px;
   font-size: 14px;
+  font-family: inherit;
 }
 
 .actions {
@@ -108,6 +110,11 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.meter-grid {
+  display: grid;
+  gap: 8px;
 }
 
 .meter-label {

@@ -12,6 +12,7 @@ const baseHttp = argValue("--base-http", "http://127.0.0.1:8787");
 const baseWs = argValue("--base-ws", "ws://127.0.0.1:8787");
 const sessionId = argValue("--session-id", `ws-smoke-${Date.now()}`);
 const chunkCount = Number(argValue("--chunks", "3"));
+const streamRole = argValue("--stream-role", "mixed");
 
 if (!Number.isInteger(chunkCount) || chunkCount <= 0) {
   throw new Error("--chunks must be a positive integer");
@@ -34,6 +35,7 @@ function buildChunk(seq) {
 
   return {
     type: "chunk",
+    stream_role: streamRole,
     meeting_id: sessionId,
     seq,
     timestamp_ms: Date.now(),
@@ -83,7 +85,9 @@ function waitForEvent(target, name, timeoutMs = 10000) {
 }
 
 async function main() {
-  const wsUrl = `${baseWs.replace(/\/+$/, "")}/v1/audio/ws/${encodeURIComponent(sessionId)}`;
+  const wsUrlBase = `${baseWs.replace(/\/+$/, "")}/v1/audio/ws/${encodeURIComponent(sessionId)}`;
+  const wsUrl =
+    streamRole === "mixed" ? wsUrlBase : `${wsUrlBase}/${encodeURIComponent(streamRole)}`;
   const httpStateUrl = `${baseHttp.replace(/\/+$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/state`;
 
   const ws = new WebSocket(wsUrl);
@@ -111,8 +115,9 @@ async function main() {
 
   ws.send(
     JSON.stringify({
-      type: "hello",
-      meeting_id: sessionId,
+        type: "hello",
+        stream_role: streamRole,
+        meeting_id: sessionId,
       sample_rate: 16000,
       channels: 1,
       format: "pcm_s16le"
@@ -141,9 +146,13 @@ async function main() {
     throw new Error(`state endpoint failed: HTTP ${stateResp.status}`);
   }
   const state = await stateResp.json();
-  const ingest = state.ingest;
+  const ingestByStream = state.ingest_by_stream || {};
+  const ingest =
+    streamRole === "mixed"
+      ? state.ingest || ingestByStream.mixed
+      : ingestByStream[streamRole];
   if (!ingest) {
-    throw new Error("state.ingest is missing");
+    throw new Error(`state ingest for stream_role=${streamRole} is missing`);
   }
   if (ingest.received_chunks !== chunkCount) {
     throw new Error(`expected received_chunks=${chunkCount}, got ${ingest.received_chunks}`);
