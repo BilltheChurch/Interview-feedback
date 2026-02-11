@@ -77,13 +77,27 @@ if ! cloudflared tunnel list --output json >/dev/null 2>&1; then
 fi
 
 get_tunnel_uuid() {
-  cloudflared tunnel list --output json | python3 - "$1" <<'PY'
+  local json_output
+  json_output="$(cloudflared tunnel list --output json 2>/dev/null || true)"
+  python3 - "$1" "$json_output" <<'PY'
 import json
 import sys
 
 name = sys.argv[1]
-for item in json.load(sys.stdin):
-    if item.get("name") == name:
+raw = sys.argv[2].strip()
+if not raw:
+    raise SystemExit(0)
+
+try:
+    data = json.loads(raw)
+except json.JSONDecodeError:
+    raise SystemExit(0)
+
+if not data:
+    raise SystemExit(0)
+
+for item in data:
+    if isinstance(item, dict) and item.get("name") == name:
         print(item.get("id", ""))
         break
 PY
