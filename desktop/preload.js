@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   calendarConnectMicrosoft: () => ipcRenderer.invoke('calendar:connectMicrosoft'),
   calendarGetUpcomingMeetings: (payload) => ipcRenderer.invoke('calendar:getUpcomingMeetings', payload),
   calendarDisconnectMicrosoft: () => ipcRenderer.invoke('calendar:disconnectMicrosoft'),
+  openPrivacySettings: (payload) => ipcRenderer.invoke('system:openPrivacySettings', payload),
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source')
 });

@@ -9,6 +9,23 @@ const PROCESS_CANDIDATES = [
   "Teams"
 ];
 
+const PERMISSION_KEYWORDS = [
+  "not authorized",
+  "assistive",
+  "accessibility",
+  "automation",
+  "not permitted",
+  "not allowed",
+  "appleevent",
+  "不允许辅助访问",
+  "辅助访问",
+  "没有权限",
+  "未获授权",
+  "不允许自动化"
+];
+
+const PERMISSION_ERROR_CODES = new Set([-1743, -25211, -1719, -10004]);
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -48,9 +65,17 @@ function parseResultLine(rawLine) {
   }
 
   if (kind === "error") {
+    const errorCode = Number(parts[1]);
+    const reason = parts.slice(2).join("|") || parts.slice(1).join("|") || "unknown osascript error";
+    if (isPermissionError({ errorCode, reason })) {
+      return {
+        status: "permission_required",
+        reason
+      };
+    }
     return {
       status: "error",
-      reason: parts.slice(1).join("|") || "unknown osascript error"
+      reason
     };
   }
 
@@ -78,13 +103,18 @@ function buildAppleScriptLines() {
     "  end tell",
     '  return "teams_not_found"',
     "on error errMsg number errNum",
-    "  set errLower to (do shell script \"printf %s \" & quoted form of errMsg & \" | tr '[:upper:]' '[:lower:]'\")",
-    "  if errNum is -1743 or errNum is -25211 or errLower contains \"not authorized\" or errLower contains \"assistive\" then",
-    '    return "permission_required|" & errMsg',
-    "  end if",
     '  return "error|" & errNum & "|" & errMsg',
     "end try"
   ];
+}
+
+function isPermissionError(input) {
+  const code = Number(input?.errorCode);
+  if (PERMISSION_ERROR_CODES.has(code)) {
+    return true;
+  }
+  const reason = String(input?.reason || "").toLowerCase();
+  return PERMISSION_KEYWORDS.some((keyword) => reason.includes(keyword));
 }
 
 async function fetchTeamsBoundsWithAppleScript() {
@@ -99,16 +129,16 @@ async function fetchTeamsBoundsWithAppleScript() {
   } catch (error) {
     const stderr = String(error?.stderr || "");
     const stdout = String(error?.stdout || "");
-    const combined = `${stdout}\n${stderr}`.toLowerCase();
-    if (combined.includes("not authorized") || combined.includes("assistive") || combined.includes("automation")) {
+    const combined = `${stdout}\n${stderr}`.trim();
+    if (isPermissionError({ reason: combined })) {
       return {
         status: "permission_required",
-        reason: stderr.trim() || stdout.trim() || "macOS accessibility/automation permission required"
+        reason: combined || "macOS accessibility/automation permission required"
       };
     }
     return {
       status: "error",
-      reason: stderr.trim() || stdout.trim() || error?.message || "osascript failed"
+      reason: combined || error?.message || "osascript failed"
     };
   }
 }

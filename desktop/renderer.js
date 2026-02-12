@@ -115,6 +115,9 @@ const btnGraphConnect = document.querySelector("#btn-graph-connect");
 const btnGraphSync = document.querySelector("#btn-graph-sync");
 const btnGraphDisconnect = document.querySelector("#btn-graph-disconnect");
 const graphStatusEl = document.querySelector("#graph-status");
+const btnOpenAccessibilitySettings = document.querySelector("#btn-open-accessibility-settings");
+const btnOpenAutomationSettings = document.querySelector("#btn-open-automation-settings");
+const attachHintEl = document.querySelector("#attach-hint");
 
 const transcriptFormatter = window.IFTranscriptFormatter || {};
 const liveMetricsEngine = window.IFLiveMetrics || {};
@@ -272,27 +275,53 @@ function normalizeAttachStatus(input) {
   };
 }
 
+function humanizeAttachReason(reason) {
+  const text = String(reason || "").trim();
+  if (!text) return "";
+  if (text.includes("不允许辅助访问")) {
+    return "Accessibility permission is missing for this runtime (Electron/Terminal).";
+  }
+  return text;
+}
+
 function renderAttachStatus(input) {
   attachStatus = normalizeAttachStatus(input);
   if (!attachStatusEl) return;
   const status = attachStatus.status;
-  attachStatusEl.title = attachStatus.reason || "";
+  const reason = humanizeAttachReason(attachStatus.reason);
+  attachStatusEl.title = reason || "";
   attachStatusEl.classList.remove("chip-info", "chip-accent", "chip-neutral");
   if (status === "attached") {
     attachStatusEl.classList.add("chip-accent");
     attachStatusEl.textContent = "Attach: attached";
+    if (attachHintEl) {
+      attachHintEl.textContent = "Attached to Teams. Sidebar follows the meeting window.";
+    }
   } else if (status === "searching") {
     attachStatusEl.classList.add("chip-neutral");
     attachStatusEl.textContent = "Attach: searching";
+    if (attachHintEl) {
+      attachHintEl.textContent = "Searching for Teams window...";
+    }
   } else if (status === "teams_not_found") {
     attachStatusEl.classList.add("chip-neutral");
     attachStatusEl.textContent = "Attach: teams_not_found";
+    if (attachHintEl) {
+      attachHintEl.textContent = "Open a Teams meeting window first, then click Attach.";
+    }
   } else if (status === "permission_required") {
     attachStatusEl.classList.add("chip-info");
     attachStatusEl.textContent = "Attach: permission_required";
+    if (attachHintEl) {
+      attachHintEl.textContent =
+        `Permission required. ${reason || "Grant Accessibility/Automation access."} After granting, restart the app once.`;
+    }
   } else {
     attachStatusEl.classList.add("chip-info");
     attachStatusEl.textContent = `Attach: ${status}`;
+    if (attachHintEl) {
+      attachHintEl.textContent = reason || "Attach error. Check debug logs.";
+    }
   }
 }
 
@@ -1071,8 +1100,16 @@ async function refreshSidecarStatus() {
 async function requestAttachToTeams() {
   const status = await desktopAPI.attachToTeams();
   renderAttachStatus(status);
+  if (status?.status === "permission_required") {
+    const reason = humanizeAttachReason(status?.reason);
+    setUploadStatus(`Attach blocked by permission. ${reason} Open Accessibility and Automation settings, then restart app.`);
+    logLine(`Attach permission required: ${reason || "unknown reason"}`);
+  } else if (status?.status === "teams_not_found") {
+    setUploadStatus("Teams meeting window not found. Open Teams meeting and click Attach again.");
+  }
   if (status?.status === "attached" && appMode !== "session") {
     setAppMode("session");
+    setUploadStatus("Attached to Teams. Initialize mic/system audio to start session.");
   }
   updateButtons();
   return status;
@@ -2585,6 +2622,28 @@ function bindEvents() {
       } catch (error) {
         logLine(`Detach failed: ${error.message}`);
         setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnOpenAccessibilitySettings) {
+    btnOpenAccessibilitySettings.addEventListener("click", async () => {
+      try {
+        await desktopAPI.openPrivacySettings({ target: "accessibility" });
+        logLine("Opened Accessibility settings.");
+      } catch (error) {
+        logLine(`Open Accessibility settings failed: ${error.message}`);
+      }
+    });
+  }
+
+  if (btnOpenAutomationSettings) {
+    btnOpenAutomationSettings.addEventListener("click", async () => {
+      try {
+        await desktopAPI.openPrivacySettings({ target: "automation" });
+        logLine("Opened Automation settings.");
+      } catch (error) {
+        logLine(`Open Automation settings failed: ${error.message}`);
       }
     });
   }

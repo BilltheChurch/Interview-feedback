@@ -520,6 +520,22 @@ function registerIpcHandlers() {
     }
     return graphCalendar.disconnect();
   });
+
+  ipcMain.handle('system:openPrivacySettings', async (_event, payload) => {
+    const target = String(payload?.target || 'accessibility').trim().toLowerCase();
+    const urls = {
+      accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+      automation: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
+      screencapture: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+    };
+    const url = urls[target] || urls.accessibility;
+    await shell.openExternal(url);
+    return {
+      ok: true,
+      target,
+      url
+    };
+  });
 }
 
 app.whenReady().then(() => {
