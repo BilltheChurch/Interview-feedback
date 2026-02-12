@@ -12,10 +12,12 @@ const {
 const { createDiarizationSidecar } = require('./lib/diarizationSidecar');
 const { createPyannoteWindowBuilder } = require('./lib/pyannoteWindowBuilder');
 const { TeamsWindowTracker } = require('./lib/teamsWindowTracker');
+const { GraphCalendarClient } = require('./lib/graphCalendar');
 
 const APP_TITLE = 'Interview Feedback Desktop (Phase 2.3)';
 let preferredDisplaySourceId = null;
 let mainWindow = null;
+let windowMode = 'dashboard';
 
 function logDesktop(message, details = null) {
   const stamp = new Date().toISOString();
@@ -37,6 +39,7 @@ const sidecar = createDiarizationSidecar({
   log: (line) => logDesktop(line)
 });
 const windowBuilders = new Map();
+let graphCalendar = null;
 const teamsWindowTracker = new TeamsWindowTracker({
   getOverlayWindow: () => mainWindow,
   screen,
@@ -107,15 +110,45 @@ async function requestJson(url, init = {}) {
   };
 }
 
+function setWindowMode(nextMode) {
+  const mode = nextMode === 'session' ? 'session' : 'dashboard';
+  windowMode = mode;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return { mode, applied: false };
+  }
+
+  if (mode === 'session') {
+    mainWindow.setMinimumSize(380, 640);
+    mainWindow.setMaximumSize(520, 2000);
+    const current = mainWindow.getBounds();
+    const nextWidth = Math.max(380, Math.min(520, current.width || 420));
+    const nextHeight = Math.max(700, current.height || 860);
+    mainWindow.setBounds({ ...current, width: nextWidth, height: nextHeight }, true);
+    mainWindow.setAlwaysOnTop(true, 'floating');
+    mainWindow.setFullScreenable(false);
+    mainWindow.setResizable(true);
+    return { mode, applied: true };
+  }
+
+  mainWindow.setMaximumSize(10000, 10000);
+  mainWindow.setMinimumSize(900, 680);
+  const current = mainWindow.getBounds();
+  const nextWidth = Math.max(980, current.width || 1040);
+  const nextHeight = Math.max(760, current.height || 780);
+  mainWindow.setBounds({ ...current, width: nextWidth, height: nextHeight }, true);
+  mainWindow.setAlwaysOnTop(false);
+  mainWindow.setResizable(true);
+  return { mode, applied: true };
+}
+
 function createWindow() {
   const createdWindow = new BrowserWindow({
-    width: 420,
-    height: 860,
-    minWidth: 380,
-    maxWidth: 520,
-    minHeight: 640,
+    width: 1040,
+    height: 780,
+    minWidth: 900,
+    minHeight: 680,
     title: APP_TITLE,
-    alwaysOnTop: true,
+    alwaysOnTop: false,
     skipTaskbar: false,
     resizable: true,
     fullScreenable: false,
@@ -129,7 +162,6 @@ function createWindow() {
   });
 
   createdWindow.loadFile(path.join(__dirname, 'index.html'));
-  createdWindow.setAlwaysOnTop(true, 'floating');
   createdWindow.setVisibleOnAllWorkspaces(false, { visibleOnFullScreen: false });
 
   createdWindow.webContents.on('render-process-gone', (_event, details) => {
@@ -151,6 +183,7 @@ function createWindow() {
   });
 
   mainWindow = createdWindow;
+  setWindowMode('dashboard');
   return createdWindow;
 }
 
@@ -439,9 +472,64 @@ function registerIpcHandlers() {
   ipcMain.handle('window:getAttachStatus', async () => {
     return teamsWindowTracker.status();
   });
+
+  ipcMain.handle('window:setMode', async (_event, payload) => {
+    const mode = String(payload?.mode || '').trim().toLowerCase();
+    if (mode !== 'dashboard' && mode !== 'session') {
+      throw new Error("window mode must be 'dashboard' or 'session'");
+    }
+    return setWindowMode(mode);
+  });
+
+  ipcMain.handle('calendar:setConfig', async (_event, payload) => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.setConfig({
+      clientId: String(payload?.clientId || '').trim(),
+      tenantId: String(payload?.tenantId || '').trim() || 'common'
+    });
+  });
+
+  ipcMain.handle('calendar:getStatus', async () => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.getStatus();
+  });
+
+  ipcMain.handle('calendar:connectMicrosoft', async () => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.connect();
+  });
+
+  ipcMain.handle('calendar:getUpcomingMeetings', async (_event, payload) => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.getUpcomingMeetings({
+      days: Number(payload?.days || 3)
+    });
+  });
+
+  ipcMain.handle('calendar:disconnectMicrosoft', async () => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.disconnect();
+  });
 }
 
 app.whenReady().then(() => {
+  graphCalendar = new GraphCalendarClient({
+    cachePath: path.join(app.getPath('userData'), 'graph', 'token-cache.json'),
+    clientId: process.env.MS_GRAPH_CLIENT_ID || '',
+    tenantId: process.env.MS_GRAPH_TENANT_ID || 'common',
+    log: (message, details) => logDesktop(message, details)
+  });
+
   const allowedPermissions = new Set([
     'media',
     'microphone',

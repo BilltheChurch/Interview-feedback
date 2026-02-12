@@ -12,6 +12,7 @@
     "normalize:smoke": "node scripts/normalize_smoke.js"
   },
   "dependencies": {
+    "@azure/msal-node": "^5.0.4",
     "electron": "^31.7.7",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0"

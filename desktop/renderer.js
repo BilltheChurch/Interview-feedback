@@ -97,6 +97,24 @@ const finalizeStageListEl = document.querySelector("#finalize-stage-list");
 const finalizeStageItems = finalizeStageListEl
   ? Array.from(finalizeStageListEl.querySelectorAll("[data-finalize-stage]"))
   : [];
+const appRootEl = document.querySelector("#app-root");
+const dashboardViewEl = document.querySelector("#dashboard-view");
+const sessionViewEl = document.querySelector("#session-view");
+const btnBackDashboard = document.querySelector("#btn-back-dashboard");
+const btnDashboardEnterSession = document.querySelector("#btn-dashboard-enter-session");
+const dashboardMeetingTitleEl = document.querySelector("#dashboard-meeting-title");
+const dashboardMeetingStartEl = document.querySelector("#dashboard-meeting-start");
+const dashboardMeetingUrlEl = document.querySelector("#dashboard-meeting-url");
+const dashboardMeetingParticipantsEl = document.querySelector("#dashboard-meeting-participants");
+const btnDashboardAddMeeting = document.querySelector("#btn-dashboard-add-meeting");
+const dashboardMeetingListEl = document.querySelector("#dashboard-meeting-list");
+const graphClientIdEl = document.querySelector("#graph-client-id");
+const graphTenantIdEl = document.querySelector("#graph-tenant-id");
+const btnGraphSaveConfig = document.querySelector("#btn-graph-save-config");
+const btnGraphConnect = document.querySelector("#btn-graph-connect");
+const btnGraphSync = document.querySelector("#btn-graph-sync");
+const btnGraphDisconnect = document.querySelector("#btn-graph-disconnect");
+const graphStatusEl = document.querySelector("#graph-status");
 
 const transcriptFormatter = window.IFTranscriptFormatter || {};
 const liveMetricsEngine = window.IFLiveMetrics || {};
@@ -188,6 +206,8 @@ let attachStatus = { status: "searching", reason: "initializing" };
 let currentReviewTab = "overall";
 let latestLiveSnapshot = null;
 const logBuffer = [];
+let appMode = "dashboard";
+let dashboardMeetings = [];
 
 const FINALIZE_STAGE_ORDER = [
   "queued",
@@ -350,6 +370,165 @@ function updateButtons() {
   }
   updateBackendBadge();
   ensureSessionTimer();
+}
+
+function readJsonStorage(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // noop
+  }
+}
+
+function setAppMode(mode) {
+  const normalized = mode === "session" ? "session" : "dashboard";
+  appMode = normalized;
+  if (appRootEl) {
+    appRootEl.classList.toggle("mode-dashboard", normalized === "dashboard");
+    appRootEl.classList.toggle("mode-session", normalized === "session");
+  }
+  if (dashboardViewEl) {
+    dashboardViewEl.classList.toggle("hidden", normalized !== "dashboard");
+  }
+  if (sessionViewEl) {
+    sessionViewEl.classList.toggle("hidden", normalized !== "session");
+  }
+  if (normalized === "dashboard" && reviewPanelEl) {
+    reviewPanelEl.classList.add("hidden");
+  }
+  desktopAPI.setWindowMode({ mode: normalized }).catch((error) => {
+    logLine(`setWindowMode failed: ${error.message}`);
+  });
+}
+
+function parseParticipantLines(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function setParticipantsInUI(names) {
+  if (!participantListEl) return;
+  participantListEl.innerHTML = "";
+  const unique = [];
+  const seen = new Set();
+  for (const name of names) {
+    const normalized = String(name || "").trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(normalized);
+  }
+  if (!unique.length) {
+    addParticipantRow();
+    return;
+  }
+  for (const name of unique) {
+    addParticipantRow({ name });
+  }
+}
+
+function sanitizeMeetingId(input) {
+  const text = String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (text) return text;
+  return `meeting-${Date.now()}`;
+}
+
+function mergeMeetingsById(items) {
+  const byId = new Map();
+  for (const item of items) {
+    const key = String(item?.meeting_id || "").trim();
+    if (!key) continue;
+    byId.set(key, item);
+  }
+  return Array.from(byId.values()).sort((a, b) => {
+    const aStart = Date.parse(String(a?.start_at || "")) || 0;
+    const bStart = Date.parse(String(b?.start_at || "")) || 0;
+    return aStart - bStart;
+  });
+}
+
+function persistDashboardMeetings() {
+  writeJsonStorage("if.desktop.dashboard.meetings", dashboardMeetings);
+}
+
+function loadDashboardState() {
+  dashboardMeetings = mergeMeetingsById(readJsonStorage("if.desktop.dashboard.meetings", []));
+  const graphConfig = readJsonStorage("if.desktop.graph.config", null);
+  if (graphConfig?.clientId && graphClientIdEl) {
+    graphClientIdEl.value = graphConfig.clientId;
+  }
+  if (graphConfig?.tenantId && graphTenantIdEl) {
+    graphTenantIdEl.value = graphConfig.tenantId;
+  }
+}
+
+function renderMeetingList() {
+  if (!dashboardMeetingListEl) return;
+  if (!dashboardMeetings.length) {
+    dashboardMeetingListEl.innerHTML = `<p class="muted">No meetings yet. Add one manually or sync from Graph.</p>`;
+    return;
+  }
+  const html = dashboardMeetings
+    .map((meeting) => {
+      const start = meeting?.start_at ? new Date(meeting.start_at).toLocaleString() : "unscheduled";
+      const participants = Array.isArray(meeting?.participants) ? meeting.participants : [];
+      const names = participants
+        .map((entry) => (typeof entry === "string" ? entry : entry?.name))
+        .map((name) => String(name || "").trim())
+        .filter(Boolean)
+        .slice(0, 8)
+        .join(", ");
+      return `
+        <article class="meeting-item">
+          <div class="meeting-item-head">
+            <strong>${escapeHtml(meeting?.title || "Untitled Meeting")}</strong>
+            <span class="muted small">${escapeHtml(meeting?.source || "manual")}</span>
+          </div>
+          <div class="muted small">start=${escapeHtml(start)}</div>
+          <div class="muted small">participants=${escapeHtml(names || "-")}</div>
+          <div class="actions wrap">
+            <button type="button" data-meeting-action="start" data-meeting-id="${escapeHtml(meeting.meeting_id)}">Start Sidebar</button>
+            <button type="button" data-meeting-action="remove" data-meeting-id="${escapeHtml(meeting.meeting_id)}">Remove</button>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+  dashboardMeetingListEl.innerHTML = html;
+}
+
+function applyMeetingToSession(meeting) {
+  if (!meeting) return;
+  const idFromTitle = sanitizeMeetingId(meeting?.title);
+  const meetingId = sanitizeMeetingId(meeting?.meeting_id || idFromTitle);
+  if (meetingIdEl) {
+    meetingIdEl.value = meetingId;
+  }
+  const participants = Array.isArray(meeting?.participants) ? meeting.participants : [];
+  const names = participants
+    .map((entry) => (typeof entry === "string" ? entry : entry?.name))
+    .filter(Boolean);
+  setParticipantsInUI(names);
+  saveSessionConfig().catch((error) => {
+    logLine(`Save session config from dashboard failed: ${error.message}`);
+  });
 }
 
 function nowIso() {
@@ -742,6 +921,91 @@ function renderParticipantLiveMetrics(snapshot) {
   participantLiveListEl.innerHTML = html;
 }
 
+async function refreshGraphStatus() {
+  if (!graphStatusEl) return;
+  try {
+    const status = await desktopAPI.calendarGetStatus();
+    graphStatusEl.textContent = JSON.stringify(status, null, 2);
+    return status;
+  } catch (error) {
+    graphStatusEl.textContent = `Graph status failed: ${error.message}`;
+    throw error;
+  }
+}
+
+async function saveGraphConfig() {
+  const clientId = String(graphClientIdEl?.value || "").trim();
+  const tenantId = String(graphTenantIdEl?.value || "common").trim() || "common";
+  if (!clientId) {
+    throw new Error("Azure App Client ID is required");
+  }
+  const status = await desktopAPI.calendarSetConfig({ clientId, tenantId });
+  writeJsonStorage("if.desktop.graph.config", { clientId, tenantId });
+  graphStatusEl.textContent = JSON.stringify(status, null, 2);
+  logLine(`Graph config saved: tenant=${tenantId}`);
+  return status;
+}
+
+async function connectGraphCalendar() {
+  await saveGraphConfig();
+  if (graphStatusEl) {
+    graphStatusEl.textContent = "Waiting for device-code login...";
+  }
+  const result = await desktopAPI.calendarConnectMicrosoft();
+  logLine(`Graph connected: ${result?.account?.username || "unknown"}`);
+  await refreshGraphStatus();
+  return result;
+}
+
+async function syncMeetingsFromGraph() {
+  await saveGraphConfig();
+  const payload = await desktopAPI.calendarGetUpcomingMeetings({ days: 3 });
+  const remoteMeetings = Array.isArray(payload?.meetings) ? payload.meetings : [];
+  dashboardMeetings = mergeMeetingsById([
+    ...dashboardMeetings.filter((item) => item.source !== "graph"),
+    ...remoteMeetings
+  ]);
+  persistDashboardMeetings();
+  renderMeetingList();
+  logLine(`Graph meetings synced: ${remoteMeetings.length}`);
+  await refreshGraphStatus();
+  return payload;
+}
+
+async function disconnectGraphCalendar() {
+  await desktopAPI.calendarDisconnectMicrosoft();
+  await refreshGraphStatus();
+  logLine("Graph disconnected.");
+}
+
+function addMeetingFromDashboardForm() {
+  const title = String(dashboardMeetingTitleEl?.value || "").trim();
+  if (!title) {
+    throw new Error("Meeting title is required");
+  }
+  const startRaw = String(dashboardMeetingStartEl?.value || "").trim();
+  const startAt = startRaw ? new Date(startRaw).toISOString() : "";
+  const participants = parseParticipantLines(dashboardMeetingParticipantsEl?.value || "").map((name) => ({ name }));
+  const item = {
+    source: "manual",
+    meeting_id: sanitizeMeetingId(`${title}-${Date.now()}`),
+    title,
+    start_at: startAt,
+    end_at: "",
+    join_url: String(dashboardMeetingUrlEl?.value || "").trim(),
+    participants
+  };
+  dashboardMeetings = mergeMeetingsById([...dashboardMeetings, item]);
+  persistDashboardMeetings();
+  renderMeetingList();
+  if (dashboardMeetingTitleEl) dashboardMeetingTitleEl.value = "";
+  if (dashboardMeetingStartEl) dashboardMeetingStartEl.value = "";
+  if (dashboardMeetingUrlEl) dashboardMeetingUrlEl.value = "";
+  if (dashboardMeetingParticipantsEl) dashboardMeetingParticipantsEl.value = "";
+  logLine(`Dashboard meeting added: ${item.title}`);
+  return item;
+}
+
 async function triggerFinalizeV2() {
   if (finalizeV2PollTimer) {
     window.clearInterval(finalizeV2PollTimer);
@@ -807,6 +1071,9 @@ async function refreshSidecarStatus() {
 async function requestAttachToTeams() {
   const status = await desktopAPI.attachToTeams();
   renderAttachStatus(status);
+  if (status?.status === "attached" && appMode !== "session") {
+    setAppMode("session");
+  }
   updateButtons();
   return status;
 }
@@ -814,6 +1081,9 @@ async function requestAttachToTeams() {
 async function requestDetachFromTeams() {
   const status = await desktopAPI.detachFromTeams();
   renderAttachStatus(status);
+  if (appMode !== "dashboard") {
+    setAppMode("dashboard");
+  }
   updateButtons();
   return status;
 }
@@ -822,6 +1092,9 @@ async function refreshAttachStatus() {
   try {
     const status = await desktopAPI.getAttachStatus();
     renderAttachStatus(status);
+    if (status?.status === "attached" && appMode !== "session") {
+      setAppMode("session");
+    }
   } catch (error) {
     renderAttachStatus({ status: "error", reason: error?.message || String(error) });
   }
@@ -2316,6 +2589,122 @@ function bindEvents() {
     });
   }
 
+  if (btnDashboardAddMeeting) {
+    btnDashboardAddMeeting.addEventListener("click", () => {
+      try {
+        addMeetingFromDashboardForm();
+      } catch (error) {
+        logLine(`Add dashboard meeting failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (dashboardMeetingListEl) {
+    dashboardMeetingListEl.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const actionButton = target.closest("[data-meeting-action]");
+      if (!actionButton) return;
+      const action = String(actionButton.dataset.meetingAction || "");
+      const meetingId = String(actionButton.dataset.meetingId || "");
+      const meeting = dashboardMeetings.find((item) => String(item?.meeting_id || "") === meetingId);
+      if (!meeting) return;
+
+      if (action === "remove") {
+        dashboardMeetings = dashboardMeetings.filter((item) => String(item?.meeting_id || "") !== meetingId);
+        persistDashboardMeetings();
+        renderMeetingList();
+        logLine(`Dashboard meeting removed: ${meetingId}`);
+        return;
+      }
+
+      if (action === "start") {
+        applyMeetingToSession(meeting);
+        const status = await requestAttachToTeams();
+        if (status?.status === "attached") {
+          setAppMode("session");
+        } else {
+          throw new Error(`Teams attach required before session. status=${status?.status || "unknown"}`);
+        }
+        await refreshLiveView().catch(() => {
+          // ignore initial fetch failures
+        });
+        return;
+      }
+    });
+  }
+
+  if (btnDashboardEnterSession) {
+    btnDashboardEnterSession.addEventListener("click", async () => {
+      try {
+        const status = await requestAttachToTeams();
+        if (status?.status !== "attached") {
+          throw new Error(`Teams attach required before session. status=${status?.status || "unknown"}`);
+        }
+        setAppMode("session");
+      } catch (error) {
+        logLine(`Open sidebar workspace failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnBackDashboard) {
+    btnBackDashboard.addEventListener("click", async () => {
+      try {
+        await requestDetachFromTeams();
+      } catch (error) {
+        logLine(`Detach while returning dashboard failed: ${error.message}`);
+      }
+      setAppMode("dashboard");
+    });
+  }
+
+  if (btnGraphSaveConfig) {
+    btnGraphSaveConfig.addEventListener("click", async () => {
+      try {
+        await saveGraphConfig();
+      } catch (error) {
+        logLine(`Save Graph config failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnGraphConnect) {
+    btnGraphConnect.addEventListener("click", async () => {
+      try {
+        await connectGraphCalendar();
+      } catch (error) {
+        logLine(`Graph connect failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnGraphSync) {
+    btnGraphSync.addEventListener("click", async () => {
+      try {
+        await syncMeetingsFromGraph();
+      } catch (error) {
+        logLine(`Graph sync failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnGraphDisconnect) {
+    btnGraphDisconnect.addEventListener("click", async () => {
+      try {
+        await disconnectGraphCalendar();
+      } catch (error) {
+        logLine(`Graph disconnect failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
   if (btnToggleDebug) {
     btnToggleDebug.addEventListener("click", () => {
       toggleDebugDrawer();
@@ -2600,9 +2989,12 @@ function bindEvents() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   try {
+    loadDashboardState();
+    renderMeetingList();
     if (participantRows().length === 0) {
       addParticipantRow();
     }
+    setAppMode("dashboard");
     renderCaptureHealth();
     switchDebugTab("logs");
     toggleDebugDrawer(false);
@@ -2610,6 +3002,17 @@ window.addEventListener("DOMContentLoaded", async () => {
     updateButtons();
     await renderRuntimeInfo();
     bindEvents();
+    if (graphClientIdEl?.value) {
+      await desktopAPI.calendarSetConfig({
+        clientId: String(graphClientIdEl.value || "").trim(),
+        tenantId: String(graphTenantIdEl?.value || "common").trim() || "common"
+      }).catch((error) => {
+        logLine(`Graph bootstrap config failed: ${error.message}`);
+      });
+    }
+    await refreshGraphStatus().catch(() => {
+      // ignore startup graph status failures
+    });
     await requestAttachToTeams().catch((error) => {
       logLine(`Attach on startup failed: ${error.message}`);
     });

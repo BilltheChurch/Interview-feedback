@@ -17,6 +17,12 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   attachToTeams: () => ipcRenderer.invoke('window:attachToTeams'),
   detachFromTeams: () => ipcRenderer.invoke('window:detachFromTeams'),
   getAttachStatus: () => ipcRenderer.invoke('window:getAttachStatus'),
+  setWindowMode: (payload) => ipcRenderer.invoke('window:setMode', payload),
+  calendarSetConfig: (payload) => ipcRenderer.invoke('calendar:setConfig', payload),
+  calendarGetStatus: () => ipcRenderer.invoke('calendar:getStatus'),
+  calendarConnectMicrosoft: () => ipcRenderer.invoke('calendar:connectMicrosoft'),
+  calendarGetUpcomingMeetings: (payload) => ipcRenderer.invoke('calendar:getUpcomingMeetings', payload),
+  calendarDisconnectMicrosoft: () => ipcRenderer.invoke('calendar:disconnectMicrosoft'),
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source')
 });
