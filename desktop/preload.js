@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   diarizationStop: () => ipcRenderer.invoke('diarization:stop'),
   diarizationGetStatus: () => ipcRenderer.invoke('diarization:getStatus'),
   diarizationPushChunk: (payload) => ipcRenderer.invoke('diarization:pushChunk', payload),
+  attachToTeams: () => ipcRenderer.invoke('window:attachToTeams'),
+  detachFromTeams: () => ipcRenderer.invoke('window:detachFromTeams'),
+  getAttachStatus: () => ipcRenderer.invoke('window:getAttachStatus'),
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source')
 });

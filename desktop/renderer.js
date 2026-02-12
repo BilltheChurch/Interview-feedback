@@ -76,6 +76,30 @@ const btnEnrollmentStart = document.querySelector("#btn-enrollment-start");
 const btnEnrollmentStop = document.querySelector("#btn-enrollment-stop");
 const btnRefreshLive = document.querySelector("#btn-refresh-live");
 const btnRefreshClusters = document.querySelector("#btn-refresh-clusters");
+const btnAttachTeams = document.querySelector("#btn-attach-teams");
+const btnDetachTeams = document.querySelector("#btn-detach-teams");
+const attachStatusEl = document.querySelector("#attach-status");
+const backendBadgeEl = document.querySelector("#backend-badge");
+const recordingTimerEl = document.querySelector("#recording-timer");
+const btnToggleDebug = document.querySelector("#btn-toggle-debug");
+const debugDrawerEl = document.querySelector("#debug-drawer");
+const debugTabButtons = Array.from(document.querySelectorAll("[data-debug-tab-btn]"));
+const btnOpenReview = document.querySelector("#btn-open-review");
+const reviewPanelEl = document.querySelector("#review-panel");
+const reviewTabOverallBtn = document.querySelector("#btn-review-tab-overall");
+const reviewTabPersonBtn = document.querySelector("#btn-review-tab-person");
+const reviewTabEvidenceBtn = document.querySelector("#btn-review-tab-evidence");
+const reviewOverallEl = document.querySelector("#review-overall");
+const reviewPerPersonEl = document.querySelector("#review-per-person");
+const reviewEvidenceEl = document.querySelector("#review-evidence");
+const participantLiveListEl = document.querySelector("#participant-live-list");
+const finalizeStageListEl = document.querySelector("#finalize-stage-list");
+const finalizeStageItems = finalizeStageListEl
+  ? Array.from(finalizeStageListEl.querySelectorAll("[data-finalize-stage]"))
+  : [];
+
+const transcriptFormatter = window.IFTranscriptFormatter || {};
+const liveMetricsEngine = window.IFLiveMetrics || {};
 
 function safeLogToConsole(message) {
   try {
@@ -157,14 +181,37 @@ let pendingMemoAnchor = null;
 let finalizeV2PollTimer;
 let finalizeV2JobId = "";
 let sidecarActive = false;
+let attachPollTimer;
+let sessionTimer;
+let sessionStartedAtMs = 0;
+let attachStatus = { status: "searching", reason: "initializing" };
+let currentReviewTab = "overall";
+let latestLiveSnapshot = null;
+const logBuffer = [];
+
+const FINALIZE_STAGE_ORDER = [
+  "queued",
+  "freeze",
+  "drain",
+  "replay_gap",
+  "aggregate",
+  "analysis_events",
+  "analysis_report",
+  "persist"
+];
 
 function logLine(message) {
   const stamp = new Date().toISOString();
+  const line = `[${stamp}] ${message}`;
+  logBuffer.unshift(line);
+  if (logBuffer.length > 500) {
+    logBuffer.length = 500;
+  }
   if (!logsEl) {
-    safeLogToConsole(`${stamp} ${message}`);
+    safeLogToConsole(line);
     return;
   }
-  logsEl.textContent = `[${stamp}] ${message}\n${logsEl.textContent}`.slice(0, 20_000);
+  logsEl.textContent = logBuffer.join("\n");
 }
 
 function meetingIdValue() {
@@ -172,11 +219,88 @@ function meetingIdValue() {
 }
 
 function setResultPayload(payload) {
+  if (!resultJsonEl) return;
   resultJsonEl.textContent = JSON.stringify(payload, null, 2);
 }
 
 function setUploadStatus(message) {
+  if (!uploadStatusEl) return;
   uploadStatusEl.textContent = message;
+}
+
+function setDisabled(el, disabled) {
+  if (!el) return;
+  el.disabled = Boolean(disabled);
+}
+
+function toClock(ms) {
+  const safeMs = Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0;
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function normalizeAttachStatus(input) {
+  const status = String(input?.status || "error");
+  const reason = input?.reason ? String(input.reason) : "";
+  return {
+    status,
+    reason,
+    teams_bounds: input?.teams_bounds || null,
+    overlay_bounds: input?.overlay_bounds || null
+  };
+}
+
+function renderAttachStatus(input) {
+  attachStatus = normalizeAttachStatus(input);
+  if (!attachStatusEl) return;
+  const status = attachStatus.status;
+  attachStatusEl.title = attachStatus.reason || "";
+  attachStatusEl.classList.remove("chip-info", "chip-accent", "chip-neutral");
+  if (status === "attached") {
+    attachStatusEl.classList.add("chip-accent");
+    attachStatusEl.textContent = "Attach: attached";
+  } else if (status === "searching") {
+    attachStatusEl.classList.add("chip-neutral");
+    attachStatusEl.textContent = "Attach: searching";
+  } else if (status === "teams_not_found") {
+    attachStatusEl.classList.add("chip-neutral");
+    attachStatusEl.textContent = "Attach: teams_not_found";
+  } else if (status === "permission_required") {
+    attachStatusEl.classList.add("chip-info");
+    attachStatusEl.textContent = "Attach: permission_required";
+  } else {
+    attachStatusEl.classList.add("chip-info");
+    attachStatusEl.textContent = `Attach: ${status}`;
+  }
+}
+
+function updateBackendBadge() {
+  if (!backendBadgeEl) return;
+  backendBadgeEl.textContent = `Backend: ${effectiveDiarizationBackend()}`;
+}
+
+function ensureSessionTimer() {
+  if (sessionTimer) return;
+  sessionTimer = window.setInterval(() => {
+    if (!recordingTimerEl) return;
+    if (!sessionStartedAtMs || !isAnyUploadActive()) {
+      recordingTimerEl.textContent = "00:00";
+      return;
+    }
+    recordingTimerEl.textContent = toClock(Date.now() - sessionStartedAtMs);
+  }, 1000);
+}
+
+function stopSessionTimer() {
+  if (sessionTimer) {
+    window.clearInterval(sessionTimer);
+    sessionTimer = undefined;
+  }
+  if (recordingTimerEl && !isAnyUploadActive()) {
+    recordingTimerEl.textContent = "00:00";
+  }
 }
 
 function isAnyUploadActive() {
@@ -206,20 +330,26 @@ function updateButtons() {
   const dualReady = hasMic && hasSystem;
   const recording = Boolean(mediaRecorder && mediaRecorder.state === "recording");
   const uploadActive = isAnyUploadActive();
+  const attachReady = attachStatus.status === "attached";
 
-  btnInitMic.disabled = hasMic;
-  btnInitSystem.disabled = hasSystem;
-  btnStartRecording.disabled = !dualReady || recording;
-  btnStopRecording.disabled = !recording;
-  btnStartUpload.disabled = !dualReady || uploadActive;
-  btnStopUpload.disabled = !uploadActive;
-  btnFetchUploadStatus.disabled = !uploadActive;
-  btnOpenLastFile.disabled = !lastOutputPath;
-  btnNormalizeFile.disabled = !selectedInputFilePath;
+  setDisabled(btnInitMic, hasMic);
+  setDisabled(btnInitSystem, hasSystem);
+  setDisabled(btnStartRecording, !dualReady || recording);
+  setDisabled(btnStopRecording, !recording);
+  setDisabled(btnStartUpload, !dualReady || uploadActive || !attachReady);
+  setDisabled(btnStopUpload, !uploadActive);
+  setDisabled(btnFetchUploadStatus, !uploadActive);
+  setDisabled(btnOpenLastFile, !lastOutputPath);
+  setDisabled(btnNormalizeFile, !selectedInputFilePath);
+  setDisabled(btnDetachTeams, attachStatus.status !== "attached");
 
   if (!dualReady && !uploadActive) {
     setUploadStatus("Upload not started. Dual input required (mic + system).");
+  } else if (!attachReady && !uploadActive) {
+    setUploadStatus("Upload blocked until Teams window is attached.");
   }
+  updateBackendBadge();
+  ensureSessionTimer();
 }
 
 function nowIso() {
@@ -321,9 +451,61 @@ function effectiveDiarizationBackend() {
   return value === "edge" ? "edge" : "cloud";
 }
 
-function setFinalizeStatus(text) {
+function normalizeFinalizeStage(rawStage) {
+  const stage = String(rawStage || "").toLowerCase();
+  if (!stage) return "queued";
+  if (FINALIZE_STAGE_ORDER.includes(stage)) return stage;
+  if (stage.includes("freeze")) return "freeze";
+  if (stage.includes("drain")) return "drain";
+  if (stage.includes("replay")) return "replay_gap";
+  if (stage.includes("event")) return "analysis_events";
+  if (stage.includes("report")) return "analysis_report";
+  if (stage.includes("persist") || stage.includes("write")) return "persist";
+  if (stage.includes("aggregate") || stage.includes("stats") || stage.includes("evidence")) return "aggregate";
+  return "queued";
+}
+
+function renderFinalizeTimeline(statusObj = {}) {
+  if (!finalizeStageItems.length) return;
+  const normalizedStage = normalizeFinalizeStage(statusObj.stage);
+  const activeIndex = FINALIZE_STAGE_ORDER.indexOf(normalizedStage);
+  const succeeded = statusObj.status === "succeeded";
+  const failed = statusObj.status === "failed";
+
+  for (const li of finalizeStageItems) {
+    const stage = li.dataset.finalizeStage;
+    const index = FINALIZE_STAGE_ORDER.indexOf(stage);
+    li.classList.remove("active", "done");
+    if (succeeded) {
+      li.classList.add("done");
+      continue;
+    }
+    if (index >= 0 && index < activeIndex) {
+      li.classList.add("done");
+      continue;
+    }
+    if (index === activeIndex) {
+      li.classList.add("active");
+      continue;
+    }
+    if (failed && index === activeIndex) {
+      li.classList.add("active");
+    }
+  }
+}
+
+function setFinalizeStatus(input) {
   if (!finalizeV2StatusEl) return;
-  finalizeV2StatusEl.textContent = text;
+  if (typeof input === "string") {
+    finalizeV2StatusEl.textContent = input;
+    return;
+  }
+  const status = String(input?.status || "queued");
+  const stage = normalizeFinalizeStage(input?.stage);
+  const progress = Number.isFinite(input?.progress) ? Number(input.progress) : 0;
+  const errorText = Array.isArray(input?.errors) && input.errors.length > 0 ? ` errors=${JSON.stringify(input.errors)}` : "";
+  finalizeV2StatusEl.textContent = `status=${status} stage=${stage} progress=${progress}%${errorText}`;
+  renderFinalizeTimeline({ status, stage, progress });
 }
 
 function renderMemoList(items) {
@@ -386,26 +568,178 @@ async function anchorMemoToLastUtterance() {
 
 function renderReportV2(payload) {
   if (!reportV2El) return;
+  reportV2El.textContent = JSON.stringify(payload, null, 2);
+
   const overall = payload?.overall || {};
   const people = Array.isArray(payload?.per_person) ? payload.per_person : [];
-  const sections = Array.isArray(overall.summary_sections) ? overall.summary_sections : [];
-  const lines = [];
-  lines.push(`session=${payload?.session?.session_id || "-"}`);
-  lines.push(`tentative=${String(payload?.session?.tentative ?? false)} unresolved=${payload?.session?.unresolved_cluster_count ?? 0}`);
-  lines.push(`sections=${sections.length} people=${people.length}`);
-  for (const item of sections.slice(0, 6)) {
-    lines.push(`- [${item.topic}] ${(item.bullets || []).join(" | ")}`);
+  const evidenceItems = Array.isArray(payload?.evidence) ? payload.evidence : [];
+  const evidenceById = new Map();
+  for (const item of evidenceItems) {
+    if (item?.evidence_id) {
+      evidenceById.set(String(item.evidence_id), item);
+    }
   }
-  for (const person of people.slice(0, 8)) {
-    lines.push(`\\n[${person.display_name || person.person_key}]`);
-    const scorecard = Array.isArray(person.scorecard) ? person.scorecard : [];
-    const scoreLine = scorecard.map((entry) => `${entry.dimension}:${entry.score}`).join(" ");
-    lines.push(`scorecard ${scoreLine}`);
-    lines.push(`strengths ${(person.strengths || []).join(" | ")}`);
-    lines.push(`risks ${(person.risks || []).join(" | ")}`);
-    lines.push(`next ${(person.next_actions || []).join(" | ")}`);
+
+  if (reviewOverallEl) {
+    const sections = Array.isArray(overall.summary_sections) ? overall.summary_sections : [];
+    const sectionHtml = sections
+      .map((section) => {
+        const bullets = Array.isArray(section?.bullets) ? section.bullets : [];
+        const lines = bullets.map((bullet) => `<li>${escapeHtml(bullet)}</li>`).join("");
+        return `
+          <article class="review-card">
+            <strong>${escapeHtml(section?.topic || "topic")}</strong>
+            <ul>${lines || "<li>No summary bullets.</li>"}</ul>
+          </article>
+        `;
+      })
+      .join("");
+    reviewOverallEl.innerHTML = `
+      <div class="review-section">
+        <div class="review-card">
+          <strong>Session</strong>
+          <div>session_id=${escapeHtml(payload?.session?.session_id || "-")}</div>
+          <div>tentative=${escapeHtml(String(payload?.session?.tentative ?? false))}, unresolved=${escapeHtml(String(payload?.session?.unresolved_cluster_count ?? 0))}</div>
+        </div>
+        ${sectionHtml || "<div class='review-card'>No overall summary sections.</div>"}
+      </div>
+    `;
   }
-  reportV2El.textContent = lines.join("\\n");
+
+  if (reviewPerPersonEl) {
+    const peopleHtml = people
+      .map((person) => {
+        const scorecard = Array.isArray(person?.scorecard) ? person.scorecard : [];
+        const scoreHtml = scorecard
+          .map((entry) => {
+            const evidenceIds = Array.isArray(entry?.evidence_ids) ? entry.evidence_ids : [];
+            const evidenceSummary = evidenceIds
+              .map((id) => {
+                const item = evidenceById.get(String(id));
+                if (!item) return escapeHtml(String(id));
+                const range = Array.isArray(item?.time_range_ms) && item.time_range_ms.length === 2
+                  ? `${toClock(item.time_range_ms[0])}-${toClock(item.time_range_ms[1])}`
+                  : "--:--";
+                return `${escapeHtml(String(id))} @ ${range}`;
+              })
+              .join(", ");
+            return `
+              <div class="score-row">
+                <div><strong>${escapeHtml(entry?.dimension || "dimension")}</strong></div>
+                <div>${escapeHtml(String(entry?.score ?? "-"))}/5</div>
+                <div>
+                  <div>${escapeHtml(entry?.rationale || "")}</div>
+                  <div class="muted small">evidence: ${escapeHtml(evidenceSummary || "none")}</div>
+                </div>
+              </div>
+            `;
+          })
+          .join("");
+
+        const strengths = (person?.strengths || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+        const risks = (person?.risks || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+        const nextActions = (person?.next_actions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+        const stats = person?.stats || {};
+        return `
+          <article class="review-card">
+            <h3>${escapeHtml(person?.display_name || person?.person_key || person?.person_id || "Unknown")}</h3>
+            <div class="muted small">talk_time=${escapeHtml(String(stats?.talk_time_ms ?? 0))}ms turns=${escapeHtml(String(stats?.turns ?? 0))} interruptions=${escapeHtml(String(stats?.interruptions ?? 0))}</div>
+            ${scoreHtml || "<div class='muted'>No scorecard available.</div>"}
+            <div><strong>Strengths</strong><ul>${strengths || "<li>None</li>"}</ul></div>
+            <div><strong>Risks</strong><ul>${risks || "<li>None</li>"}</ul></div>
+            <div><strong>Next Actions</strong><ul>${nextActions || "<li>None</li>"}</ul></div>
+          </article>
+        `;
+      })
+      .join("");
+    reviewPerPersonEl.innerHTML = `<div class="review-section">${peopleHtml || "<div class='review-card'>No per-person feedback available.</div>"}</div>`;
+  }
+
+  if (reviewEvidenceEl) {
+    const evidenceHtml = evidenceItems
+      .slice(0, 200)
+      .map((item) => {
+        const range = Array.isArray(item?.time_range_ms) && item.time_range_ms.length === 2
+          ? `${toClock(item.time_range_ms[0])}-${toClock(item.time_range_ms[1])}`
+          : "--:--";
+        const quote = item?.quote ? escapeHtml(String(item.quote)) : "";
+        return `
+          <article class="review-card">
+            <div><strong>${escapeHtml(item?.evidence_id || "evidence")}</strong> @ ${range}</div>
+            <div class="muted small">${escapeHtml(item?.speaker?.display_name || item?.speaker?.cluster_id || "unknown")}</div>
+            <div>${quote || "<span class='muted'>No quote.</span>"}</div>
+          </article>
+        `;
+      })
+      .join("");
+    reviewEvidenceEl.innerHTML = `<div class="review-section">${evidenceHtml || "<div class='review-card'>No evidence captured.</div>"}</div>`;
+  }
+
+  openReviewPanel("overall");
+}
+
+function openReviewPanel(tab = "overall") {
+  if (!reviewPanelEl) return;
+  reviewPanelEl.classList.remove("hidden");
+  currentReviewTab = tab;
+  const isOverall = tab === "overall";
+  const isPerson = tab === "person";
+  const isEvidence = tab === "evidence";
+  if (reviewOverallEl) reviewOverallEl.classList.toggle("hidden", !isOverall);
+  if (reviewPerPersonEl) reviewPerPersonEl.classList.toggle("hidden", !isPerson);
+  if (reviewEvidenceEl) reviewEvidenceEl.classList.toggle("hidden", !isEvidence);
+  if (reviewTabOverallBtn) reviewTabOverallBtn.classList.toggle("tab-active", isOverall);
+  if (reviewTabPersonBtn) reviewTabPersonBtn.classList.toggle("tab-active", isPerson);
+  if (reviewTabEvidenceBtn) reviewTabEvidenceBtn.classList.toggle("tab-active", isEvidence);
+}
+
+function toggleDebugDrawer(forceValue) {
+  if (!debugDrawerEl) return;
+  const next = typeof forceValue === "boolean" ? forceValue : !debugDrawerEl.classList.contains("open");
+  debugDrawerEl.classList.toggle("open", next);
+}
+
+function switchDebugTab(name) {
+  for (const button of debugTabButtons) {
+    const active = button.dataset.debugTabBtn === name;
+    button.classList.toggle("tab-active", active);
+  }
+  for (const pane of document.querySelectorAll(".debug-tab-pane")) {
+    pane.classList.toggle("hidden", pane.id !== `debug-tab-${name}`);
+  }
+}
+
+function renderParticipantLiveMetrics(snapshot) {
+  if (!participantLiveListEl) return;
+  const rows = snapshot?.participants || [];
+  if (!rows.length) {
+    participantLiveListEl.innerHTML = `<p class="muted">No participant metrics yet.</p>`;
+    return;
+  }
+  const html = rows
+    .map((item) => {
+      const speakingClass = item.speaking_now ? "speaking" : "idle";
+      const speakingLabel = item.speaking_now ? "Speaking" : "Idle";
+      const talkPct = Math.round((Number(item.talk_share || 0) * 1000)) / 10;
+      return `
+        <article class="participant-card">
+          <div class="participant-card-head">
+            <strong>${escapeHtml(item.display_name || item.person_key || "unknown")}</strong>
+            <span class="badge ${speakingClass}">${speakingLabel}</span>
+          </div>
+          <div class="participant-metrics">
+            <div>Engagement: <strong>${escapeHtml(String(item.engagement_score ?? 0))}</strong></div>
+            <div>Talk: <strong>${escapeHtml(String(talkPct))}%</strong></div>
+            <div>Turns: <strong>${escapeHtml(String(item.turns ?? 0))}</strong></div>
+            <div>Support: <strong>${escapeHtml(String(item.support_count ?? 0))}</strong></div>
+            <div>Interrupt: <strong>${escapeHtml(String(item.interruptions ?? 0))}</strong></div>
+            <div>Duration: <strong>${escapeHtml(String(Math.round((item.talk_time_ms || 0) / 1000)))}s</strong></div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+  participantLiveListEl.innerHTML = html;
 }
 
 async function triggerFinalizeV2() {
@@ -421,7 +755,7 @@ async function triggerFinalizeV2() {
     }
   });
   finalizeV2JobId = String(payload.job_id || "");
-  setFinalizeStatus(`queued job=${finalizeV2JobId}`);
+  setFinalizeStatus({ status: "queued", stage: "queued", progress: 0 });
   logLine(`Finalize v2 queued: job=${finalizeV2JobId}`);
 
   finalizeV2PollTimer = window.setInterval(async () => {
@@ -431,7 +765,7 @@ async function triggerFinalizeV2() {
         sessionId: meetingIdValue(),
         jobId: finalizeV2JobId
       });
-      setFinalizeStatus(`status=${status.status} stage=${status.stage} progress=${status.progress}%`);
+      setFinalizeStatus(status);
       if (status.status === "succeeded") {
         window.clearInterval(finalizeV2PollTimer);
         finalizeV2PollTimer = undefined;
@@ -452,7 +786,7 @@ async function triggerFinalizeV2() {
         window.clearInterval(finalizeV2PollTimer);
         finalizeV2PollTimer = undefined;
       }
-      setFinalizeStatus(`failed: ${error.message}`);
+      setFinalizeStatus({ status: "failed", stage: "persist", progress: 100, errors: [error.message] });
       logLine(`Finalize v2 polling failed: ${error.message}`);
     }
   }, 2000);
@@ -468,6 +802,48 @@ async function refreshSidecarStatus() {
     sidecarActive = false;
     sidecarStatusEl.textContent = `sidecar status failed: ${error.message}`;
   }
+}
+
+async function requestAttachToTeams() {
+  const status = await desktopAPI.attachToTeams();
+  renderAttachStatus(status);
+  updateButtons();
+  return status;
+}
+
+async function requestDetachFromTeams() {
+  const status = await desktopAPI.detachFromTeams();
+  renderAttachStatus(status);
+  updateButtons();
+  return status;
+}
+
+async function refreshAttachStatus() {
+  try {
+    const status = await desktopAPI.getAttachStatus();
+    renderAttachStatus(status);
+  } catch (error) {
+    renderAttachStatus({ status: "error", reason: error?.message || String(error) });
+  }
+  updateButtons();
+}
+
+function startAttachPolling() {
+  if (attachPollTimer) {
+    window.clearInterval(attachPollTimer);
+    attachPollTimer = undefined;
+  }
+  attachPollTimer = window.setInterval(() => {
+    refreshAttachStatus().catch((error) => {
+      logLine(`Attach status refresh failed: ${error.message}`);
+    });
+  }, 1000);
+}
+
+function stopAttachPolling() {
+  if (!attachPollTimer) return;
+  window.clearInterval(attachPollTimer);
+  attachPollTimer = undefined;
 }
 
 function setMeter(analyser, barEl, valueEl) {
@@ -1358,6 +1734,7 @@ function closeUploadSocket(role, reason) {
       logLine(`${role} WS close timeout fallback: local upload stopped.`);
       if (!isAnyUploadActive()) {
         suppressAutoRecover = false;
+        sessionStartedAtMs = 0;
         stopLivePolling();
         setUploadStatus("Upload stopped.");
       } else {
@@ -1430,6 +1807,7 @@ function bindUploadSocketEvents(role, ws) {
     resetUploadQueue(role);
     if (!isAnyUploadActive()) {
       suppressAutoRecover = false;
+      sessionStartedAtMs = 0;
       stopLivePolling();
       setUploadStatus(
         `Upload closed: teacher sent=${uploadSentCount.teacher},ack=${uploadAckCount.teacher}; students sent=${uploadSentCount.students},ack=${uploadAckCount.students}`
@@ -1500,6 +1878,9 @@ async function openUploadSocket(role) {
 
 async function startUpload() {
   ensureDualInputReady();
+  if (attachStatus.status !== "attached") {
+    throw new Error("Teams window must be attached before starting upload");
+  }
   if (effectiveDiarizationBackend() === "edge" && !sidecarActive) {
     throw new Error("diarization backend=edge requires sidecar running");
   }
@@ -1540,6 +1921,7 @@ async function startUpload() {
     await Promise.all([openUploadSocket("teacher"), openUploadSocket("students")]);
     setUploadStatus("Upload active (dual stream): waiting for chunk ACKs...");
     logLine("WS connected; dual-stream upload started.");
+    sessionStartedAtMs = Date.now();
     await refreshLiveView().catch(() => {
       // ignore initial fetch failures, polling will retry
     });
@@ -1560,6 +1942,7 @@ function stopUpload(reason = "client-stop") {
   }
   logLine(`Stop Upload clicked. reason=${reason}`);
   UPLOAD_STREAM_ROLES.forEach((role) => closeUploadSocket(role, reason));
+  sessionStartedAtMs = 0;
   updateCaptureMetrics("teacher", { capture_state: micStream ? "running" : "idle" });
   updateCaptureMetrics("students", { capture_state: systemAudioStream ? "running" : "idle" });
 }
@@ -1578,25 +1961,29 @@ function fetchUploadStatus() {
   });
 }
 
-function formatUtteranceLines(title, response) {
+function formatUtteranceLines(title, response, role, eventIndex) {
+  if (typeof transcriptFormatter.formatUtterancesByRole === "function") {
+    return transcriptFormatter.formatUtterancesByRole({
+      title,
+      response,
+      role,
+      eventIndex
+    });
+  }
   const header = `${title} (count=${response.count})`;
   const lines = (response.items || []).slice(-8).map((item) => {
     const seq = `${item.start_seq}-${item.end_seq}`;
-    const latency = Number.isFinite(item.latency_ms) ? `${item.latency_ms}ms` : "-";
-    const sources = Array.isArray(item.source_utterance_ids) ? ` src=${item.source_utterance_ids.length}` : "";
-    return `[${seq}] (${latency})${sources} ${item.text}`;
+    return `[${seq}] ${item.text}`;
   });
   return [header, ...lines].join("\n");
 }
 
 function formatEvents(response) {
+  if (typeof transcriptFormatter.formatEvents === "function") {
+    return transcriptFormatter.formatEvents(response);
+  }
   const header = `events count=${response.count}`;
-  const lines = (response.items || []).slice(-20).map((item) => {
-    const source = item.identity_source ? `/${item.identity_source}` : "";
-    const name = item.speaker_name || (item.cluster_id ? `cluster:${item.cluster_id}` : "unknown");
-    const decision = item.decision || "n/a";
-    return `${item.ts} [${item.stream_role}] ${item.source}${source} -> ${name} (${decision})`;
-  });
+  const lines = (response.items || []).slice(-20).map((item) => `${item.ts} ${item.source || "unknown"}`);
   return [header, ...lines].join("\n");
 }
 
@@ -1754,14 +2141,20 @@ async function refreshLiveView() {
     apiRequest("unresolved-clusters", "GET")
   ]);
 
+  const eventItems = Array.isArray(events?.items) ? events.items : [];
+  const eventIndex =
+    typeof transcriptFormatter.buildEventIndex === "function"
+      ? transcriptFormatter.buildEventIndex(eventItems)
+      : new Map();
+
   liveTranscriptEl.textContent = [
-    formatUtteranceLines("Teacher Raw", teacherRaw),
+    formatUtteranceLines("Teacher Raw", teacherRaw, "teacher", eventIndex),
     "",
-    formatUtteranceLines("Teacher Merged", teacherMerged),
+    formatUtteranceLines("Teacher Merged", teacherMerged, "teacher", eventIndex),
     "",
-    formatUtteranceLines("Students Raw", studentsRaw),
+    formatUtteranceLines("Students Raw", studentsRaw, "students", eventIndex),
     "",
-    formatUtteranceLines("Students Merged", studentsMerged),
+    formatUtteranceLines("Students Merged", studentsMerged, "students", eventIndex),
     "",
     `Capture Teacher: ${JSON.stringify(state.capture_by_stream?.teacher || {})}`,
     `Capture Students: ${JSON.stringify(state.capture_by_stream?.students || {})}`,
@@ -1773,6 +2166,35 @@ async function refreshLiveView() {
   renderEnrollmentStatus(enrollmentState);
   renderClusterMappings(unresolved, state);
   setResultPayload(state);
+
+  const stateRoster = Array.isArray(state?.state?.roster) ? state.state.roster : [];
+  const timelineNowMs = Math.max(
+    Number(state?.ingest_by_stream?.teacher?.last_seq || 0) * 1000,
+    Number(state?.ingest_by_stream?.students?.last_seq || 0) * 1000
+  );
+  if (typeof liveMetricsEngine.computeParticipantMetrics === "function") {
+    const metricsSnapshot = liveMetricsEngine.computeParticipantMetrics({
+      roster: stateRoster,
+      uiParticipants: parseParticipantsFromUI(),
+      interviewerName: effectiveInterviewerNames().interviewerName,
+      events: eventItems,
+      teacherUtterances: teacherRaw?.items || [],
+      studentsUtterances: studentsRaw?.items || [],
+      timelineNowMs
+    });
+    renderParticipantLiveMetrics(metricsSnapshot);
+    latestLiveSnapshot = {
+      state,
+      teacherRaw,
+      teacherMerged,
+      studentsRaw,
+      studentsMerged,
+      events,
+      metrics: metricsSnapshot
+    };
+  } else {
+    renderParticipantLiveMetrics({ participants: [] });
+  }
 }
 
 function startLivePolling() {
@@ -1861,6 +2283,65 @@ function bindEvents() {
   ];
   if (requiredButtons.some((item) => !item)) {
     throw new Error("missing required UI controls in index.html");
+  }
+
+  if (diarizationBackendEl) {
+    diarizationBackendEl.addEventListener("change", () => {
+      updateBackendBadge();
+      updateButtons();
+    });
+  }
+
+  if (btnAttachTeams) {
+    btnAttachTeams.addEventListener("click", async () => {
+      try {
+        const status = await requestAttachToTeams();
+        logLine(`Attach requested: status=${status.status}`);
+      } catch (error) {
+        logLine(`Attach failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnDetachTeams) {
+    btnDetachTeams.addEventListener("click", async () => {
+      try {
+        const status = await requestDetachFromTeams();
+        logLine(`Detached from Teams: status=${status.status}`);
+      } catch (error) {
+        logLine(`Detach failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnToggleDebug) {
+    btnToggleDebug.addEventListener("click", () => {
+      toggleDebugDrawer();
+    });
+  }
+
+  for (const button of debugTabButtons) {
+    button.addEventListener("click", () => {
+      const tabName = String(button.dataset.debugTabBtn || "logs");
+      switchDebugTab(tabName);
+    });
+  }
+
+  if (btnOpenReview) {
+    btnOpenReview.addEventListener("click", () => {
+      openReviewPanel(currentReviewTab || "overall");
+    });
+  }
+  if (reviewTabOverallBtn) {
+    reviewTabOverallBtn.addEventListener("click", () => openReviewPanel("overall"));
+  }
+  if (reviewTabPersonBtn) {
+    reviewTabPersonBtn.addEventListener("click", () => openReviewPanel("person"));
+  }
+  if (reviewTabEvidenceBtn) {
+    reviewTabEvidenceBtn.addEventListener("click", () => openReviewPanel("evidence"));
   }
 
   btnInitMic.addEventListener("click", async () => {
@@ -2123,9 +2604,16 @@ window.addEventListener("DOMContentLoaded", async () => {
       addParticipantRow();
     }
     renderCaptureHealth();
+    switchDebugTab("logs");
+    toggleDebugDrawer(false);
+    updateBackendBadge();
     updateButtons();
     await renderRuntimeInfo();
     bindEvents();
+    await requestAttachToTeams().catch((error) => {
+      logLine(`Attach on startup failed: ${error.message}`);
+    });
+    startAttachPolling();
     await refreshLiveView().catch(() => {
       // ignore startup fetch failures
     });
@@ -2160,7 +2648,13 @@ window.addEventListener("beforeunload", () => {
     window.clearInterval(finalizeV2PollTimer);
     finalizeV2PollTimer = undefined;
   }
+  stopAttachPolling();
+  stopSessionTimer();
   stopLivePolling();
+
+  desktopAPI.detachFromTeams().catch(() => {
+    // noop
+  });
 
   releaseMicStream();
   releaseSystemStream();

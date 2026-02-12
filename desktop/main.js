@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, session } = require('electron');
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, session, screen } = require('electron');
 
 const {
   finalizeRecording,
@@ -11,9 +11,11 @@ const {
 } = require('./lib/audioPipeline');
 const { createDiarizationSidecar } = require('./lib/diarizationSidecar');
 const { createPyannoteWindowBuilder } = require('./lib/pyannoteWindowBuilder');
+const { TeamsWindowTracker } = require('./lib/teamsWindowTracker');
 
 const APP_TITLE = 'Interview Feedback Desktop (Phase 2.3)';
 let preferredDisplaySourceId = null;
+let mainWindow = null;
 
 function logDesktop(message, details = null) {
   const stamp = new Date().toISOString();
@@ -35,6 +37,12 @@ const sidecar = createDiarizationSidecar({
   log: (line) => logDesktop(line)
 });
 const windowBuilders = new Map();
+const teamsWindowTracker = new TeamsWindowTracker({
+  getOverlayWindow: () => mainWindow,
+  screen,
+  pollMs: 400,
+  log: (message, details) => logDesktop(`[teams-attach] ${message}`, details)
+});
 
 function base64ToInt16(contentB64) {
   const buf = Buffer.from(String(contentB64 || ''), 'base64');
@@ -100,12 +108,18 @@ async function requestJson(url, init = {}) {
 }
 
 function createWindow() {
-  const mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 820,
-    minWidth: 980,
-    minHeight: 700,
+  const createdWindow = new BrowserWindow({
+    width: 420,
+    height: 860,
+    minWidth: 380,
+    maxWidth: 520,
+    minHeight: 640,
     title: APP_TITLE,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    resizable: true,
+    fullScreenable: false,
+    titleBarStyle: 'hiddenInset',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -114,21 +128,30 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'index.html'));
+  createdWindow.loadFile(path.join(__dirname, 'index.html'));
+  createdWindow.setAlwaysOnTop(true, 'floating');
+  createdWindow.setVisibleOnAllWorkspaces(false, { visibleOnFullScreen: false });
 
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+  createdWindow.webContents.on('render-process-gone', (_event, details) => {
     logDesktop('[desktop] renderer process gone', details);
   });
 
-  mainWindow.webContents.on('unresponsive', () => {
+  createdWindow.webContents.on('unresponsive', () => {
     logDesktop('[desktop] renderer became unresponsive');
   });
 
-  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+  createdWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     logDesktop('[desktop] did-fail-load', { errorCode, errorDescription, validatedURL, isMainFrame });
   });
 
-  return mainWindow;
+  createdWindow.on('closed', () => {
+    if (mainWindow === createdWindow) {
+      mainWindow = null;
+    }
+  });
+
+  mainWindow = createdWindow;
+  return createdWindow;
 }
 
 function registerIpcHandlers() {
@@ -404,6 +427,18 @@ function registerIpcHandlers() {
       preferredSourceId: preferredDisplaySourceId
     };
   });
+
+  ipcMain.handle('window:attachToTeams', async () => {
+    return teamsWindowTracker.attach();
+  });
+
+  ipcMain.handle('window:detachFromTeams', async () => {
+    return teamsWindowTracker.detach();
+  });
+
+  ipcMain.handle('window:getAttachStatus', async () => {
+    return teamsWindowTracker.status();
+  });
 }
 
 app.whenReady().then(() => {
@@ -484,6 +519,11 @@ process.on('unhandledRejection', (reason) => {
 });
 
 app.on('before-quit', async () => {
+  try {
+    await teamsWindowTracker.detach();
+  } catch (error) {
+    logDesktop('teams tracker detach failed on quit', { error: error?.message || String(error) });
+  }
   try {
     await sidecar.stop();
   } catch (error) {

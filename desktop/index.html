@@ -7,205 +7,260 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="app-shell">
-      <header class="header">
-        <div>
-          <h1>Interview Feedback Desktop</h1>
-          <p class="subtitle">Phase 2.3: Dual-stream ingest + realtime ASR live view</p>
-        </div>
-        <div class="status-chip" id="app-info">Loading runtime info...</div>
-      </header>
-
-      <section class="panel">
-        <h2>Meeting Context</h2>
-        <label class="field">
-          <span>Meeting ID</span>
-          <input id="meeting-id" type="text" value="local-selfcheck" />
-        </label>
-        <label class="field">
-          <span>Gateway HTTP URL</span>
-          <input id="api-base-url" type="text" value="https://api.frontierace.ai" />
-        </label>
-      </section>
-
-      <section class="panel">
-        <h2>Session Config</h2>
-        <label class="field">
-          <span>Interviewer Name</span>
-          <input id="interviewer-name" type="text" placeholder="e.g. Bill" />
-        </label>
-        <div class="field participants-field">
-          <span>Participants</span>
-          <div id="participant-list" class="participant-list"></div>
-          <div class="actions">
-            <button id="btn-participant-add" type="button">Add Participant</button>
-            <button id="btn-participant-import" type="button">Import Names</button>
+    <main class="overlay-shell">
+      <header class="top-strip panel">
+        <div class="top-strip-row">
+          <div>
+            <h1>Interview Companion</h1>
+            <p class="subtitle">Memo-first workspace for live interview review</p>
+          </div>
+          <div class="chip-row">
+            <span class="chip" id="app-info">Loading runtime info...</span>
+            <span class="chip chip-info" id="attach-status">Attach: searching</span>
+            <span class="chip chip-neutral" id="backend-badge">Backend: cloud</span>
+            <span class="chip chip-accent" id="recording-timer">00:00</span>
           </div>
         </div>
-        <details class="advanced-box">
-          <summary>Advanced</summary>
-          <label class="field">
-            <span>Teams Interviewer Name (Optional)</span>
-            <input id="teams-interviewer-name" type="text" placeholder="Leave empty to follow Interviewer Name" />
+
+        <div class="field-grid">
+          <label class="field compact">
+            <span>Session ID</span>
+            <input id="meeting-id" type="text" value="local-selfcheck" />
           </label>
-          <label class="field">
+          <label class="field compact">
+            <span>Gateway HTTP URL</span>
+            <input id="api-base-url" type="text" value="https://api.frontierace.ai" />
+          </label>
+          <label class="field compact">
             <span>Diarization Backend</span>
             <select id="diarization-backend">
               <option value="cloud">cloud</option>
               <option value="edge">edge (pyannote-rs sidecar)</option>
             </select>
           </label>
-          <div class="field">
-            <span>Mic Processing</span>
-            <label class="switch-line"><input id="mic-aec" type="checkbox" checked /> Echo Cancellation (AEC)</label>
-            <label class="switch-line"><input id="mic-ns" type="checkbox" checked /> Noise Suppression</label>
-            <label class="switch-line"><input id="mic-agc" type="checkbox" /> Auto Gain Control</label>
+        </div>
+
+        <div class="actions wrap">
+          <button id="btn-attach-teams" type="button">Attach to Teams</button>
+          <button id="btn-detach-teams" type="button">Detach</button>
+          <button id="btn-save-session-config" type="button">Save Config</button>
+          <button id="btn-init-mic" type="button">Init Mic</button>
+          <button id="btn-init-system" type="button">Init System Audio</button>
+          <button id="btn-start-upload" type="button" disabled>Start Session</button>
+          <button id="btn-stop-upload" type="button" disabled>Stop Session</button>
+          <button id="btn-fetch-upload-status" type="button" disabled>Fetch Status</button>
+        </div>
+        <p id="upload-status" class="muted">Upload not started. Attach to Teams and initialize dual input first.</p>
+      </header>
+
+      <section class="main-stack">
+        <section class="panel memo-panel">
+          <div class="panel-header">
+            <h2>Memos</h2>
+            <span class="muted small">Live notes become report evidence.</span>
           </div>
-          <div class="field">
-            <span>Edge Diarization Sidecar (macOS arm64)</span>
+          <div class="field-grid field-grid-2">
+            <label class="field compact">
+              <span>Type</span>
+              <select id="memo-type">
+                <option value="observation">observation</option>
+                <option value="evidence">evidence</option>
+                <option value="question">question</option>
+                <option value="decision">decision</option>
+                <option value="score">score</option>
+              </select>
+            </label>
+            <label class="field compact">
+              <span>Tags (comma separated)</span>
+              <input id="memo-tags" type="text" placeholder="leadership,collaboration" />
+            </label>
+          </div>
+          <label class="field">
+            <span>Memo</span>
+            <textarea id="memo-text" rows="3" placeholder="Type memo and press Add Memo"></textarea>
+          </label>
+          <div class="actions">
+            <button id="btn-memo-add" type="button">Add Memo</button>
+            <button id="btn-memo-anchor-last" type="button">Anchor Last Utterance</button>
+          </div>
+          <pre id="memo-list" class="result-box memo-list">No memos yet.</pre>
+        </section>
+
+        <section class="panel signal-panel">
+          <div class="panel-header">
+            <h2>Recording Signal</h2>
+            <span class="muted small">Live waveform and capture health</span>
+          </div>
+          <p id="capture-health" class="muted">Capture health initializing...</p>
+          <div class="meter-grid">
+            <div class="meter-wrap">
+              <div class="meter-label">Mic</div>
+              <div class="meter-track"><div id="meter-mic-bar" class="meter-bar"></div></div>
+              <div id="meter-mic-value" class="meter-value">0%</div>
+            </div>
+            <div class="meter-wrap">
+              <div class="meter-label">System</div>
+              <div class="meter-track"><div id="meter-system-bar" class="meter-bar"></div></div>
+              <div id="meter-system-value" class="meter-value">0%</div>
+            </div>
+            <div class="meter-wrap">
+              <div class="meter-label">Mixed</div>
+              <div class="meter-track"><div id="meter-mixed-bar" class="meter-bar"></div></div>
+              <div id="meter-mixed-value" class="meter-value">0%</div>
+            </div>
+          </div>
+          <div class="actions wrap">
+            <button id="btn-start-recording" type="button" disabled>Start 30s Recording</button>
+            <button id="btn-stop-recording" type="button" disabled>Stop Recording</button>
+            <button id="btn-open-last-file" type="button" disabled>Open Last WAV</button>
+          </div>
+          <audio id="playback" controls></audio>
+        </section>
+
+        <section class="panel participant-panel">
+          <div class="panel-header">
+            <h2>Participants</h2>
+            <span class="muted small">Speaking state + engagement</span>
+          </div>
+
+          <div class="field-grid field-grid-2">
+            <label class="field compact">
+              <span>Interviewer Name</span>
+              <input id="interviewer-name" type="text" placeholder="e.g. Bill" />
+            </label>
+            <label class="field compact">
+              <span>Teams Interviewer Name</span>
+              <input id="teams-interviewer-name" type="text" placeholder="Optional" />
+            </label>
+          </div>
+
+          <div class="field participants-field">
+            <span>Participants</span>
+            <div id="participant-list" class="participant-list"></div>
             <div class="actions">
+              <button id="btn-participant-add" type="button">Add Participant</button>
+              <button id="btn-participant-import" type="button">Import Names</button>
+              <button id="btn-enrollment-start" type="button">Start Enrollment</button>
+              <button id="btn-enrollment-stop" type="button">Stop Enrollment</button>
+            </div>
+          </div>
+
+          <div id="participant-live-list" class="participant-live-list">
+            <p class="muted">No participant metrics yet.</p>
+          </div>
+          <pre id="enrollment-status" class="result-box compact">Enrollment idle.</pre>
+        </section>
+      </section>
+
+      <footer class="bottom-strip panel">
+        <div class="actions wrap">
+          <button id="btn-finalize-v2" type="button" class="primary">Finish &amp; Generate Report</button>
+          <button id="btn-open-review" type="button">Review</button>
+          <button id="btn-toggle-debug" type="button">Debug</button>
+          <button id="btn-refresh-live" type="button">Refresh Live View</button>
+        </div>
+        <pre id="finalize-v2-status" class="status-box">Idle.</pre>
+        <ul id="finalize-stage-list" class="stage-list" aria-label="Finalize Progress">
+          <li data-finalize-stage="queued">queued</li>
+          <li data-finalize-stage="freeze">freeze</li>
+          <li data-finalize-stage="drain">drain</li>
+          <li data-finalize-stage="replay_gap">replay_gap</li>
+          <li data-finalize-stage="aggregate">aggregate</li>
+          <li data-finalize-stage="analysis_events">analysis_events</li>
+          <li data-finalize-stage="analysis_report">analysis_report</li>
+          <li data-finalize-stage="persist">persist</li>
+        </ul>
+      </footer>
+
+      <section id="review-panel" class="panel review-panel hidden">
+        <div class="panel-header">
+          <h2>Review</h2>
+          <div class="actions compact">
+            <button id="btn-review-tab-overall" type="button" class="tab-active">Overall</button>
+            <button id="btn-review-tab-person" type="button">Per Person</button>
+            <button id="btn-review-tab-evidence" type="button">Evidence</button>
+          </div>
+        </div>
+        <div id="review-overall" class="review-tab"></div>
+        <div id="review-per-person" class="review-tab hidden"></div>
+        <div id="review-evidence" class="review-tab hidden"></div>
+        <pre id="report-v2" class="result-box hidden">No report yet.</pre>
+      </section>
+
+      <section id="debug-drawer" class="panel debug-drawer">
+        <div class="panel-header">
+          <h2>Debug</h2>
+          <span class="muted small">Collapsed by default; open only for diagnostics.</span>
+        </div>
+        <div class="debug-tabs">
+          <button type="button" data-debug-tab-btn="logs" class="tab-active">Logs</button>
+          <button type="button" data-debug-tab-btn="transcript">Transcript</button>
+          <button type="button" data-debug-tab-btn="events">Speaker Events</button>
+          <button type="button" data-debug-tab-btn="state">State Snapshot</button>
+          <button type="button" data-debug-tab-btn="tools">Tools</button>
+        </div>
+
+        <section id="debug-tab-logs" class="debug-tab-pane">
+          <pre id="logs" class="logs">No logs yet.</pre>
+        </section>
+
+        <section id="debug-tab-transcript" class="debug-tab-pane hidden">
+          <pre id="live-transcript" class="result-box">No transcript yet.</pre>
+        </section>
+
+        <section id="debug-tab-events" class="debug-tab-pane hidden">
+          <pre id="speaker-events" class="result-box">No events yet.</pre>
+        </section>
+
+        <section id="debug-tab-state" class="debug-tab-pane hidden">
+          <pre id="result-json" class="result-box">No state yet.</pre>
+        </section>
+
+        <section id="debug-tab-tools" class="debug-tab-pane hidden">
+          <details class="advanced-box" open>
+            <summary>Connection &amp; Sidecar</summary>
+            <label class="field compact">
+              <span>Gateway WS URL</span>
+              <input id="ws-url" type="text" value="wss://api.frontierace.ai/v1/audio/ws" />
+            </label>
+            <div class="actions wrap">
               <button id="btn-sidecar-start" type="button">Start Sidecar</button>
               <button id="btn-sidecar-stop" type="button">Stop Sidecar</button>
             </div>
-            <pre id="sidecar-status" class="result-box">Sidecar stopped.</pre>
-          </div>
-        </details>
-        <p id="capture-health" class="muted">Capture health initializing...</p>
-        <div class="actions">
-          <button id="btn-save-session-config">Save Session Config</button>
-          <button id="btn-enrollment-start">Start Enrollment</button>
-          <button id="btn-enrollment-stop">Stop Enrollment</button>
-          <button id="btn-refresh-live">Refresh Live View</button>
-        </div>
-        <pre id="enrollment-status" class="result-box">Enrollment idle.</pre>
-      </section>
+            <pre id="sidecar-status" class="result-box compact">Sidecar stopped.</pre>
+          </details>
 
-      <section class="panel">
-        <h2>Capture Self-check (Mic + System)</h2>
-        <div class="actions">
-          <button id="btn-init-mic">Init Mic</button>
-          <button id="btn-init-system">Init System Audio</button>
-          <button id="btn-start-recording" disabled>Start 30s Recording</button>
-          <button id="btn-stop-recording" disabled>Stop Recording</button>
-          <button id="btn-open-last-file" disabled>Open Last WAV</button>
-        </div>
-        <p class="muted">
-          System audio on macOS requires screen/audio capture permission. In picker, choose the active screen/window and enable system audio.
-        </p>
-        <div class="meter-grid">
-          <div class="meter-wrap">
-            <div class="meter-label">Mic level</div>
-            <div class="meter-track">
-              <div id="meter-mic-bar" class="meter-bar"></div>
+          <details class="advanced-box">
+            <summary>Mic Processing</summary>
+            <div class="field">
+              <label class="switch-line"><input id="mic-aec" type="checkbox" checked /> Echo Cancellation (AEC)</label>
+              <label class="switch-line"><input id="mic-ns" type="checkbox" checked /> Noise Suppression</label>
+              <label class="switch-line"><input id="mic-agc" type="checkbox" /> Auto Gain Control</label>
             </div>
-            <div id="meter-mic-value" class="meter-value">0%</div>
-          </div>
-          <div class="meter-wrap">
-            <div class="meter-label">System level</div>
-            <div class="meter-track">
-              <div id="meter-system-bar" class="meter-bar"></div>
+          </details>
+
+          <details class="advanced-box">
+            <summary>File Normalization</summary>
+            <div class="actions wrap">
+              <button id="btn-pick-file" type="button">Pick File</button>
+              <button id="btn-normalize-file" type="button" disabled>Normalize Selected File</button>
             </div>
-            <div id="meter-system-value" class="meter-value">0%</div>
-          </div>
-          <div class="meter-wrap">
-            <div class="meter-label">Mixed level</div>
-            <div class="meter-track">
-              <div id="meter-mixed-bar" class="meter-bar"></div>
+            <p id="selected-file" class="muted">No file selected.</p>
+          </details>
+
+          <details class="advanced-box">
+            <summary>Cluster Mapping</summary>
+            <div class="actions wrap">
+              <button id="btn-refresh-clusters" type="button">Refresh Unresolved Clusters</button>
             </div>
-            <div id="meter-mixed-value" class="meter-value">0%</div>
-          </div>
-        </div>
-        <audio id="playback" controls></audio>
-      </section>
-
-      <section class="panel">
-        <h2>Live Upload (Dual WS 1s Chunks: teacher + students)</h2>
-        <label class="field">
-          <span>Gateway WS URL</span>
-          <input id="ws-url" type="text" value="wss://api.frontierace.ai/v1/audio/ws" />
-        </label>
-        <div class="actions">
-          <button id="btn-start-upload" disabled>Start Upload</button>
-          <button id="btn-stop-upload" disabled>Stop Upload</button>
-          <button id="btn-fetch-upload-status" disabled>Fetch Upload Status</button>
-        </div>
-        <p id="upload-status" class="muted">Upload not started. Dual input required (mic + system).</p>
-      </section>
-
-      <section class="panel">
-        <h2>Normalize Existing Audio File (m4a/wav/mp3)</h2>
-        <div class="actions">
-          <button id="btn-pick-file">Pick File</button>
-          <button id="btn-normalize-file" disabled>Normalize Selected File</button>
-        </div>
-        <p id="selected-file" class="muted">No file selected.</p>
-      </section>
-
-      <section class="panel">
-        <h2>Result</h2>
-        <pre id="result-json" class="result-box">No run yet.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Memos (Teacher)</h2>
-        <label class="field">
-          <span>Type</span>
-          <select id="memo-type">
-            <option value="observation">observation</option>
-            <option value="evidence">evidence</option>
-            <option value="question">question</option>
-            <option value="decision">decision</option>
-            <option value="score">score</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Tags (comma separated)</span>
-          <input id="memo-tags" type="text" placeholder="leadership,collaboration" />
-        </label>
-        <label class="field">
-          <span>Memo</span>
-          <textarea id="memo-text" rows="3" placeholder="Type memo and press Add Memo"></textarea>
-        </label>
-        <div class="actions">
-          <button id="btn-memo-add" type="button">Add Memo</button>
-          <button id="btn-memo-anchor-last" type="button">Anchor Last Utterance</button>
-        </div>
-        <pre id="memo-list" class="result-box">No memos yet.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Finalize v2</h2>
-        <div class="actions">
-          <button id="btn-finalize-v2" type="button">End Session + Generate Feedback</button>
-        </div>
-        <pre id="finalize-v2-status" class="result-box">Idle.</pre>
-        <pre id="report-v2" class="result-box">No report yet.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Live Transcript</h2>
-        <pre id="live-transcript" class="result-box">No transcript yet.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Speaker Events</h2>
-        <pre id="speaker-events" class="result-box">No events yet.</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Cluster Mapping (Students)</h2>
-        <div class="actions">
-          <button id="btn-refresh-clusters" type="button">Refresh Unresolved Clusters</button>
-        </div>
-        <div id="cluster-map-list" class="cluster-map-list"></div>
-      </section>
-
-      <section class="panel">
-        <h2>Logs</h2>
-        <pre id="logs" class="logs"></pre>
+            <div id="cluster-map-list" class="cluster-map-list"></div>
+          </details>
+        </section>
       </section>
     </main>
 
+    <script src="./lib/transcriptFormatter.js"></script>
+    <script src="./lib/liveMetrics.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>
