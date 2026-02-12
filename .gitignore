@@ -24,3 +24,7 @@ cloudflare/tunnel/*.pid
 
 # OS
 .DS_Store
+
+# Desktop sidecar artifacts
+desktop/bin/
+desktop/sidecar/pyannote-rs-server/target/

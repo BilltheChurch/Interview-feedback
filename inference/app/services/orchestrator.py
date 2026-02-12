@@ -8,11 +8,11 @@ import numpy as np
 
 from app.config import Settings
 from app.exceptions import ValidationError
-from app.schemas import BindingMeta, EnrollResponse, ParticipantProfile, ResolveEvidence, ResolveResponse, SessionState
+from app.schemas import BindingMeta, EnrollResponse, ParticipantProfile, ResolveResponse, SessionState
 from app.services.audio import normalize_audio_payload
 from app.services.binder import BinderPolicy
 from app.services.clustering import OnlineClusterer
-from app.services.name_resolver import NameResolver
+from app.services.name_resolver import NameCandidate, NameResolver
 from app.services.segmenters.base import Segmenter
 from app.services.sv import ModelScopeSVBackend
 
@@ -78,11 +78,19 @@ class InferenceOrchestrator:
 
     @staticmethod
     def _normalize_text_key(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", value.casefold())
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.casefold())
 
     @staticmethod
     def _tokenize_name(value: str) -> set[str]:
-        return {token for token in re.split(r"[^a-z0-9]+", value.casefold()) if token}
+        normalized = value.casefold()
+        raw_tokens = [token for token in re.split(r"[^a-z0-9\u4e00-\u9fff]+", normalized) if token]
+        tokens: set[str] = set()
+        for token in raw_tokens:
+            tokens.add(token)
+            if re.search(r"[\u4e00-\u9fff]", token) and len(token) >= 2:
+                for idx in range(len(token) - 1):
+                    tokens.add(token[idx : idx + 2])
+        return tokens
 
     def _roster_exact_name(self, state: SessionState, raw_name: str) -> str | None:
         roster = state.roster or []
@@ -113,6 +121,12 @@ class InferenceOrchestrator:
                 continue
             if roster_norm == normalized:
                 return item.name
+            if (
+                re.search(r"[\u4e00-\u9fff]", normalized)
+                and len(normalized) >= 2
+                and (normalized in roster_norm or roster_norm in normalized)
+            ):
+                return item.name
             if len(normalized) >= 4 and (normalized in roster_norm or roster_norm in normalized):
                 return item.name
 
@@ -128,6 +142,10 @@ class InferenceOrchestrator:
                 best_score = score
                 best_name = item.name
 
+        if re.search(r"[\u4e00-\u9fff]", normalized):
+            if best_score >= 0.5:
+                return best_name
+            return None
         if best_score >= 0.6:
             return best_name
         return None
@@ -310,97 +328,50 @@ class InferenceOrchestrator:
 
         utterance_embedding = self._aggregate_segment_embeddings(embeddings=embeddings, durations_ms=durations_ms)
         cluster_id, sv_score = self._clusterer.assign(embedding=utterance_embedding, clusters=state.clusters)
-        evidence = ResolveEvidence(
-            sv_score=sv_score,
-            threshold_low=self._settings.sv_t_low,
-            threshold_high=self._settings.sv_t_high,
-            segment_count=len(segments),
-        )
-        decision: ResolveResponse["decision"] = "unknown"
-        speaker_name: str | None = None
-
         binding_meta = self._get_cluster_binding_meta(state, cluster_id)
-        if binding_meta and binding_meta.locked:
-            decision = "auto"
-            speaker_name = binding_meta.participant_name
-            evidence.binding_source = binding_meta.source
-            evidence.reason = "locked manual binding"
-        else:
-            existing_name = self._get_cluster_bound_name(state, cluster_id)
-            if existing_name:
-                decision = "auto"
-                speaker_name = existing_name
-                evidence.binding_source = binding_meta.source if binding_meta else "existing_binding"
-                evidence.reason = "existing cluster binding"
-            else:
-                top_name, top_score, margin = self._match_profile(state, utterance_embedding)
-                evidence.profile_top_name = top_name
-                evidence.profile_top_score = top_score
-                evidence.profile_margin = margin
+        top_name, top_score, margin = self._match_profile(state, utterance_embedding)
 
-                if (
-                    top_name is not None
-                    and top_score is not None
-                    and margin is not None
-                    and top_score >= self._settings.profile_auto_threshold
-                    and margin >= self._settings.profile_margin_threshold
-                ):
-                    decision = "auto"
-                    speaker_name = top_name
-                    evidence.binding_source = "enrollment_match"
-                    evidence.reason = "profile auto threshold met"
-                    self._set_cluster_binding(
-                        state=state,
-                        cluster_id=cluster_id,
-                        participant_name=top_name,
-                        source="enrollment_match",
-                        confidence=top_score,
-                        locked=False,
-                        updated_at=self._now_iso(),
-                    )
-                elif (
-                    top_name is not None
-                    and top_score is not None
-                    and top_score >= self._settings.profile_confirm_threshold
-                ):
-                    decision = "confirm"
-                    speaker_name = top_name
-                    evidence.binding_source = "enrollment_match"
-                    evidence.reason = "profile confirm threshold met"
-                else:
-                    extracted = self._resolve_name_from_roster(state, asr_text)
-                    if extracted:
-                        decision = "confirm"
-                        speaker_name = extracted
-                        evidence.name_hit = extracted
-                        evidence.roster_hit = True
-                        evidence.binding_source = "name_extract"
-                        evidence.reason = "roster name extracted from ASR"
-                    else:
-                        decision = "unknown"
-                        speaker_name = None
-                        evidence.binding_source = "unknown"
-                        evidence.reason = "no stable profile/name match"
+        roster_candidates: list[NameCandidate] = []
+        if asr_text:
+            dedup: set[str] = set()
+            for candidate in self._name_resolver.extract(asr_text):
+                matched = self._roster_match_name(state, candidate.name)
+                if not matched:
+                    continue
+                key = matched.casefold()
+                if key in dedup:
+                    continue
+                dedup.add(key)
+                roster_candidates.append(NameCandidate(name=matched, confidence=candidate.confidence))
 
-        if decision == "confirm" and not speaker_name:
-            decision = "unknown"
-            evidence.reason = "confirm-without-name downgraded to unknown"
+        bind_result = self._binder.resolve(
+            state=state,
+            cluster_id=cluster_id,
+            sv_score=sv_score,
+            binding_meta=binding_meta,
+            profile_top_name=top_name,
+            profile_top_score=top_score,
+            profile_margin=margin,
+            name_candidates=roster_candidates,
+            now_iso=self._now_iso(),
+        )
+        bind_result.evidence.segment_count = len(segments)
 
         logger.info(
             "resolve session=%s cluster=%s score=%.4f decision=%s speaker=%s source=%s",
             session_id,
             cluster_id,
             sv_score,
-            decision,
-            speaker_name,
-            evidence.binding_source,
+            bind_result.decision,
+            bind_result.speaker_name,
+            bind_result.evidence.binding_source,
         )
 
         return ResolveResponse(
             session_id=session_id,
             cluster_id=cluster_id,
-            speaker_name=speaker_name,
-            decision=decision,
-            evidence=evidence,
+            speaker_name=bind_result.speaker_name,
+            decision=bind_result.decision,  # type: ignore[arg-type]
+            evidence=bind_result.evidence,
             updated_state=state,
         )

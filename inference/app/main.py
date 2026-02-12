@@ -23,6 +23,10 @@ from app.schemas import (
     ErrorResponse,
     ExtractEmbeddingRequest,
     ExtractEmbeddingResponse,
+    AnalysisEventsRequest,
+    AnalysisEventsResponse,
+    AnalysisReportRequest,
+    AnalysisReportResponse,
     HealthResponse,
     ResolveRequest,
     ResolveResponse,
@@ -179,6 +183,22 @@ async def enroll_speaker(req: EnrollRequest) -> EnrollResponse:
         audio_payload=req.audio,
         state=req.state,
     )
+
+
+@app.post("/analysis/events", response_model=AnalysisEventsResponse)
+async def analyze_events(req: AnalysisEventsRequest) -> AnalysisEventsResponse:
+    events = runtime.events_analyzer.analyze(
+        session_id=req.session_id,
+        transcript=req.transcript,
+        memos=req.memos,
+        stats=req.stats,
+    )
+    return AnalysisEventsResponse(session_id=req.session_id, events=events)
+
+
+@app.post("/analysis/report", response_model=AnalysisReportResponse)
+async def analyze_report(req: AnalysisReportRequest) -> AnalysisReportResponse:
+    return runtime.report_generator.generate(req)
 
 
 @app.post("/sd/diarize", response_model=DiarizeResponse)

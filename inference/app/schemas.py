@@ -160,3 +160,161 @@ class HealthResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class MemoAnchor(BaseModel):
+    mode: Literal["time", "utterance"]
+    time_range_ms: list[int] | None = None
+    utterance_ids: list[str] | None = None
+
+    @field_validator("time_range_ms")
+    @classmethod
+    def validate_time_range_ms(cls, value: list[int] | None):
+        if value is None:
+            return value
+        if len(value) != 2:
+            raise ValueError("time_range_ms must contain exactly 2 values")
+        if value[0] < 0 or value[1] < value[0]:
+            raise ValueError("time_range_ms must be non-negative and ordered")
+        return value
+
+
+class Memo(BaseModel):
+    memo_id: str
+    created_at_ms: int = Field(ge=0)
+    author_role: Literal["teacher"] = "teacher"
+    type: Literal["observation", "evidence", "question", "decision", "score"]
+    tags: list[str] = Field(default_factory=list)
+    text: str = Field(min_length=1, max_length=3000)
+    anchors: MemoAnchor | None = None
+
+
+class TranscriptUtterance(BaseModel):
+    utterance_id: str
+    stream_role: Literal["teacher", "students", "mixed"] = "students"
+    speaker_name: str | None = None
+    cluster_id: str | None = None
+    decision: Literal["auto", "confirm", "unknown"] | None = None
+    text: str = Field(min_length=1, max_length=6000)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    duration_ms: int = Field(ge=0)
+
+    @field_validator("end_ms")
+    @classmethod
+    def validate_utterance_end(cls, value: int, info):
+        start_ms = info.data.get("start_ms")
+        if start_ms is not None and value <= start_ms:
+            raise ValueError("utterance end_ms must be greater than start_ms")
+        return value
+
+
+class SpeakerStat(BaseModel):
+    speaker_key: str
+    speaker_name: str | None = None
+    talk_time_ms: int = Field(default=0, ge=0)
+    turns: int = Field(default=0, ge=0)
+    silence_ms: int = Field(default=0, ge=0)
+    interruptions: int = Field(default=0, ge=0)
+    interrupted_by_others: int = Field(default=0, ge=0)
+
+
+class AnalysisEvent(BaseModel):
+    event_id: str
+    event_type: Literal["support", "interrupt", "summary", "decision", "silence"]
+    actor: str | None = None
+    target: str | None = None
+    time_range_ms: list[int] = Field(default_factory=list)
+    utterance_ids: list[str] = Field(default_factory=list)
+    quote: str | None = None
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    rationale: str | None = None
+
+    @field_validator("time_range_ms")
+    @classmethod
+    def validate_event_time_range(cls, value: list[int]):
+        if len(value) != 2:
+            raise ValueError("time_range_ms must contain exactly 2 values")
+        if value[0] < 0 or value[1] < value[0]:
+            raise ValueError("time_range_ms must be non-negative and ordered")
+        return value
+
+
+class AnalysisEventsRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    transcript: list[TranscriptUtterance]
+    memos: list[Memo] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+    locale: str = "zh-CN"
+
+
+class AnalysisEventsResponse(BaseModel):
+    session_id: str
+    events: list[AnalysisEvent]
+
+
+class EvidenceRef(BaseModel):
+    evidence_id: str
+    time_range_ms: list[int]
+    utterance_ids: list[str] = Field(default_factory=list)
+    speaker_key: str | None = None
+    quote: str
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+    @field_validator("time_range_ms")
+    @classmethod
+    def validate_evidence_time_range(cls, value: list[int]):
+        if len(value) != 2:
+            raise ValueError("time_range_ms must contain exactly 2 values")
+        if value[0] < 0 or value[1] < value[0]:
+            raise ValueError("time_range_ms must be non-negative and ordered")
+        return value
+
+
+class ScorecardItem(BaseModel):
+    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    score: int = Field(ge=1, le=5)
+    rationale: str = Field(min_length=1, max_length=1200)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class PersonFeedback(BaseModel):
+    person_key: str
+    display_name: str
+    scorecard: list[ScorecardItem]
+    strengths: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    stats: SpeakerStat
+
+
+class SummarySection(BaseModel):
+    topic: str = Field(min_length=1, max_length=120)
+    bullets: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class TeamDynamics(BaseModel):
+    highlights: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class OverallFeedback(BaseModel):
+    summary_sections: list[SummarySection] = Field(default_factory=list)
+    team_dynamics: TeamDynamics = Field(default_factory=TeamDynamics)
+
+
+class AnalysisReportRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    transcript: list[TranscriptUtterance]
+    memos: list[Memo] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    events: list[AnalysisEvent] = Field(default_factory=list)
+    locale: str = "zh-CN"
+
+
+class AnalysisReportResponse(BaseModel):
+    session_id: str
+    overall: OverallFeedback
+    per_person: list[PersonFeedback] = Field(default_factory=list)

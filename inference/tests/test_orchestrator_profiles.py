@@ -76,7 +76,13 @@ def _orchestrator_with_embedding(embedding: np.ndarray) -> InferenceOrchestrator
         sv_backend=DummySVBackend(embedding=embedding),
         clusterer=DummyClusterer(),
         name_resolver=NameResolver(),
-        binder=BinderPolicy(threshold_low=settings.sv_t_low, threshold_high=settings.sv_t_high),
+        binder=BinderPolicy(
+            threshold_low=settings.sv_t_low,
+            threshold_high=settings.sv_t_high,
+            profile_auto_threshold=settings.profile_auto_threshold,
+            profile_confirm_threshold=settings.profile_confirm_threshold,
+            profile_margin_threshold=settings.profile_margin_threshold,
+        ),
     )
 
 

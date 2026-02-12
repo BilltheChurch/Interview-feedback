@@ -48,11 +48,26 @@
             <span>Teams Interviewer Name (Optional)</span>
             <input id="teams-interviewer-name" type="text" placeholder="Leave empty to follow Interviewer Name" />
           </label>
+          <label class="field">
+            <span>Diarization Backend</span>
+            <select id="diarization-backend">
+              <option value="cloud">cloud</option>
+              <option value="edge">edge (pyannote-rs sidecar)</option>
+            </select>
+          </label>
           <div class="field">
             <span>Mic Processing</span>
             <label class="switch-line"><input id="mic-aec" type="checkbox" checked /> Echo Cancellation (AEC)</label>
             <label class="switch-line"><input id="mic-ns" type="checkbox" checked /> Noise Suppression</label>
             <label class="switch-line"><input id="mic-agc" type="checkbox" /> Auto Gain Control</label>
+          </div>
+          <div class="field">
+            <span>Edge Diarization Sidecar (macOS arm64)</span>
+            <div class="actions">
+              <button id="btn-sidecar-start" type="button">Start Sidecar</button>
+              <button id="btn-sidecar-stop" type="button">Stop Sidecar</button>
+            </div>
+            <pre id="sidecar-status" class="result-box">Sidecar stopped.</pre>
           </div>
         </details>
         <p id="capture-health" class="muted">Capture health initializing...</p>
@@ -129,6 +144,42 @@
       <section class="panel">
         <h2>Result</h2>
         <pre id="result-json" class="result-box">No run yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Memos (Teacher)</h2>
+        <label class="field">
+          <span>Type</span>
+          <select id="memo-type">
+            <option value="observation">observation</option>
+            <option value="evidence">evidence</option>
+            <option value="question">question</option>
+            <option value="decision">decision</option>
+            <option value="score">score</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Tags (comma separated)</span>
+          <input id="memo-tags" type="text" placeholder="leadership,collaboration" />
+        </label>
+        <label class="field">
+          <span>Memo</span>
+          <textarea id="memo-text" rows="3" placeholder="Type memo and press Add Memo"></textarea>
+        </label>
+        <div class="actions">
+          <button id="btn-memo-add" type="button">Add Memo</button>
+          <button id="btn-memo-anchor-last" type="button">Anchor Last Utterance</button>
+        </div>
+        <pre id="memo-list" class="result-box">No memos yet.</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Finalize v2</h2>
+        <div class="actions">
+          <button id="btn-finalize-v2" type="button">End Session + Generate Feedback</button>
+        </div>
+        <pre id="finalize-v2-status" class="result-box">Idle.</pre>
+        <pre id="report-v2" class="result-box">No report yet.</pre>
       </section>
 
       <section class="panel">

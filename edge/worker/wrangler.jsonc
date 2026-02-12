@@ -13,9 +13,11 @@
   ],
 
   "vars": {
-    "INFERENCE_TIMEOUT_MS": "15000",
+    "INFERENCE_TIMEOUT_MS": "60000",
     "INFERENCE_RESOLVE_PATH": "/speaker/resolve",
     "INFERENCE_ENROLL_PATH": "/speaker/enroll",
+    "INFERENCE_EVENTS_PATH": "/analysis/events",
+    "INFERENCE_REPORT_PATH": "/analysis/report",
     "INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS": "6",
     "ASR_ENABLED": "true",
     "ASR_MODEL": "fun-asr-realtime-2025-11-07",
@@ -26,7 +28,12 @@
     "ASR_REALTIME_ENABLED": "true",
     "ASR_SEND_PACING_MS": "0",
     "ASR_STREAM_CHUNK_BYTES": "12800",
-    "ASR_DEBUG_LOG_EVENTS": "false"
+    "ASR_DEBUG_LOG_EVENTS": "false",
+    "MEMOS_ENABLED": "true",
+    "FINALIZE_V2_ENABLED": "true",
+    "FINALIZE_TIMEOUT_MS": "180000",
+    "FINALIZE_WATCHDOG_MS": "300000",
+    "DIARIZATION_BACKEND_DEFAULT": "cloud"
   },
 
   "durable_objects": {

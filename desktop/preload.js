@@ -7,6 +7,13 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   pickFile: () => ipcRenderer.invoke('recording:pick-file'),
   openPath: (filePath) => ipcRenderer.invoke('recording:open-path', filePath),
   apiRequest: (payload) => ipcRenderer.invoke('api:request', payload),
+  finalizeV2: (payload) => ipcRenderer.invoke('session:finalizeV2', payload),
+  getFinalizeStatus: (payload) => ipcRenderer.invoke('session:getFinalizeStatus', payload),
+  getResultV2: (payload) => ipcRenderer.invoke('session:getResultV2', payload),
+  diarizationStart: (payload) => ipcRenderer.invoke('diarization:start', payload),
+  diarizationStop: () => ipcRenderer.invoke('diarization:stop'),
+  diarizationGetStatus: () => ipcRenderer.invoke('diarization:getStatus'),
+  diarizationPushChunk: (payload) => ipcRenderer.invoke('diarization:pushChunk', payload),
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source')
 });

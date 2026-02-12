@@ -1,4 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
+import { attachEvidenceToMemos, buildEvidence, buildResultV2, computeSpeakerStats } from "./finalize_v2";
+import { filterMemos, nextMemoId, parseMemoPayload } from "./memos";
+import { emptySpeakerLogs, mergeSpeakerLogs, parseSpeakerLogsPayload } from "./speaker_logs";
+import type { FinalizeV2Status, MemoItem, SpeakerLogs } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
 const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
@@ -74,6 +78,7 @@ interface SessionState {
   config: Record<string, string | number | boolean>;
   participant_profiles: ParticipantProfile[];
   cluster_binding_meta: Record<string, BindingMeta>;
+  prebind_by_cluster: Record<string, BindingMeta>;
   enrollment_state: EnrollmentState;
 }
 
@@ -81,6 +86,7 @@ interface SessionConfigRequest {
   teams_participants?: Array<RosterEntry | string>;
   teams_interviewer_name?: string;
   interviewer_name?: string;
+  diarization_backend?: "cloud" | "edge";
 }
 
 interface CaptureState {
@@ -150,6 +156,7 @@ interface ClusterMapRequest {
   cluster_id: string;
   participant_name: string;
   lock?: boolean;
+  mode?: "bind" | "prebind";
 }
 
 interface InferenceEnrollRequest {
@@ -256,6 +263,13 @@ interface AsrRunResult {
   last_error?: string | null;
 }
 
+interface AsrReplayCursor {
+  last_ingested_seq: number;
+  last_sent_seq: number;
+  last_emitted_seq: number;
+  updated_at: string;
+}
+
 interface AsrQueueChunk {
   seq: number;
   timestampMs: number;
@@ -304,6 +318,8 @@ interface Env {
   INFERENCE_TIMEOUT_MS?: string;
   INFERENCE_RESOLVE_PATH?: string;
   INFERENCE_ENROLL_PATH?: string;
+  INFERENCE_EVENTS_PATH?: string;
+  INFERENCE_REPORT_PATH?: string;
   INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
   ASR_ENABLED?: string;
@@ -316,6 +332,11 @@ interface Env {
   ASR_STREAM_CHUNK_BYTES?: string;
   ASR_REALTIME_ENABLED?: string;
   ASR_DEBUG_LOG_EVENTS?: string;
+  MEMOS_ENABLED?: string;
+  FINALIZE_V2_ENABLED?: string;
+  FINALIZE_TIMEOUT_MS?: string;
+  FINALIZE_WATCHDOG_MS?: string;
+  DIARIZATION_BACKEND_DEFAULT?: "cloud" | "edge";
   RESULT_BUCKET: R2Bucket;
   MEETING_SESSION: DurableObjectNamespace<MeetingSessionDO>;
 }
@@ -327,11 +348,13 @@ const DEFAULT_STATE: SessionState = {
   config: {},
   participant_profiles: [],
   cluster_binding_meta: {},
+  prebind_by_cluster: {},
   enrollment_state: buildDefaultEnrollmentState()
 };
 
-const SESSION_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters)$/;
+const SESSION_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result)$/;
 const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state)$/;
+const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
 const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
 const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
 
@@ -340,6 +363,12 @@ const STORAGE_KEY_EVENTS = "events";
 const STORAGE_KEY_UPDATED_AT = "updated_at";
 const STORAGE_KEY_FINALIZED_AT = "finalized_at";
 const STORAGE_KEY_RESULT_KEY = "result_key";
+const STORAGE_KEY_RESULT_KEY_V2 = "result_key_v2";
+const STORAGE_KEY_FINALIZE_V2_STATUS = "finalize_v2_status";
+const STORAGE_KEY_FINALIZE_LOCK = "finalize_lock";
+const STORAGE_KEY_MEMOS = "memos";
+const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
+const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
 
 const STORAGE_KEY_INGEST_STATE = "ingest_state";
 const STORAGE_KEY_ASR_STATE = "asr_state";
@@ -401,6 +430,10 @@ function parseStreamRole(raw: string | null | undefined, fallback: StreamRole = 
 
 function resultObjectKey(sessionId: string): string {
   return `sessions/${safeObjectSegment(sessionId)}/result.json`;
+}
+
+function resultObjectKeyV2(sessionId: string): string {
+  return `sessions/${safeObjectSegment(sessionId)}/result_v2.json`;
 }
 
 function chunkObjectKey(sessionId: string, streamRole: StreamRole, seq: number): string {
@@ -1004,9 +1037,14 @@ function normalizeSessionState(state: SessionState | null | undefined): SessionS
   merged.clusters = Array.isArray(merged.clusters) ? merged.clusters : [];
   merged.bindings = merged.bindings && typeof merged.bindings === "object" ? merged.bindings : {};
   merged.config = merged.config && typeof merged.config === "object" ? merged.config : {};
+  if (merged.config.diarization_backend !== "edge" && merged.config.diarization_backend !== "cloud") {
+    merged.config.diarization_backend = "cloud";
+  }
   merged.participant_profiles = Array.isArray(merged.participant_profiles) ? merged.participant_profiles : [];
   merged.cluster_binding_meta =
     merged.cluster_binding_meta && typeof merged.cluster_binding_meta === "object" ? merged.cluster_binding_meta : {};
+  merged.prebind_by_cluster =
+    merged.prebind_by_cluster && typeof merged.prebind_by_cluster === "object" ? merged.prebind_by_cluster : {};
   const enrollment = merged.enrollment_state ?? buildDefaultEnrollmentState();
   merged.enrollment_state = {
     mode: ["idle", "collecting", "ready", "closed"].includes(String(enrollment.mode))
@@ -1178,6 +1216,21 @@ export default {
       return proxyToDO(request, env, sessionId, action);
     }
 
+    const finalizeStatusMatch = path.match(SESSION_FINALIZE_STATUS_ROUTE_REGEX);
+    if (finalizeStatusMatch) {
+      const [, rawSessionId] = finalizeStatusMatch;
+      let sessionId: string;
+      try {
+        sessionId = safeSessionId(rawSessionId);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      if (request.method !== "GET") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      return proxyToDO(request, env, sessionId, "finalize-status");
+    }
+
     const match = path.match(SESSION_ROUTE_REGEX);
     if (!match) {
       return jsonResponse({ detail: "route not found" }, 404);
@@ -1222,6 +1275,15 @@ export default {
     if (action === "unresolved-clusters" && request.method !== "GET") {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
+    if (action === "memos" && !["GET", "POST"].includes(request.method)) {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "speaker-logs" && request.method !== "POST") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "result" && request.method !== "GET") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
 
     return proxyToDO(request, env, sessionId, action);
   }
@@ -1243,6 +1305,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
       teacher: this.buildRealtimeRuntime("teacher"),
       students: this.buildRealtimeRuntime("students")
     };
+  }
+
+  async alarm(): Promise<void> {
+    await this.enqueueMutation(async () => {
+      await this.failStuckFinalizeIfNeeded("alarm");
+    });
   }
 
   private asrRealtimeEnabled(): boolean {
@@ -1269,6 +1337,30 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   private currentIsoTs(): string {
     return new Date().toISOString();
+  }
+
+  private memosEnabled(): boolean {
+    return parseBool(this.env.MEMOS_ENABLED, true);
+  }
+
+  private finalizeV2Enabled(): boolean {
+    return parseBool(this.env.FINALIZE_V2_ENABLED, false);
+  }
+
+  private finalizeTimeoutMs(): number {
+    return parseTimeoutMs(this.env.FINALIZE_TIMEOUT_MS ?? "180000");
+  }
+
+  private finalizeWatchdogMs(): number {
+    const configured = Number(this.env.FINALIZE_WATCHDOG_MS ?? "");
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+    return Math.max(this.finalizeTimeoutMs() + 120_000, 240_000);
+  }
+
+  private diarizationBackendDefault(): "cloud" | "edge" {
+    return this.env.DIARIZATION_BACKEND_DEFAULT === "edge" ? "edge" : "cloud";
   }
 
   private scoreNumber(value: number | null | undefined): number {
@@ -1597,6 +1689,159 @@ export class MeetingSessionDO extends DurableObject<Env> {
     await this.ctx.storage.put(STORAGE_KEY_EVENTS, events);
   }
 
+  private emptyAsrCursorByStream(): Record<StreamRole, AsrReplayCursor> {
+    const now = this.currentIsoTs();
+    return {
+      mixed: { last_ingested_seq: 0, last_sent_seq: 0, last_emitted_seq: 0, updated_at: now },
+      teacher: { last_ingested_seq: 0, last_sent_seq: 0, last_emitted_seq: 0, updated_at: now },
+      students: { last_ingested_seq: 0, last_sent_seq: 0, last_emitted_seq: 0, updated_at: now }
+    };
+  }
+
+  private async loadAsrCursorByStream(): Promise<Record<StreamRole, AsrReplayCursor>> {
+    const current = await this.ctx.storage.get<Record<StreamRole, AsrReplayCursor>>(STORAGE_KEY_ASR_CURSOR_BY_STREAM);
+    if (current?.mixed && current?.teacher && current?.students) {
+      return current;
+    }
+    const created = this.emptyAsrCursorByStream();
+    await this.ctx.storage.put(STORAGE_KEY_ASR_CURSOR_BY_STREAM, created);
+    return created;
+  }
+
+  private async patchAsrCursor(streamRole: StreamRole, patch: Partial<AsrReplayCursor>): Promise<void> {
+    const current = await this.loadAsrCursorByStream();
+    const next = {
+      ...current[streamRole],
+      ...patch,
+      updated_at: this.currentIsoTs()
+    };
+    current[streamRole] = next;
+    await this.ctx.storage.put(STORAGE_KEY_ASR_CURSOR_BY_STREAM, current);
+  }
+
+  private async loadMemos(): Promise<MemoItem[]> {
+    return (await this.ctx.storage.get<MemoItem[]>(STORAGE_KEY_MEMOS)) ?? [];
+  }
+
+  private async storeMemos(memos: MemoItem[]): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_MEMOS, memos);
+  }
+
+  private async loadSpeakerLogs(): Promise<SpeakerLogs> {
+    const stored = await this.ctx.storage.get<SpeakerLogs>(STORAGE_KEY_SPEAKER_LOGS);
+    if (stored) return stored;
+    const created = emptySpeakerLogs(this.currentIsoTs());
+    await this.ctx.storage.put(STORAGE_KEY_SPEAKER_LOGS, created);
+    return created;
+  }
+
+  private async storeSpeakerLogs(logs: SpeakerLogs): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_SPEAKER_LOGS, logs);
+  }
+
+  private async loadFinalizeV2Status(): Promise<FinalizeV2Status | null> {
+    const stored = (await this.ctx.storage.get<FinalizeV2Status>(STORAGE_KEY_FINALIZE_V2_STATUS)) ?? null;
+    if (!stored) return null;
+    const heartbeat = typeof stored.heartbeat_at === "string" ? stored.heartbeat_at : stored.started_at;
+    if (!heartbeat) return stored;
+    if (stored.heartbeat_at === heartbeat) return stored;
+    const normalized: FinalizeV2Status = {
+      ...stored,
+      heartbeat_at: heartbeat
+    };
+    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_V2_STATUS, normalized);
+    return normalized;
+  }
+
+  private async storeFinalizeV2Status(status: FinalizeV2Status): Promise<void> {
+    const normalized: FinalizeV2Status = {
+      ...status,
+      heartbeat_at: status.heartbeat_at ?? status.started_at ?? this.currentIsoTs()
+    };
+    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_V2_STATUS, normalized);
+    await this.scheduleFinalizeWatchdog(normalized);
+  }
+
+  private async setFinalizeLock(locked: boolean): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_LOCK, locked);
+  }
+
+  private async isFinalizeLocked(): Promise<boolean> {
+    return Boolean(await this.ctx.storage.get<boolean>(STORAGE_KEY_FINALIZE_LOCK));
+  }
+
+  private isFinalizeTerminal(status: FinalizeV2Status["status"]): boolean {
+    return status === "failed" || status === "succeeded";
+  }
+
+  private finalizeStatusHeartbeatMs(status: FinalizeV2Status): number {
+    const heartbeat = Date.parse(status.heartbeat_at ?? status.started_at);
+    if (Number.isFinite(heartbeat)) return heartbeat;
+    const started = Date.parse(status.started_at);
+    return Number.isFinite(started) ? started : Date.now();
+  }
+
+  private async clearFinalizeWatchdogAlarm(): Promise<void> {
+    try {
+      await this.ctx.storage.deleteAlarm();
+    } catch {
+      // Best-effort cleanup; some runtimes may throw if no alarm exists.
+    }
+  }
+
+  private async scheduleFinalizeWatchdog(status: FinalizeV2Status): Promise<void> {
+    if (status.status === "queued" || status.status === "running") {
+      const heartbeatMs = this.finalizeStatusHeartbeatMs(status);
+      await this.ctx.storage.setAlarm(heartbeatMs + this.finalizeWatchdogMs());
+      return;
+    }
+    await this.clearFinalizeWatchdogAlarm();
+  }
+
+  private async failStuckFinalizeIfNeeded(reason: string): Promise<FinalizeV2Status | null> {
+    const current = await this.loadFinalizeV2Status();
+    if (!current || this.isFinalizeTerminal(current.status)) {
+      if (current && this.isFinalizeTerminal(current.status)) {
+        await this.clearFinalizeWatchdogAlarm();
+      }
+      return current;
+    }
+    const heartbeatMs = this.finalizeStatusHeartbeatMs(current);
+    const elapsedMs = Date.now() - heartbeatMs;
+    const thresholdMs = this.finalizeWatchdogMs();
+    if (elapsedMs <= thresholdMs) {
+      await this.scheduleFinalizeWatchdog(current);
+      return current;
+    }
+
+    const nowIso = this.currentIsoTs();
+    const next: FinalizeV2Status = {
+      ...current,
+      status: "failed",
+      heartbeat_at: nowIso,
+      finished_at: nowIso,
+      errors: [...current.errors, `watchdog timeout: stage=${current.stage} elapsed_ms=${elapsedMs} reason=${reason}`]
+    };
+    await this.storeFinalizeV2Status(next);
+    await this.setFinalizeLock(false);
+    await Promise.all([
+      this.closeRealtimeAsrSession("teacher", "finalize-watchdog", false, true),
+      this.closeRealtimeAsrSession("students", "finalize-watchdog", false, true)
+    ]);
+    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, nowIso);
+    return next;
+  }
+
+  private async ensureFinalizeJobActive(jobId: string): Promise<void> {
+    const current = await this.loadFinalizeV2Status();
+    if (!current || current.job_id !== jobId) {
+      throw new Error(`finalize job ${jobId} is no longer current`);
+    }
+    if (this.isFinalizeTerminal(current.status)) {
+      throw new Error(`finalize job ${jobId} already ${current.status}`);
+    }
+  }
+
   private currentRealtimeWsState(runtime: AsrRealtimeRuntime): "disconnected" | "connecting" | "running" | "error" {
     if (runtime.connecting) return "connecting";
     if (runtime.connected && runtime.running) return "running";
@@ -1682,8 +1927,39 @@ export class MeetingSessionDO extends DurableObject<Env> {
     runtime.taskId = null;
   }
 
+  private async hydrateRuntimeFromCursor(streamRole: StreamRole): Promise<void> {
+    const cursors = await this.loadAsrCursorByStream();
+    const cursor = cursors[streamRole];
+    const runtime = this.asrRealtimeByStream[streamRole];
+    runtime.lastSentSeq = Math.max(runtime.lastSentSeq, cursor.last_sent_seq);
+    if (runtime.currentStartSeq === null && cursor.last_emitted_seq > 0) {
+      runtime.currentStartSeq = cursor.last_emitted_seq + 1;
+    }
+  }
+
+  private async replayGapFromR2(sessionId: string, streamRole: StreamRole): Promise<void> {
+    const [cursors, ingestByStream] = await Promise.all([this.loadAsrCursorByStream(), this.loadIngestByStream(sessionId)]);
+    const cursor = cursors[streamRole];
+    const ingest = ingestByStream[streamRole];
+    const replayStart = cursor.last_sent_seq + 1;
+    if (replayStart > ingest.last_seq) return;
+
+    for (let seq = replayStart; seq <= ingest.last_seq; seq += 1) {
+      const key = chunkObjectKey(sessionId, streamRole, seq);
+      const object = await this.env.RESULT_BUCKET.get(key);
+      if (!object) continue;
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      if (bytes.byteLength !== ONE_SECOND_PCM_BYTES) continue;
+      const tsRaw = object.customMetadata?.timestamp_ms ?? "";
+      const parsedTs = Number(tsRaw);
+      const timestampMs = Number.isFinite(parsedTs) ? parsedTs : seq * 1000;
+      await this.enqueueRealtimeChunk(sessionId, streamRole, seq, timestampMs, bytes);
+    }
+  }
+
   private async ensureRealtimeAsrConnected(sessionId: string, streamRole: StreamRole): Promise<void> {
     const runtime = this.asrRealtimeByStream[streamRole];
+    await this.hydrateRuntimeFromCursor(streamRole);
     if (runtime.connected && runtime.running && runtime.ws) {
       return;
     }
@@ -1791,6 +2067,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await runtime.readyPromise;
       clearTimeout(startedTimeout);
       runtime.reconnectBackoffMs = 500;
+      await this.replayGapFromR2(sessionId, streamRole);
 
       await this.refreshAsrStreamMetrics(sessionId, streamRole, {
         asr_ws_state: "running",
@@ -1914,6 +2191,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         runtime.sentChunkTsBySeq.delete(seq);
       }
     }
+    await this.patchAsrCursor(streamRole, {
+      last_sent_seq: Math.max(runtime.lastSentSeq, endSeq),
+      last_emitted_seq: endSeq
+    });
 
     if (streamRole === "students") {
       let resolvedInfo:
@@ -2038,11 +2319,22 @@ export class MeetingSessionDO extends DurableObject<Env> {
     bytes: Uint8Array
   ): Promise<void> {
     const runtime = this.asrRealtimeByStream[streamRole];
+    if (seq <= runtime.lastSentSeq) {
+      return;
+    }
+    if (runtime.sendQueue.some((item) => item.seq === seq)) {
+      return;
+    }
     runtime.sendQueue.push({
       seq,
       timestampMs,
       receivedAtMs: Date.now(),
       bytes
+    });
+    const cursors = await this.loadAsrCursorByStream();
+    const current = cursors[streamRole];
+    await this.patchAsrCursor(streamRole, {
+      last_ingested_seq: Math.max(current.last_ingested_seq, seq)
     });
     await this.refreshAsrStreamMetrics(sessionId, streamRole);
   }
@@ -2056,6 +2348,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     runtime.flushPromise = (async () => {
       while (runtime.sendQueue.length > 0) {
         try {
+          let lastSentSeq = runtime.lastSentSeq;
           await this.ensureRealtimeAsrConnected(sessionId, streamRole);
           if (!runtime.ws || runtime.ws.readyState !== WebSocket.OPEN) {
             throw new Error("dashscope websocket is not open");
@@ -2072,10 +2365,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
             }
             runtime.ws.send(head.bytes);
             runtime.lastSentSeq = Math.max(runtime.lastSentSeq, head.seq);
+            lastSentSeq = Math.max(lastSentSeq, head.seq);
             runtime.sentChunkTsBySeq.set(head.seq, head.receivedAtMs);
             runtime.sendQueue.shift();
           }
 
+          await this.patchAsrCursor(streamRole, {
+            last_sent_seq: lastSentSeq
+          });
           await this.refreshAsrStreamMetrics(sessionId, streamRole);
         } catch (error) {
           await this.refreshAsrStreamMetrics(sessionId, streamRole, {
@@ -2718,12 +3015,513 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
+  private async updateFinalizeV2Status(jobId: string, patch: Partial<FinalizeV2Status>): Promise<FinalizeV2Status | null> {
+    const current = await this.loadFinalizeV2Status();
+    if (!current || current.job_id !== jobId) return null;
+    if (this.isFinalizeTerminal(current.status) && patch.status !== current.status) {
+      return null;
+    }
+    const nowIso = this.currentIsoTs();
+    const next: FinalizeV2Status = {
+      ...current,
+      ...patch,
+      errors: patch.errors ?? current.errors,
+      started_at: current.started_at ?? nowIso,
+      heartbeat_at: patch.heartbeat_at ?? nowIso
+    };
+    await this.storeFinalizeV2Status(next);
+    return next;
+  }
+
+  private async invokeInferenceAnalysisEvents(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const path = this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events";
+    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(baseUrl + path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.env.INFERENCE_API_KEY ? { "x-api-key": this.env.INFERENCE_API_KEY } : {})
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`analysis/events failed: status=${response.status} body=${text.slice(0, 240)}`);
+    }
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new Error("analysis/events returned non-JSON response");
+    }
+  }
+
+  private async invokeInferenceAnalysisReport(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const path = this.env.INFERENCE_REPORT_PATH ?? "/analysis/report";
+    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(baseUrl + path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.env.INFERENCE_API_KEY ? { "x-api-key": this.env.INFERENCE_API_KEY } : {})
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`analysis/report failed: status=${response.status} body=${text.slice(0, 240)}`);
+    }
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new Error("analysis/report returned non-JSON response");
+    }
+  }
+
+  private deriveSpeakerLogsFromTranscript(
+    nowIso: string,
+    transcript: Array<{
+      utterance_id: string;
+      stream_role: StreamRole;
+      cluster_id?: string | null;
+      speaker_name?: string | null;
+      text: string;
+      start_ms: number;
+      end_ms: number;
+      duration_ms: number;
+      decision?: "auto" | "confirm" | "unknown" | null;
+    }>,
+    state: SessionState,
+    existing: SpeakerLogs,
+    source: "cloud" | "edge" = "cloud"
+  ): SpeakerLogs {
+    const turns = transcript
+      .filter((item) => item.stream_role === "students" && item.cluster_id)
+      .map((item) => ({
+        turn_id: `turn_${item.utterance_id}`,
+        start_ms: item.start_ms,
+        end_ms: item.end_ms,
+        stream_role: "students" as StreamRole,
+        cluster_id: item.cluster_id as string,
+        utterance_id: item.utterance_id
+      }));
+
+    const clusterMap = new Map<string, Set<string>>();
+    for (const turn of turns) {
+      const bucket = clusterMap.get(turn.cluster_id) ?? new Set<string>();
+      bucket.add(turn.turn_id);
+      clusterMap.set(turn.cluster_id, bucket);
+    }
+    const clusters = [...clusterMap.entries()].map(([clusterId, turnIds]) => ({
+      cluster_id: clusterId,
+      turn_ids: [...turnIds],
+      confidence: null
+    }));
+    const speaker_map = [...clusterMap.keys()].map((clusterId) => {
+      const bound = state.bindings[clusterId] ?? null;
+      const meta = state.cluster_binding_meta[clusterId];
+      const source: "manual" | "enroll" | "name_extract" | "unknown" =
+        meta?.source === "manual_map"
+          ? "manual"
+          : meta?.source === "enrollment_match"
+            ? "enroll"
+            : meta?.source === "name_extract"
+              ? "name_extract"
+              : "unknown";
+      return {
+        cluster_id: clusterId,
+        person_id: bound,
+        display_name: bound,
+        source
+      };
+    });
+
+    return mergeSpeakerLogs(
+      existing,
+      {
+        source,
+        turns,
+        clusters,
+        speaker_map,
+        updated_at: nowIso
+      }
+    );
+  }
+
+  private buildEdgeSpeakerLogsForFinalize(nowIso: string, existing: SpeakerLogs, state: SessionState): SpeakerLogs {
+    const base = existing.source === "edge" ? existing : emptySpeakerLogs(nowIso);
+    const clusterIds = new Set<string>();
+    for (const item of base.clusters) {
+      clusterIds.add(item.cluster_id);
+    }
+    for (const item of base.turns) {
+      clusterIds.add(item.cluster_id);
+    }
+
+    const mapByCluster = new Map(
+      (Array.isArray(base.speaker_map) ? base.speaker_map : []).map((item) => [item.cluster_id, item])
+    );
+    for (const clusterId of clusterIds) {
+      const bound = state.bindings[clusterId] ?? mapByCluster.get(clusterId)?.display_name ?? null;
+      const meta = state.cluster_binding_meta[clusterId];
+      const source: "manual" | "enroll" | "name_extract" | "unknown" =
+        meta?.source === "manual_map"
+          ? "manual"
+          : meta?.source === "enrollment_match"
+            ? "enroll"
+            : meta?.source === "name_extract"
+              ? "name_extract"
+              : (mapByCluster.get(clusterId)?.source ?? "unknown");
+      mapByCluster.set(clusterId, {
+        cluster_id: clusterId,
+        person_id: bound,
+        display_name: bound,
+        source
+      });
+    }
+
+    return {
+      ...base,
+      source: "edge",
+      speaker_map: [...mapByCluster.values()],
+      updated_at: nowIso
+    };
+  }
+
+  private async runFinalizeV2Job(
+    sessionId: string,
+    jobId: string,
+    metadata: Record<string, unknown>
+  ): Promise<void> {
+    const startedAt = this.currentIsoTs();
+    await this.updateFinalizeV2Status(jobId, {
+      status: "running",
+      stage: "freeze",
+      progress: 5,
+      started_at: startedAt
+    });
+    await this.setFinalizeLock(true);
+
+    try {
+      await this.ensureFinalizeJobActive(jobId);
+      const timeoutMs = this.finalizeTimeoutMs();
+      const drainWithTimeout = async (streamRole: StreamRole): Promise<void> => {
+        await Promise.race([
+          this.drainRealtimeQueue(sessionId, streamRole),
+          new Promise<void>((_, reject) => {
+            setTimeout(() => reject(new Error(`drain timeout stream=${streamRole}`)), timeoutMs);
+          })
+        ]);
+      };
+
+      const ingestByStream = await this.loadIngestByStream(sessionId);
+      const cutoff = {
+        mixed: ingestByStream.mixed.last_seq,
+        teacher: ingestByStream.teacher.last_seq,
+        students: ingestByStream.students.last_seq
+      };
+
+      await this.updateFinalizeV2Status(jobId, { stage: "drain", progress: 18 });
+      await this.ensureFinalizeJobActive(jobId);
+      await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
+
+      await this.updateFinalizeV2Status(jobId, { stage: "replay_gap", progress: 30 });
+      await this.ensureFinalizeJobActive(jobId);
+      await Promise.all([this.replayGapFromR2(sessionId, "teacher"), this.replayGapFromR2(sessionId, "students")]);
+      await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
+
+      await this.closeRealtimeAsrSession("teacher", "finalize-v2", false, true);
+      await this.closeRealtimeAsrSession("students", "finalize-v2", false, true);
+      await this.refreshAsrStreamMetrics(sessionId, "teacher");
+      await this.refreshAsrStreamMetrics(sessionId, "students");
+
+      await this.updateFinalizeV2Status(jobId, { stage: "reconcile", progress: 42 });
+      const [stateRaw, events, rawByStream, mergedByStream, memos, speakerLogsStored, asrByStream] = await Promise.all([
+        this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
+        this.loadSpeakerEvents(),
+        this.loadUtterancesRawByStream(),
+        this.loadUtterancesMergedByStream(),
+        this.loadMemos(),
+        this.loadSpeakerLogs(),
+        this.loadAsrByStream()
+      ]);
+      const state = normalizeSessionState(stateRaw);
+      const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
+
+      const eventByUtterance = new Map(
+        events
+          .filter((item) => item.stream_role === "students" && item.utterance_id)
+          .map((item) => [item.utterance_id as string, item])
+      );
+      const teacherEventByUtterance = new Map(
+        events
+          .filter((item) => item.stream_role === "teacher" && item.utterance_id)
+          .map((item) => [item.utterance_id as string, item])
+      );
+
+      const edgeTurns =
+        diarizationBackend === "edge"
+          ? [...speakerLogsStored.turns]
+              .filter((item) => item.stream_role === "students")
+              .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
+          : [];
+      const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
+        if (edgeTurns.length === 0) return null;
+        let bestCluster: string | null = null;
+        let bestOverlap = 0;
+        for (const turn of edgeTurns) {
+          const overlap = Math.min(endMs, turn.end_ms) - Math.max(startMs, turn.start_ms);
+          if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestCluster = turn.cluster_id;
+          }
+        }
+        return bestOverlap > 0 ? bestCluster : null;
+      };
+      const resolveStudentBinding = (
+        clusterId: string | null,
+        eventSpeakerName: string | null,
+        eventDecision: "auto" | "confirm" | "unknown" | null
+      ): { speaker_name: string | null; decision: "auto" | "confirm" | "unknown" | null } => {
+        if (!clusterId) {
+          if (eventSpeakerName) {
+            return {
+              speaker_name: eventSpeakerName,
+              decision: eventDecision ?? "confirm"
+            };
+          }
+          return { speaker_name: null, decision: "unknown" };
+        }
+
+        const bound = state.bindings[clusterId] ?? null;
+        const meta = state.cluster_binding_meta[clusterId];
+        if (meta?.locked && bound) {
+          return { speaker_name: bound, decision: "auto" };
+        }
+        if (meta?.source === "manual_map" && bound) {
+          return { speaker_name: bound, decision: "auto" };
+        }
+        if (meta?.source === "enrollment_match" && bound) {
+          return { speaker_name: bound, decision: "auto" };
+        }
+        if (meta?.source === "name_extract" && bound) {
+          return { speaker_name: bound, decision: "confirm" };
+        }
+        if (bound) {
+          return { speaker_name: bound, decision: "auto" };
+        }
+        if (eventSpeakerName) {
+          return {
+            speaker_name: eventSpeakerName,
+            decision: eventDecision ?? "confirm"
+          };
+        }
+        return { speaker_name: null, decision: "unknown" };
+      };
+
+      const transcript = [...rawByStream.teacher, ...rawByStream.students]
+        .filter((item) => item.end_seq <= cutoff[item.stream_role])
+        .map((item) => {
+          const event = item.stream_role === "teacher"
+            ? teacherEventByUtterance.get(item.utterance_id)
+            : eventByUtterance.get(item.utterance_id);
+          const inferredStudentsCluster =
+            item.stream_role === "students" && diarizationBackend === "edge"
+              ? inferStudentsClusterFromEdgeTurns(item.start_ms, item.end_ms)
+              : null;
+          const clusterId =
+            event?.cluster_id ??
+            (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
+          const reconciled =
+            item.stream_role === "students"
+              ? resolveStudentBinding(clusterId ?? null, event?.speaker_name ?? null, event?.decision ?? null)
+              : {
+                  speaker_name: event?.speaker_name ?? null,
+                  decision: event?.decision ?? null
+                };
+          return {
+            utterance_id: item.utterance_id,
+            stream_role: item.stream_role,
+            cluster_id: clusterId ?? null,
+            speaker_name: reconciled.speaker_name,
+            decision: reconciled.decision,
+            text: item.text,
+            start_ms: item.start_ms,
+            end_ms: item.end_ms,
+            duration_ms: item.duration_ms
+          };
+        })
+        .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+
+      mergedByStream.teacher = mergeUtterances(rawByStream.teacher);
+      mergedByStream.students = mergeUtterances(rawByStream.students);
+      await this.storeUtterancesMergedByStream(mergedByStream);
+
+      const unresolvedClusterCount = state.clusters.filter((cluster) => {
+        const bound = state.bindings[cluster.cluster_id];
+        const meta = state.cluster_binding_meta[cluster.cluster_id];
+        return !bound || !meta || !meta.locked;
+      }).length;
+      const tentative = unresolvedClusterCount > 0;
+
+      const hasStudentTranscript = transcript.some((item) => item.stream_role === "students");
+      let speakerLogs: SpeakerLogs;
+      if (diarizationBackend === "edge") {
+        if (hasStudentTranscript && speakerLogsStored.source !== "edge") {
+          throw new Error("diarization_backend=edge requires edge speaker-logs source");
+        }
+        if (hasStudentTranscript && speakerLogsStored.turns.length === 0) {
+          throw new Error("diarization_backend=edge requires non-empty edge speaker-logs turns");
+        }
+        speakerLogs = this.buildEdgeSpeakerLogsForFinalize(this.currentIsoTs(), speakerLogsStored, state);
+      } else {
+        const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
+        speakerLogs = this.deriveSpeakerLogsFromTranscript(
+          this.currentIsoTs(),
+          transcript,
+          state,
+          cloudBase,
+          "cloud"
+        );
+      }
+      await this.storeSpeakerLogs(speakerLogs);
+
+      await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
+      const stats = computeSpeakerStats(transcript);
+      const evidence = buildEvidence({ memos, transcript });
+      const memosWithEvidence = attachEvidenceToMemos(memos, evidence);
+
+      await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 70 });
+      await this.ensureFinalizeJobActive(jobId);
+      const eventsPayload = {
+        session_id: sessionId,
+        transcript,
+        memos: memosWithEvidence,
+        stats,
+        locale: "zh-CN"
+      };
+      const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
+      const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
+
+      await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
+      await this.ensureFinalizeJobActive(jobId);
+      const reportPayload = {
+        session_id: sessionId,
+        transcript,
+        memos: memosWithEvidence,
+        stats,
+        evidence,
+        events: analysisEvents,
+        locale: "zh-CN"
+      };
+      const reportResult = await this.invokeInferenceAnalysisReport(reportPayload);
+
+      await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
+      await this.ensureFinalizeJobActive(jobId);
+      const finalizedAt = this.currentIsoTs();
+      const thresholdMeta: Record<string, number | string | boolean> = {};
+      for (const [key, value] of Object.entries(metadata ?? {})) {
+        if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") {
+          thresholdMeta[key] = value;
+        }
+      }
+      const resultV2 = buildResultV2({
+        sessionId,
+        finalizedAt,
+        tentative,
+        unresolvedClusterCount,
+        diarizationBackend,
+        transcript,
+        speakerLogs,
+        stats,
+        memos,
+        evidence,
+        overall: reportResult.overall ?? {},
+        perPerson: Array.isArray(reportResult.per_person) ? reportResult.per_person : [],
+        finalizeJobId: jobId,
+        modelVersions: {
+          asr: asrByStream.students.model,
+          analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
+          analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report"
+        },
+        thresholds: {
+          sv_t_low: 0.45,
+          sv_t_high: 0.70,
+          tentative,
+          unresolved_cluster_count: unresolvedClusterCount,
+          diarization_backend: diarizationBackend,
+          finalize_timeout_ms: timeoutMs,
+          ...thresholdMeta
+        }
+      });
+
+      const resultV2Key = resultObjectKeyV2(sessionId);
+      await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
+        httpMetadata: { contentType: "application/json" }
+      });
+      await this.ctx.storage.put(STORAGE_KEY_RESULT_KEY_V2, resultV2Key);
+      await this.ctx.storage.put(STORAGE_KEY_FINALIZED_AT, finalizedAt);
+      await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, finalizedAt);
+
+      await this.updateFinalizeV2Status(jobId, {
+        status: "succeeded",
+        stage: "persist",
+        progress: 100,
+        finished_at: finalizedAt,
+        errors: []
+      });
+    } catch (error) {
+      const message = (error as Error).message;
+      const current = await this.loadFinalizeV2Status();
+      if (current && current.job_id === jobId && !this.isFinalizeTerminal(current.status)) {
+        await this.updateFinalizeV2Status(jobId, {
+          status: "failed",
+          stage: "persist",
+          progress: 100,
+          finished_at: this.currentIsoTs(),
+          errors: [...current.errors, message]
+        });
+      }
+    } finally {
+      await this.setFinalizeLock(false);
+    }
+  }
+
   private async handleChunkFrame(
     sessionId: string,
     streamRole: StreamRole,
     socket: WebSocket,
     frame: AudioChunkFrame
   ): Promise<void> {
+    if (await this.isFinalizeLocked()) {
+      await this.failStuckFinalizeIfNeeded("ingest-locked");
+    }
+    if (await this.isFinalizeLocked()) {
+      this.sendWsJson(socket, {
+        type: "ack",
+        stream_role: streamRole,
+        seq: frame.seq,
+        status: "frozen"
+      });
+      return;
+    }
     const ingestByStream = await this.loadIngestByStream(sessionId);
     const ingest = ingestByStream[streamRole];
 
@@ -2778,6 +3576,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
     ingest.bytes_stored += bytes.byteLength;
     ingestByStream[streamRole] = ingest;
     await this.storeIngestByStream(ingestByStream);
+    await this.patchAsrCursor(streamRole, {
+      last_ingested_seq: Math.max(frame.seq, ingest.last_seq)
+    });
 
     this.sendWsJson(socket, {
       type: "ack",
@@ -2860,6 +3661,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
       config.teams_interviewer_name = teamsInterviewer;
     } else if (interviewer) {
       config.teams_interviewer_name = interviewer;
+    }
+    if (config.diarization_backend !== "edge" && config.diarization_backend !== "cloud") {
+      config.diarization_backend = this.diarizationBackendDefault();
     }
 
     const roster = parseRosterEntries(message.teams_participants);
@@ -3030,13 +3834,18 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
 
     if (action === "state" && request.method === "GET") {
-      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream] = await Promise.all([
+      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream] =
+        await Promise.all([
         this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
         this.loadSpeakerEvents(),
         this.ctx.storage.get<string>(STORAGE_KEY_UPDATED_AT),
         this.loadIngestByStream(sessionId),
         this.loadUtterancesRawByStream(),
-        this.loadAsrByStream()
+        this.loadAsrByStream(),
+        this.loadMemos(),
+        this.loadFinalizeV2Status(),
+        this.loadSpeakerLogs(),
+        this.loadAsrCursorByStream()
       ]);
 
       const utteranceCountByStream = {
@@ -3060,7 +3869,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         asr: asrByStream.mixed,
         asr_by_stream: asrByStream,
         utterance_count: utteranceCountByStream.mixed,
-        utterance_count_by_stream: utteranceCountByStream
+        utterance_count_by_stream: utteranceCountByStream,
+        memo_count: memos.length,
+        finalize_v2: finalizeV2Status,
+        speaker_logs: speakerLogs,
+        asr_cursor_by_stream: asrCursorByStream
       });
     }
 
@@ -3086,6 +3899,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
           if (!teamsInterviewerName) {
             config.teams_interviewer_name = interviewerName;
           }
+        }
+        if (payload.diarization_backend) {
+          config.diarization_backend = payload.diarization_backend === "edge" ? "edge" : "cloud";
+        } else if (config.diarization_backend !== "edge" && config.diarization_backend !== "cloud") {
+          config.diarization_backend = this.diarizationBackendDefault();
         }
 
         const roster = parseRosterEntries(payload.teams_participants);
@@ -3191,6 +4009,105 @@ export class MeetingSessionDO extends DurableObject<Env> {
       });
     }
 
+    if (action === "memos" && request.method === "POST") {
+      if (!this.memosEnabled()) {
+        return jsonResponse({ detail: "memos is disabled" }, 503);
+      }
+      let payload: Record<string, unknown>;
+      try {
+        payload = await readJson<Record<string, unknown>>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      return this.enqueueMutation(async () => {
+        const nowMs = Date.now();
+        const memos = await this.loadMemos();
+        const memoId = nextMemoId(memos, nowMs);
+        let item: MemoItem;
+        try {
+          item = parseMemoPayload(payload, { memoId, createdAtMs: nowMs });
+        } catch (error) {
+          return badRequest((error as Error).message);
+        }
+        memos.push(item);
+        await this.storeMemos(memos);
+        await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+        return jsonResponse({
+          session_id: sessionId,
+          memo: item,
+          count: memos.length
+        });
+      });
+    }
+
+    if (action === "memos" && request.method === "GET") {
+      const limitRaw = Number(url.searchParams.get("limit") ?? "100");
+      const fromMsRaw = Number(url.searchParams.get("from_ms"));
+      const toMsRaw = Number(url.searchParams.get("to_ms"));
+      const memos = await this.loadMemos();
+      const items = filterMemos(memos, {
+        limit: Number.isFinite(limitRaw) ? limitRaw : 100,
+        fromMs: Number.isFinite(fromMsRaw) ? fromMsRaw : null,
+        toMs: Number.isFinite(toMsRaw) ? toMsRaw : null
+      });
+      return jsonResponse({
+        session_id: sessionId,
+        count: memos.length,
+        items
+      });
+    }
+
+    if (action === "speaker-logs" && request.method === "POST") {
+      let payload: Record<string, unknown>;
+      try {
+        payload = await readJson<Record<string, unknown>>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      return this.enqueueMutation(async () => {
+        const now = this.currentIsoTs();
+        const current = await this.loadSpeakerLogs();
+        let parsed: SpeakerLogs;
+        try {
+          parsed = parseSpeakerLogsPayload(payload, now);
+        } catch (error) {
+          return badRequest((error as Error).message);
+        }
+        const merged = mergeSpeakerLogs(current, parsed);
+        await this.storeSpeakerLogs(merged);
+        await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, now);
+        return jsonResponse({
+          session_id: sessionId,
+          source: merged.source,
+          turns: merged.turns.length,
+          clusters: merged.clusters.length,
+          speaker_map: merged.speaker_map.length,
+          updated_at: merged.updated_at
+        });
+      });
+    }
+
+    if (action === "finalize-status" && request.method === "GET") {
+      const status = await this.failStuckFinalizeIfNeeded("status-poll");
+      if (!status) {
+        return jsonResponse({
+          session_id: sessionId,
+          status: "idle",
+          stage: "idle",
+          progress: 0,
+          version: "v2"
+        });
+      }
+      const jobId = String(url.searchParams.get("job_id") ?? "").trim();
+      if (jobId && jobId !== status.job_id) {
+        return jsonResponse({ detail: "job_id not found", job_id: jobId }, 404);
+      }
+      return jsonResponse({
+        session_id: sessionId,
+        ...status
+      });
+    }
+
     if (action === "cluster-map" && request.method === "POST") {
       let payload: ClusterMapRequest;
       try {
@@ -3204,6 +4121,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
       const clusterId = String(payload.cluster_id ?? "").trim();
       const participantNameRaw = String(payload.participant_name ?? "").trim();
+      const mode = payload.mode === "prebind" ? "prebind" : "bind";
       if (!clusterId || !participantNameRaw) {
         return badRequest("cluster_id and participant_name are required");
       }
@@ -3211,20 +4129,47 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
         const participantName = this.rosterNameByCandidate(state, participantNameRaw) ?? participantNameRaw;
         const now = this.currentIsoTs();
-        state.bindings[clusterId] = participantName;
-        for (const cluster of state.clusters) {
-          if (cluster.cluster_id === clusterId) {
-            cluster.bound_name = participantName;
-            break;
+        const existingCluster = state.clusters.find((cluster) => cluster.cluster_id === clusterId);
+        if (!existingCluster) {
+          if (mode !== "prebind") {
+            return jsonResponse(
+              {
+                detail: "cluster_id not found in state.clusters",
+                cluster_id: clusterId,
+                available_cluster_ids: state.clusters.map((item) => item.cluster_id)
+              },
+              400
+            );
           }
+          state.prebind_by_cluster[clusterId] = {
+            participant_name: participantName,
+            source: "manual_map",
+            confidence: 1,
+            locked: payload.lock !== false,
+            updated_at: now
+          };
+          await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+          await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, now);
+          return jsonResponse({
+            session_id: sessionId,
+            cluster_id: clusterId,
+            participant_name: participantName,
+            mode: "prebind",
+            binding_locked: payload.lock !== false,
+            prebind_meta: state.prebind_by_cluster[clusterId]
+          });
         }
+
+        state.bindings[clusterId] = participantName;
+        existingCluster.bound_name = participantName;
+        delete state.prebind_by_cluster[clusterId];
         state.cluster_binding_meta[clusterId] = {
           participant_name: participantName,
           source: "manual_map",
           confidence: 1,
           locked: payload.lock !== false,
           updated_at: now
-        };
+        }
         if (state.enrollment_state?.unassigned_clusters?.[clusterId]) {
           delete state.enrollment_state.unassigned_clusters[clusterId];
           state.enrollment_state.updated_at = now;
@@ -3250,6 +4195,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           session_id: sessionId,
           cluster_id: clusterId,
           participant_name: participantName,
+          mode: "bind",
           binding_locked: payload.lock !== false,
           cluster_binding_meta: state.cluster_binding_meta[clusterId]
         });
@@ -3407,6 +4353,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await this.storeAsrByStream(asrByStream);
         await this.storeSpeakerEvents(events.filter((item) => item.stream_role !== streamRole));
         await this.closeRealtimeAsrSession(streamRole, "asr-reset", true);
+        await this.patchAsrCursor(streamRole, {
+          last_ingested_seq: 0,
+          last_sent_seq: 0,
+          last_emitted_seq: 0
+        });
 
         return jsonResponse({
           session_id: sessionId,
@@ -3416,6 +4367,26 @@ export class MeetingSessionDO extends DurableObject<Env> {
           removed_events: removedEvents,
           message: "asr state and utterances reset; chunks kept in R2"
         });
+      });
+    }
+
+    if (action === "result" && request.method === "GET") {
+      const version = String(url.searchParams.get("version") ?? "v1").trim().toLowerCase();
+      const key =
+        version === "v2"
+          ? (await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2)) ?? resultObjectKeyV2(sessionId)
+          : (await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY)) ?? resultObjectKey(sessionId);
+      const object = await this.env.RESULT_BUCKET.get(key);
+      if (!object) {
+        return jsonResponse({ detail: `result not found for version=${version}` }, 404);
+      }
+      const content = await object.text();
+      return new Response(content, {
+        status: 200,
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "x-result-version": version
+        }
       });
     }
 
@@ -3505,6 +4476,48 @@ export class MeetingSessionDO extends DurableObject<Env> {
         payload = await readJson<FinalizeRequest>(request);
       } catch (error) {
         return badRequest((error as Error).message);
+      }
+
+      const version = String(url.searchParams.get("version") ?? "v1").trim().toLowerCase();
+      if (version === "v2") {
+        if (!this.finalizeV2Enabled()) {
+          return jsonResponse({ detail: "finalize v2 is disabled" }, 503);
+        }
+        await this.failStuckFinalizeIfNeeded("enqueue");
+        const current = await this.loadFinalizeV2Status();
+        if (current && (current.status === "queued" || current.status === "running")) {
+          return jsonResponse({
+            session_id: sessionId,
+            job_id: current.job_id,
+            status: current.status,
+            stage: current.stage,
+            progress: current.progress,
+            version: "v2"
+          });
+        }
+        const nextStatus: FinalizeV2Status = {
+          job_id: `fv2_${crypto.randomUUID()}`,
+          status: "queued",
+          stage: "freeze",
+          progress: 0,
+          errors: [],
+          version: "v2",
+          started_at: this.currentIsoTs(),
+          heartbeat_at: this.currentIsoTs(),
+          finished_at: null
+        };
+        await this.storeFinalizeV2Status(nextStatus);
+        this.ctx.waitUntil(
+          this.enqueueMutation(async () => {
+            await this.runFinalizeV2Job(sessionId, nextStatus.job_id, payload.metadata ?? {});
+          })
+        );
+        return jsonResponse({
+          session_id: sessionId,
+          job_id: nextStatus.job_id,
+          status: "queued",
+          version: "v2"
+        });
       }
 
       const [state, events, ingestByStream, rawByStream, mergedByStream, asrByStream] = await Promise.all([

@@ -12,6 +12,8 @@ class NameCandidate:
 
 class NameResolver:
     _max_name_tokens = 4
+    _max_cjk_chars = 4
+    _min_cjk_chars = 2
     _blocked_tokens = {
         "a",
         "am",
@@ -56,16 +58,44 @@ class NameResolver:
         "we",
         "with",
     }
+    _blocked_cjk_tokens = {
+        "大家",
+        "同学",
+        "老师",
+        "我们",
+        "你们",
+    }
     _patterns = [
         (re.compile(r"\bmy name is\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.95),
         (re.compile(r"\bi\s+am\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.90),
         (re.compile(r"\bi'm\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.90),
         (re.compile(r"\b(?:please\s+)?call me\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.88),
+        (re.compile(r"(?:我叫|我是)\s*([\u4e00-\u9fff]{2,4})"), 0.96),
+        (re.compile(r"([\u4e00-\u9fff]{2,4})(?=来补充|补充一下|认为|先说|继续说)"), 0.80),
     ]
+
+    @classmethod
+    def _normalize_cjk_name(cls, raw: str) -> str | None:
+        clipped = re.split(r"[,.;:!?()\[\]\n\r，。；：！？（）【】]", raw, maxsplit=1)[0]
+        cleaned = re.sub(r"\s+", "", clipped.strip())
+        if len(cleaned) > 2 and cleaned.endswith(("来", "说", "讲")):
+            cleaned = cleaned[:-1]
+        if not cleaned:
+            return None
+        if any(token in cleaned for token in cls._blocked_cjk_tokens):
+            return None
+        if not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", cleaned):
+            return None
+        if len(cleaned) < cls._min_cjk_chars or len(cleaned) > cls._max_cjk_chars:
+            return None
+        return cleaned
 
     @classmethod
     def _normalize_name(cls, raw: str) -> str | None:
         # Limit candidate span to the first phrase and reject common non-name tokens.
+        if re.search(r"[\u4e00-\u9fff]", raw):
+            return cls._normalize_cjk_name(raw)
+
         clipped = re.split(r"[,.;:!?()\[\]\n\r]", raw, maxsplit=1)[0]
         cleaned = " ".join(clipped.strip().split())
         if not cleaned:

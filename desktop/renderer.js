@@ -35,9 +35,24 @@ const participantListEl = document.querySelector("#participant-list");
 const btnParticipantAdd = document.querySelector("#btn-participant-add");
 const btnParticipantImport = document.querySelector("#btn-participant-import");
 const teamsInterviewerNameEl = document.querySelector("#teams-interviewer-name");
+const diarizationBackendEl = document.querySelector("#diarization-backend");
 const micAecEl = document.querySelector("#mic-aec");
 const micNsEl = document.querySelector("#mic-ns");
 const micAgcEl = document.querySelector("#mic-agc");
+const sidecarStatusEl = document.querySelector("#sidecar-status");
+const btnSidecarStart = document.querySelector("#btn-sidecar-start");
+const btnSidecarStop = document.querySelector("#btn-sidecar-stop");
+
+const memoTypeEl = document.querySelector("#memo-type");
+const memoTagsEl = document.querySelector("#memo-tags");
+const memoTextEl = document.querySelector("#memo-text");
+const memoListEl = document.querySelector("#memo-list");
+const btnMemoAdd = document.querySelector("#btn-memo-add");
+const btnMemoAnchorLast = document.querySelector("#btn-memo-anchor-last");
+
+const btnFinalizeV2 = document.querySelector("#btn-finalize-v2");
+const finalizeV2StatusEl = document.querySelector("#finalize-v2-status");
+const reportV2El = document.querySelector("#report-v2");
 
 const meterMicBarEl = document.querySelector("#meter-mic-bar");
 const meterMicValueEl = document.querySelector("#meter-mic-value");
@@ -61,6 +76,23 @@ const btnEnrollmentStart = document.querySelector("#btn-enrollment-start");
 const btnEnrollmentStop = document.querySelector("#btn-enrollment-stop");
 const btnRefreshLive = document.querySelector("#btn-refresh-live");
 const btnRefreshClusters = document.querySelector("#btn-refresh-clusters");
+
+function safeLogToConsole(message) {
+  try {
+    // Keep a stable diagnostics channel even when renderer UI is not ready.
+    console.error(`[desktop-renderer] ${message}`);
+  } catch {
+    // noop
+  }
+}
+
+window.addEventListener("error", (event) => {
+  safeLogToConsole(`window error: ${event.message} @ ${event.filename || "unknown"}:${event.lineno || 0}`);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  safeLogToConsole(`unhandled rejection: ${String(event.reason)}`);
+});
 
 let micStream;
 let systemCaptureStream;
@@ -121,9 +153,17 @@ const captureMetrics = {
   }
 };
 let livePollTimer;
+let pendingMemoAnchor = null;
+let finalizeV2PollTimer;
+let finalizeV2JobId = "";
+let sidecarActive = false;
 
 function logLine(message) {
   const stamp = new Date().toISOString();
+  if (!logsEl) {
+    safeLogToConsole(`${stamp} ${message}`);
+    return;
+  }
   logsEl.textContent = `[${stamp}] ${message}\n${logsEl.textContent}`.slice(0, 20_000);
 }
 
@@ -274,6 +314,160 @@ function effectiveInterviewerNames() {
     interviewerName: interviewerName || undefined,
     teamsInterviewerName
   };
+}
+
+function effectiveDiarizationBackend() {
+  const value = String(diarizationBackendEl?.value || "cloud").trim();
+  return value === "edge" ? "edge" : "cloud";
+}
+
+function setFinalizeStatus(text) {
+  if (!finalizeV2StatusEl) return;
+  finalizeV2StatusEl.textContent = text;
+}
+
+function renderMemoList(items) {
+  if (!memoListEl) return;
+  if (!Array.isArray(items) || items.length === 0) {
+    memoListEl.textContent = "No memos yet.";
+    return;
+  }
+  const lines = items.slice(-20).map((item) => {
+    const tags = Array.isArray(item.tags) && item.tags.length > 0 ? ` tags=${item.tags.join(",")}` : "";
+    return `[${item.memo_id}] t=${item.created_at_ms} type=${item.type}${tags}\\n${item.text}`;
+  });
+  memoListEl.textContent = lines.join("\\n\\n");
+}
+
+async function refreshMemos() {
+  const payload = await apiRequest("memos?limit=200", "GET");
+  renderMemoList(payload.items || []);
+  return payload;
+}
+
+async function addMemo() {
+  const text = String(memoTextEl?.value || "").trim();
+  if (!text) {
+    throw new Error("memo text is empty");
+  }
+  const tags = String(memoTagsEl?.value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const body = {
+    type: String(memoTypeEl?.value || "observation"),
+    tags,
+    text,
+    anchors: pendingMemoAnchor || undefined
+  };
+  const payload = await apiRequest("memos", "POST", body);
+  pendingMemoAnchor = null;
+  if (memoTextEl) memoTextEl.value = "";
+  await refreshMemos();
+  setResultPayload(payload);
+  logLine(`Memo added: ${payload.memo?.memo_id || "unknown"}`);
+}
+
+async function anchorMemoToLastUtterance() {
+  const students = await apiRequest("utterances?stream_role=students&view=raw&limit=1", "GET");
+  const teacher = await apiRequest("utterances?stream_role=teacher&view=raw&limit=1", "GET");
+  const a = Array.isArray(students.items) && students.items.length > 0 ? students.items[students.items.length - 1] : null;
+  const b = Array.isArray(teacher.items) && teacher.items.length > 0 ? teacher.items[teacher.items.length - 1] : null;
+  const picked = !a ? b : !b ? a : (a.end_ms >= b.end_ms ? a : b);
+  if (!picked) {
+    throw new Error("no utterance available for anchor");
+  }
+  pendingMemoAnchor = {
+    mode: "utterance",
+    utterance_ids: [picked.utterance_id]
+  };
+  logLine(`Memo anchor set to utterance ${picked.utterance_id}`);
+}
+
+function renderReportV2(payload) {
+  if (!reportV2El) return;
+  const overall = payload?.overall || {};
+  const people = Array.isArray(payload?.per_person) ? payload.per_person : [];
+  const sections = Array.isArray(overall.summary_sections) ? overall.summary_sections : [];
+  const lines = [];
+  lines.push(`session=${payload?.session?.session_id || "-"}`);
+  lines.push(`tentative=${String(payload?.session?.tentative ?? false)} unresolved=${payload?.session?.unresolved_cluster_count ?? 0}`);
+  lines.push(`sections=${sections.length} people=${people.length}`);
+  for (const item of sections.slice(0, 6)) {
+    lines.push(`- [${item.topic}] ${(item.bullets || []).join(" | ")}`);
+  }
+  for (const person of people.slice(0, 8)) {
+    lines.push(`\\n[${person.display_name || person.person_key}]`);
+    const scorecard = Array.isArray(person.scorecard) ? person.scorecard : [];
+    const scoreLine = scorecard.map((entry) => `${entry.dimension}:${entry.score}`).join(" ");
+    lines.push(`scorecard ${scoreLine}`);
+    lines.push(`strengths ${(person.strengths || []).join(" | ")}`);
+    lines.push(`risks ${(person.risks || []).join(" | ")}`);
+    lines.push(`next ${(person.next_actions || []).join(" | ")}`);
+  }
+  reportV2El.textContent = lines.join("\\n");
+}
+
+async function triggerFinalizeV2() {
+  if (finalizeV2PollTimer) {
+    window.clearInterval(finalizeV2PollTimer);
+    finalizeV2PollTimer = undefined;
+  }
+  const payload = await desktopAPI.finalizeV2({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    sessionId: meetingIdValue(),
+    metadata: {
+      source: "desktop-ui"
+    }
+  });
+  finalizeV2JobId = String(payload.job_id || "");
+  setFinalizeStatus(`queued job=${finalizeV2JobId}`);
+  logLine(`Finalize v2 queued: job=${finalizeV2JobId}`);
+
+  finalizeV2PollTimer = window.setInterval(async () => {
+    try {
+      const status = await desktopAPI.getFinalizeStatus({
+        baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+        sessionId: meetingIdValue(),
+        jobId: finalizeV2JobId
+      });
+      setFinalizeStatus(`status=${status.status} stage=${status.stage} progress=${status.progress}%`);
+      if (status.status === "succeeded") {
+        window.clearInterval(finalizeV2PollTimer);
+        finalizeV2PollTimer = undefined;
+        const resultV2 = await desktopAPI.getResultV2({
+          baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+          sessionId: meetingIdValue()
+        });
+        renderReportV2(resultV2);
+        setResultPayload(resultV2);
+        logLine("Finalize v2 report loaded.");
+      } else if (status.status === "failed") {
+        window.clearInterval(finalizeV2PollTimer);
+        finalizeV2PollTimer = undefined;
+        throw new Error(`finalize v2 failed: ${JSON.stringify(status.errors || [])}`);
+      }
+    } catch (error) {
+      if (finalizeV2PollTimer) {
+        window.clearInterval(finalizeV2PollTimer);
+        finalizeV2PollTimer = undefined;
+      }
+      setFinalizeStatus(`failed: ${error.message}`);
+      logLine(`Finalize v2 polling failed: ${error.message}`);
+    }
+  }, 2000);
+}
+
+async function refreshSidecarStatus() {
+  if (!sidecarStatusEl) return;
+  try {
+    const status = await desktopAPI.diarizationGetStatus();
+    sidecarActive = Boolean(status?.status === "running" && status?.healthy);
+    sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+  } catch (error) {
+    sidecarActive = false;
+    sidecarStatusEl.textContent = `sidecar status failed: ${error.message}`;
+  }
 }
 
 function setMeter(analyser, barEl, valueEl) {
@@ -914,6 +1108,39 @@ function processUploadQueue(role) {
       content_b64: contentB64
     };
 
+    if (role === "students" && effectiveDiarizationBackend() === "edge" && sidecarActive) {
+      let diarizationBaseUrl = "";
+      try {
+        diarizationBaseUrl = normalizeHttpBaseUrl(apiBaseUrlEl.value);
+      } catch (error) {
+        logLine(`Edge diarization skipped: ${error.message}`);
+        diarizationBaseUrl = "";
+      }
+      if (diarizationBaseUrl) {
+      desktopAPI
+        .diarizationPushChunk({
+          baseUrl: diarizationBaseUrl,
+          sessionId: meetingIdValue(),
+          seq: uploadSeq[role],
+          timestampMs,
+          content_b64: contentB64
+        })
+        .then((resp) => {
+          if (resp?.upload) {
+            logLine(`Edge diarization uploaded speaker-logs turns=${resp.upload.turns || 0}`);
+          }
+        })
+        .catch((error) => {
+          sidecarActive = false;
+          logLine(`Edge diarization push failed: ${error.message}`);
+          setUploadStatus(`Edge diarization failed: ${error.message}. Upload will stop.`);
+          stopUpload("edge-sidecar-failed").catch((stopError) => {
+            logLine(`Stop upload after sidecar failure failed: ${stopError.message}`);
+          });
+        });
+      }
+    }
+
     try {
       ws.send(JSON.stringify(message));
       uploadSentCount[role] += 1;
@@ -1273,6 +1500,9 @@ async function openUploadSocket(role) {
 
 async function startUpload() {
   ensureDualInputReady();
+  if (effectiveDiarizationBackend() === "edge" && !sidecarActive) {
+    throw new Error("diarization backend=edge requires sidecar running");
+  }
   if (isAnyUploadActive()) {
     throw new Error("upload already started");
   }
@@ -1504,7 +1734,8 @@ async function saveSessionConfig() {
   const body = {
     teams_participants: validateParticipantsInput(),
     teams_interviewer_name: names.teamsInterviewerName,
-    interviewer_name: names.interviewerName
+    interviewer_name: names.interviewerName,
+    diarization_backend: effectiveDiarizationBackend()
   };
   const payload = await apiRequest("config", "POST", body);
   setResultPayload(payload);
@@ -1614,6 +1845,24 @@ async function openLastFile() {
 }
 
 function bindEvents() {
+  const requiredButtons = [
+    btnInitMic,
+    btnInitSystem,
+    btnStartRecording,
+    btnStopRecording,
+    btnPickFile,
+    btnNormalizeFile,
+    btnOpenLastFile,
+    btnStartUpload,
+    btnStopUpload,
+    btnFetchUploadStatus,
+    btnSaveSessionConfig,
+    btnRefreshLive
+  ];
+  if (requiredButtons.some((item) => !item)) {
+    throw new Error("missing required UI controls in index.html");
+  }
+
   btnInitMic.addEventListener("click", async () => {
     try {
       await initMicStream();
@@ -1788,6 +2037,69 @@ function bindEvents() {
     });
   }
 
+  if (btnMemoAdd) {
+    btnMemoAdd.addEventListener("click", async () => {
+      try {
+        await addMemo();
+      } catch (error) {
+        logLine(`Add memo failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnMemoAnchorLast) {
+    btnMemoAnchorLast.addEventListener("click", async () => {
+      try {
+        await anchorMemoToLastUtterance();
+      } catch (error) {
+        logLine(`Anchor memo failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnFinalizeV2) {
+    btnFinalizeV2.addEventListener("click", async () => {
+      try {
+        await triggerFinalizeV2();
+      } catch (error) {
+        logLine(`Finalize v2 failed: ${error.message}`);
+        setFinalizeStatus(`failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnSidecarStart) {
+    btnSidecarStart.addEventListener("click", async () => {
+      try {
+        const status = await desktopAPI.diarizationStart({});
+        sidecarActive = true;
+        sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+        logLine("Sidecar started.");
+      } catch (error) {
+        sidecarActive = false;
+        logLine(`Sidecar start failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (btnSidecarStop) {
+    btnSidecarStop.addEventListener("click", async () => {
+      try {
+        const status = await desktopAPI.diarizationStop();
+        sidecarActive = false;
+        sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+        logLine("Sidecar stopped.");
+      } catch (error) {
+        logLine(`Sidecar stop failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
   if (clusterMapListEl) {
     clusterMapListEl.addEventListener("click", async (event) => {
       const target = event.target;
@@ -1806,16 +2118,27 @@ function bindEvents() {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
-  if (participantRows().length === 0) {
-    addParticipantRow();
+  try {
+    if (participantRows().length === 0) {
+      addParticipantRow();
+    }
+    renderCaptureHealth();
+    updateButtons();
+    await renderRuntimeInfo();
+    bindEvents();
+    await refreshLiveView().catch(() => {
+      // ignore startup fetch failures
+    });
+    await refreshMemos().catch(() => {
+      // ignore startup memo fetch failures
+    });
+    await refreshSidecarStatus();
+  } catch (error) {
+    const detail = error?.message || String(error);
+    safeLogToConsole(`startup failed: ${detail}`);
+    setResultPayload({ error: `startup failed: ${detail}` });
+    logLine(`Startup failed: ${detail}`);
   }
-  renderCaptureHealth();
-  updateButtons();
-  await renderRuntimeInfo();
-  bindEvents();
-  await refreshLiveView().catch(() => {
-    // ignore startup fetch failures
-  });
 });
 
 window.addEventListener("beforeunload", () => {
@@ -1832,6 +2155,10 @@ window.addEventListener("beforeunload", () => {
   if (studentsRecoveryTimer) {
     window.clearTimeout(studentsRecoveryTimer);
     studentsRecoveryTimer = undefined;
+  }
+  if (finalizeV2PollTimer) {
+    window.clearInterval(finalizeV2PollTimer);
+    finalizeV2PollTimer = undefined;
   }
   stopLivePolling();
 

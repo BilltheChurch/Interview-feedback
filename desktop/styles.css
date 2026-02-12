@@ -74,6 +74,7 @@ body {
 }
 
 .field input,
+.field select,
 .field textarea {
   border: 1px solid var(--border);
   border-radius: 8px;

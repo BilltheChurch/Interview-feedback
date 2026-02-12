@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     profile_margin_threshold: float = Field(default=0.08, alias="PROFILE_MARGIN_THRESHOLD")
     enrollment_ready_seconds: float = Field(default=12.0, alias="ENROLLMENT_READY_SECONDS")
     enrollment_ready_samples: int = Field(default=3, alias="ENROLLMENT_READY_SAMPLES")
+    report_model_provider: Literal["dashscope"] = Field(default="dashscope", alias="REPORT_MODEL_PROVIDER")
+    report_model_name: str = Field(default="qwen-plus", alias="REPORT_MODEL_NAME")
+    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
+    report_timeout_ms: int = Field(default=45000, alias="REPORT_TIMEOUT_MS")
 
     audio_sr: int = Field(default=16000, alias="AUDIO_SR")
     max_audio_seconds: int = Field(default=30, alias="MAX_AUDIO_SECONDS")
@@ -63,6 +67,8 @@ def get_settings() -> Settings:
         raise ValueError("ENROLLMENT_READY_SAMPLES must be greater than 0")
     if settings.vad_frame_ms not in {10, 20, 30}:
         raise ValueError("VAD_FRAME_MS must be one of: 10, 20, 30")
+    if settings.report_timeout_ms <= 0:
+        raise ValueError("REPORT_TIMEOUT_MS must be greater than 0")
     if settings.max_request_body_bytes <= 0:
         raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0")
     if settings.rate_limit_enabled and settings.rate_limit_requests <= 0:
