@@ -24,7 +24,14 @@ function createDiarizationSidecar({ appRoot, log }) {
     binaryPath: null,
     host: '127.0.0.1',
     port: 9705,
-    endpoint: '/diarize'
+    endpoint: '/diarize',
+    restartCount: 0,
+    maxRestarts: 4,
+    restartBackoffMs: 1200,
+    restartTimer: null,
+    restartInFlight: false,
+    stopRequested: false,
+    lastStartOptions: {}
   };
 
   function endpointUrl(pathname) {
@@ -56,6 +63,11 @@ function createDiarizationSidecar({ appRoot, log }) {
     if (state.process && !state.process.killed) {
       return status();
     }
+    state.stopRequested = false;
+    if (state.restartTimer) {
+      clearTimeout(state.restartTimer);
+      state.restartTimer = null;
+    }
 
     const binaryPath =
       options.binaryPath ||
@@ -69,6 +81,13 @@ function createDiarizationSidecar({ appRoot, log }) {
     state.port = Number.isFinite(Number(options.port)) ? Number(options.port) : 9705;
     state.endpoint = typeof options.endpoint === 'string' && options.endpoint ? options.endpoint : '/diarize';
     state.binaryPath = binaryPath;
+    state.lastStartOptions = {
+      binaryPath: options.binaryPath,
+      host: options.host,
+      port: options.port,
+      endpoint: options.endpoint,
+      timeoutMs: options.timeoutMs
+    };
 
     const argsFromEnv = splitArgs(process.env.PYANNOTE_RS_ARGS);
     const args = argsFromEnv.length > 0 ? argsFromEnv : ['serve', '--host', state.host, '--port', String(state.port)];
@@ -97,12 +116,16 @@ function createDiarizationSidecar({ appRoot, log }) {
       state.process = null;
       state.lastError = `sidecar exited code=${code} signal=${signal || 'none'}`;
       log(`[sidecar] exited code=${code} signal=${signal || 'none'}`);
+      if (!state.stopRequested) {
+        scheduleRestart(`exit:${code}:${signal || 'none'}`);
+      }
     });
 
     try {
       const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : 20000;
       await waitUntilHealthy(timeoutMs);
       state.status = 'running';
+      state.restartCount = 0;
       log('[sidecar] healthy');
       return status();
     } catch (error) {
@@ -117,7 +140,41 @@ function createDiarizationSidecar({ appRoot, log }) {
     }
   }
 
+  function scheduleRestart(reason) {
+    if (state.stopRequested) return;
+    if (state.restartInFlight) return;
+    if (state.restartTimer) return;
+    if (state.restartCount >= state.maxRestarts) {
+      state.status = 'error';
+      state.lastError = `auto-restart exhausted after ${state.maxRestarts} attempts; reason=${reason}`;
+      log(`[sidecar] auto-restart exhausted reason=${reason}`);
+      return;
+    }
+    state.restartCount += 1;
+    const delayMs = state.restartBackoffMs * state.restartCount;
+    state.restartTimer = setTimeout(async () => {
+      state.restartTimer = null;
+      if (state.stopRequested) return;
+      state.restartInFlight = true;
+      try {
+        log(`[sidecar] auto-restart attempt=${state.restartCount} reason=${reason}`);
+        await start(state.lastStartOptions || {});
+      } catch (error) {
+        state.lastError = `auto-restart failed: ${error?.message || String(error)}`;
+        log(`[sidecar] auto-restart failed: ${state.lastError}`);
+        scheduleRestart('auto-restart-failed');
+      } finally {
+        state.restartInFlight = false;
+      }
+    }, delayMs);
+  }
+
   async function stop() {
+    state.stopRequested = true;
+    if (state.restartTimer) {
+      clearTimeout(state.restartTimer);
+      state.restartTimer = null;
+    }
     if (!state.process) {
       state.status = 'stopped';
       return status();
@@ -139,14 +196,21 @@ function createDiarizationSidecar({ appRoot, log }) {
     }
     state.process = null;
     state.status = 'stopped';
+    state.restartCount = 0;
     return status();
   }
 
   async function health() {
     try {
       const response = await fetch(endpointUrl('/health'));
+      if (!response.ok && !state.stopRequested) {
+        scheduleRestart(`health:${response.status}`);
+      }
       return response.ok;
     } catch {
+      if (!state.stopRequested) {
+        scheduleRestart('health-network-error');
+      }
       return false;
     }
   }

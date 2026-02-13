@@ -94,6 +94,15 @@ async function main() {
   if (!lastStatus || lastStatus.status !== "succeeded") {
     throw new Error(`finalize v2 timeout: ${JSON.stringify(lastStatus)}`);
   }
+  if (!Array.isArray(lastStatus.warnings)) {
+    throw new Error("finalize status missing warnings[]");
+  }
+  if (typeof lastStatus.degraded !== "boolean") {
+    throw new Error("finalize status missing degraded:boolean");
+  }
+  if (typeof lastStatus.backend_used !== "string" || !lastStatus.backend_used) {
+    throw new Error("finalize status missing backend_used");
+  }
 
   const resultResp = await requestJson(`${sessionRoot}/result?version=v2`);
   if (!resultResp.ok) {
@@ -116,6 +125,12 @@ async function main() {
       throw new Error(`result v2 missing key: ${key}`);
     }
   }
+  if (!Array.isArray(resultResp.data?.trace?.backend_timeline)) {
+    throw new Error("result v2 trace missing backend_timeline[]");
+  }
+  if (!resultResp.data?.trace?.quality_gate_snapshot || typeof resultResp.data.trace.quality_gate_snapshot !== "object") {
+    throw new Error("result v2 trace missing quality_gate_snapshot");
+  }
 
   console.log(
     JSON.stringify(
@@ -124,8 +139,12 @@ async function main() {
         session_id: args.sessionId,
         job_id: jobId,
         status: lastStatus.status,
+        backend_used: lastStatus.backend_used,
+        degraded: lastStatus.degraded,
+        warnings_count: lastStatus.warnings.length,
         transcript_count: Array.isArray(resultResp.data.transcript) ? resultResp.data.transcript.length : -1,
-        evidence_count: Array.isArray(resultResp.data.evidence) ? resultResp.data.evidence.length : -1
+        evidence_count: Array.isArray(resultResp.data.evidence) ? resultResp.data.evidence.length : -1,
+        backend_timeline_count: resultResp.data.trace.backend_timeline.length
       },
       null,
       2

@@ -17,8 +17,8 @@
           <div class="chip-row">
             <span class="chip" id="app-info">Loading runtime info...</span>
             <span class="chip chip-info" id="attach-status">Attach: searching</span>
-            <span class="chip chip-neutral" id="backend-badge">Backend: cloud</span>
-            <span class="chip chip-accent" id="recording-timer">00:00</span>
+            <span class="chip chip-neutral" id="backend-badge-dashboard">Backend: cloud</span>
+            <span class="chip chip-accent" id="dashboard-recording-timer">00:00</span>
           </div>
         </header>
 
@@ -127,65 +127,47 @@
               <button id="btn-open-automation-settings" type="button">Open Automation Settings</button>
             </div>
             <p id="attach-hint" class="muted">If permission is required, grant access then restart the app once.</p>
-            <p id="upload-status" class="muted">Upload not started.</p>
+            <p id="dashboard-upload-status" class="muted">Upload not started.</p>
           </article>
         </section>
       </section>
 
       <section id="session-view" class="session-view hidden">
-        <header class="session-top panel">
-          <div class="panel-header">
-            <div>
-              <h2>Live Memo Sidebar</h2>
-              <p class="muted small">Attached workflow during active Teams meeting</p>
-            </div>
-            <div class="actions compact">
-              <button id="btn-ui-density" type="button">Density: Comfort</button>
-              <button id="btn-back-dashboard" type="button">Dashboard</button>
-              <button id="btn-save-session-config" type="button">Save Config</button>
-            </div>
+        <header class="session-hero panel">
+          <div class="session-hero-main">
+            <p class="eyebrow">Live Session Workspace</p>
+            <h2>Interview Companion</h2>
+            <p class="muted">Notes-first workflow with resilient diarization and one-click finalize.</p>
           </div>
-
-          <div class="actions wrap">
-            <button id="btn-init-mic" type="button">Init Mic</button>
-            <button id="btn-init-system" type="button">Init System Audio</button>
-            <button id="btn-start-upload" type="button" disabled>Start Session</button>
-            <button id="btn-stop-upload" type="button" disabled>Stop Session</button>
-            <button id="btn-fetch-upload-status" type="button" disabled>Fetch Status</button>
+          <div class="session-hero-actions actions wrap">
+            <button id="btn-back-dashboard" type="button">Dashboard</button>
+            <button id="btn-save-session-config" type="button">Save Config</button>
+            <button id="btn-ui-density" type="button">Density: Comfort</button>
+            <button id="btn-toggle-debug" type="button">Diagnostics</button>
+          </div>
+          <div class="session-status-row">
+            <span class="chip chip-neutral" id="backend-badge">Backend: cloud</span>
+            <span class="chip chip-neutral" id="capture-health">Capture health initializing...</span>
+            <span class="chip chip-info" id="upload-status">Upload not started.</span>
+            <span class="chip chip-accent" id="recording-timer">00:00</span>
           </div>
         </header>
 
-        <section class="session-stack">
-          <section class="panel flow-panel">
+        <section class="session-shell">
+          <section class="panel primary-workspace">
             <div class="panel-header">
-              <h2>Flow</h2>
-              <span class="muted small">Question progress + instant feedback access</span>
+              <h2>Notes Workspace</h2>
+              <span class="muted small">Capture decisions and evidence while the interview is running.</span>
             </div>
-            <div class="flow-grid">
-              <div class="flow-card">
-                <strong>Question Stage</strong>
-                <div id="flow-stage-label" class="muted">Q1 in progress</div>
-              </div>
-              <div class="flow-card">
-                <strong>Session Timer</strong>
-                <div id="flow-session-timer" class="muted">00:00</div>
-              </div>
-              <div class="flow-card">
-                <strong>Feedback SLA</strong>
-                <div id="flow-feedback-sla" class="muted">Target: <= 3s full report</div>
-              </div>
-            </div>
-            <div class="actions wrap">
-              <button id="btn-feedback-ready" type="button">Check Feedback Ready</button>
-              <button id="btn-open-feedback" type="button" class="primary">Open Feedback (<=3s)</button>
-            </div>
-          </section>
 
-          <section class="panel memo-panel">
-            <div class="panel-header">
-              <h2>Notes &amp; Marks</h2>
-              <span class="muted small">Structured notes become report evidence.</span>
+            <div class="actions wrap">
+              <button id="btn-init-mic" type="button">Init Mic</button>
+              <button id="btn-init-system" type="button">Init System Audio</button>
+              <button id="btn-start-upload" type="button" class="primary" disabled>Start Session</button>
+              <button id="btn-stop-upload" type="button" disabled>Stop Session</button>
+              <button id="btn-fetch-upload-status" type="button" disabled>Fetch Status</button>
             </div>
+
             <div class="field-grid field-grid-2">
               <label class="field compact">
                 <span>Type</span>
@@ -198,98 +180,126 @@
                 </select>
               </label>
               <label class="field compact">
-                <span>Tags (comma separated)</span>
+                <span>Tags</span>
                 <input id="memo-tags" type="text" placeholder="leadership,collaboration" />
               </label>
             </div>
+
             <label class="field">
               <span>Memo</span>
-              <textarea id="memo-text" rows="3" placeholder="Type memo and press Add Memo"></textarea>
+              <textarea id="memo-text" rows="4" placeholder="Write evidence-backed notes..."></textarea>
             </label>
-            <div class="actions">
-              <button id="btn-memo-add" type="button">Add Memo</button>
+
+            <div class="actions wrap">
+              <button id="btn-memo-add" type="button" class="primary">Add Memo</button>
               <button id="btn-memo-anchor-last" type="button">Anchor Last Utterance</button>
+              <button id="btn-refresh-live" type="button">Refresh Live View</button>
             </div>
             <pre id="memo-list" class="result-box memo-list">No memos yet.</pre>
-          </section>
 
-          <section class="panel signal-panel">
-            <div class="panel-header">
-              <h2>Signals</h2>
-              <span class="muted small">Waveform / health / quick checks</span>
-            </div>
-            <p id="capture-health" class="muted">Capture health initializing...</p>
-            <div class="meter-grid">
-              <div class="meter-wrap">
-                <div class="meter-label">Mic</div>
-                <div class="meter-track"><div id="meter-mic-bar" class="meter-bar"></div></div>
-                <div id="meter-mic-value" class="meter-value">0%</div>
+            <section class="finalize-card">
+              <div class="panel-header">
+                <h3>Finalize &amp; Export</h3>
+                <div class="actions compact">
+                  <button id="btn-finalize-v2" type="button" class="primary">Finalize V2</button>
+                  <button id="btn-open-review" type="button">Review</button>
+                </div>
               </div>
-              <div class="meter-wrap">
-                <div class="meter-label">System</div>
-                <div class="meter-track"><div id="meter-system-bar" class="meter-bar"></div></div>
-                <div id="meter-system-value" class="meter-value">0%</div>
-              </div>
-              <div class="meter-wrap">
-                <div class="meter-label">Mixed</div>
-                <div class="meter-track"><div id="meter-mixed-bar" class="meter-bar"></div></div>
-                <div id="meter-mixed-value" class="meter-value">0%</div>
-              </div>
-            </div>
-            <div class="actions wrap">
-              <button id="btn-start-recording" type="button" disabled>Start 30s Recording</button>
-              <button id="btn-stop-recording" type="button" disabled>Stop Recording</button>
-              <button id="btn-open-last-file" type="button" disabled>Open Last WAV</button>
-            </div>
-            <audio id="playback" controls></audio>
-          </section>
-
-          <section class="panel participant-panel">
-            <div class="panel-header">
-              <h2>Enrollment</h2>
-              <span class="muted small">Speaker mapping + participation</span>
-            </div>
-
-            <div class="field participants-field">
-              <span>Participants</span>
-              <div id="participant-list" class="participant-list"></div>
               <div class="actions wrap">
-                <button id="btn-participant-add" type="button">Add Participant</button>
-                <button id="btn-participant-import" type="button">Import Names</button>
-                <button id="btn-enrollment-start" type="button">Start Enrollment</button>
-                <button id="btn-enrollment-stop" type="button">Stop Enrollment</button>
+                <button id="btn-feedback-export-text" type="button">Copy Plain Text</button>
+                <button id="btn-feedback-export-md" type="button">Export Markdown</button>
+                <button id="btn-feedback-export-docx" type="button">Export DOCX</button>
+                <button id="btn-feedback-ready" type="button">Check Feedback Ready</button>
+                <button id="btn-open-feedback" type="button">Open Feedback (<=3s)</button>
               </div>
-            </div>
-
-            <div id="participant-live-list" class="participant-live-list">
-              <p class="muted">No participant metrics yet.</p>
-            </div>
-            <pre id="enrollment-status" class="result-box compact">Enrollment idle.</pre>
+              <pre id="finalize-v2-status" class="status-box">Idle.</pre>
+              <ul id="finalize-stage-list" class="stage-list" aria-label="Finalize Progress">
+                <li data-finalize-stage="queued">queued</li>
+                <li data-finalize-stage="freeze">freeze</li>
+                <li data-finalize-stage="drain">drain</li>
+                <li data-finalize-stage="replay_gap">replay_gap</li>
+                <li data-finalize-stage="aggregate">aggregate</li>
+                <li data-finalize-stage="analysis_events">analysis_events</li>
+                <li data-finalize-stage="analysis_report">analysis_report</li>
+                <li data-finalize-stage="persist">persist</li>
+              </ul>
+            </section>
           </section>
-        </section>
 
-        <footer class="bottom-strip panel">
-          <div class="actions wrap">
-            <button id="btn-finalize-v2" type="button">Finalize V2 (Background)</button>
-            <button id="btn-feedback-export-text" type="button">Copy Plain Text</button>
-            <button id="btn-feedback-export-md" type="button">Export Markdown</button>
-            <button id="btn-feedback-export-docx" type="button">Export DOCX</button>
-            <button id="btn-open-review" type="button">Review</button>
-            <button id="btn-toggle-debug" type="button">Debug</button>
-            <button id="btn-refresh-live" type="button">Refresh Live View</button>
-          </div>
-          <pre id="finalize-v2-status" class="status-box">Idle.</pre>
-          <ul id="finalize-stage-list" class="stage-list" aria-label="Finalize Progress">
-            <li data-finalize-stage="queued">queued</li>
-            <li data-finalize-stage="freeze">freeze</li>
-            <li data-finalize-stage="drain">drain</li>
-            <li data-finalize-stage="replay_gap">replay_gap</li>
-            <li data-finalize-stage="aggregate">aggregate</li>
-            <li data-finalize-stage="analysis_events">analysis_events</li>
-            <li data-finalize-stage="analysis_report">analysis_report</li>
-            <li data-finalize-stage="persist">persist</li>
-          </ul>
-        </footer>
+          <aside class="context-rail">
+            <section class="panel flow-panel">
+              <div class="panel-header">
+                <h2>Session Context</h2>
+                <span class="muted small">What is happening now</span>
+              </div>
+              <div class="flow-grid">
+                <div class="flow-card">
+                  <strong>Question Stage</strong>
+                  <div id="flow-stage-label" class="muted">Q1 in progress</div>
+                </div>
+                <div class="flow-card">
+                  <strong>Session Timer</strong>
+                  <div id="flow-session-timer" class="muted">00:00</div>
+                </div>
+                <div class="flow-card">
+                  <strong>Feedback SLA</strong>
+                  <div id="flow-feedback-sla" class="muted">Target: <= 3s full report</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel signal-panel">
+              <div class="panel-header">
+                <h2>Audio Signals</h2>
+                <span class="muted small">Input levels + quick recording checks</span>
+              </div>
+              <div class="meter-grid">
+                <div class="meter-wrap">
+                  <div class="meter-label">Mic</div>
+                  <div class="meter-track"><div id="meter-mic-bar" class="meter-bar"></div></div>
+                  <div id="meter-mic-value" class="meter-value">0%</div>
+                </div>
+                <div class="meter-wrap">
+                  <div class="meter-label">System</div>
+                  <div class="meter-track"><div id="meter-system-bar" class="meter-bar"></div></div>
+                  <div id="meter-system-value" class="meter-value">0%</div>
+                </div>
+                <div class="meter-wrap">
+                  <div class="meter-label">Mixed</div>
+                  <div class="meter-track"><div id="meter-mixed-bar" class="meter-bar"></div></div>
+                  <div id="meter-mixed-value" class="meter-value">0%</div>
+                </div>
+              </div>
+              <div class="actions wrap">
+                <button id="btn-start-recording" type="button" disabled>Start 30s Recording</button>
+                <button id="btn-stop-recording" type="button" disabled>Stop Recording</button>
+                <button id="btn-open-last-file" type="button" disabled>Open Last WAV</button>
+              </div>
+              <audio id="playback" controls></audio>
+            </section>
+
+            <section class="panel participant-panel">
+              <div class="panel-header">
+                <h2>Participants</h2>
+                <span class="muted small">Enrollment and live mapping</span>
+              </div>
+              <div class="field participants-field">
+                <span>Participants</span>
+                <div id="participant-list" class="participant-list"></div>
+                <div class="actions wrap">
+                  <button id="btn-participant-add" type="button">Add Participant</button>
+                  <button id="btn-participant-import" type="button">Import Names</button>
+                  <button id="btn-enrollment-start" type="button">Start Enrollment</button>
+                  <button id="btn-enrollment-stop" type="button">Stop Enrollment</button>
+                </div>
+              </div>
+              <div id="participant-live-list" class="participant-live-list">
+                <p class="muted">No participant metrics yet.</p>
+              </div>
+              <pre id="enrollment-status" class="result-box compact">Enrollment idle.</pre>
+            </section>
+          </aside>
+        </section>
 
         <section id="review-panel" class="panel review-panel hidden">
           <div class="panel-header">
@@ -306,24 +316,10 @@
           <pre id="report-v2" class="result-box hidden">No report yet.</pre>
         </section>
 
-        <section id="evidence-modal" class="evidence-modal hidden" aria-hidden="true">
-          <div class="evidence-modal-backdrop" id="evidence-modal-close"></div>
-          <article class="evidence-modal-card panel">
-            <div class="panel-header">
-              <h2>Evidence Detail</h2>
-              <button id="btn-evidence-modal-close" type="button">Close</button>
-            </div>
-            <pre id="evidence-modal-content" class="status-box">No evidence selected.</pre>
-            <div class="actions wrap">
-              <button id="btn-regenerate-claim" type="button">Regenerate Claim</button>
-            </div>
-          </article>
-        </section>
-
         <section id="debug-drawer" class="panel debug-drawer">
           <div class="panel-header">
-            <h2>Debug</h2>
-            <span class="muted small">Collapsed by default; open only for diagnostics.</span>
+            <h2>Diagnostics</h2>
+            <span class="muted small">Hidden by default; use only for troubleshooting.</span>
           </div>
           <div class="debug-tabs">
             <button type="button" data-debug-tab-btn="logs" class="tab-active">Logs</button>
@@ -389,6 +385,20 @@
               <div id="cluster-map-list" class="cluster-map-list"></div>
             </details>
           </section>
+        </section>
+
+        <section id="evidence-modal" class="evidence-modal hidden" aria-hidden="true">
+          <div class="evidence-modal-backdrop" id="evidence-modal-close"></div>
+          <article class="evidence-modal-card panel">
+            <div class="panel-header">
+              <h2>Evidence Detail</h2>
+              <button id="btn-evidence-modal-close" type="button">Close</button>
+            </div>
+            <pre id="evidence-modal-content" class="status-box">No evidence selected.</pre>
+            <div class="actions wrap">
+              <button id="btn-regenerate-claim" type="button">Regenerate Claim</button>
+            </div>
+          </article>
         </section>
       </section>
     </main>

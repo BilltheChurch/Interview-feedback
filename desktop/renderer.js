@@ -14,6 +14,21 @@ const ECHO_TEACHER_STUDENT_RMS_RATIO = 1.35;
 const ECHO_TEACHER_DOMINANT_RMS_RATIO = 2.20;
 const ECHO_STUDENT_MIN_RMS = 0.010;
 const ECHO_RECENT_WINDOW = 120;
+const ECHO_CALIBRATION_MS = 20_000;
+const ECHO_HOLD_MS = 2200;
+const ECHO_HOLD_DECAY_MS = 1200;
+const ECHO_DOUBLE_TALK_MIN_RMS = 0.015;
+const ECHO_DOUBLE_TALK_RATIO_LOW = 0.72;
+const ECHO_DOUBLE_TALK_RATIO_HIGH = 1.45;
+const ECHO_DYNAMIC_CORR_FLOOR = 0.68;
+const ECHO_DYNAMIC_CORR_CEIL = 0.92;
+const ECHO_DYNAMIC_RATIO_FLOOR = 1.1;
+const ECHO_DYNAMIC_RATIO_CEIL = 1.9;
+const BACKEND_FAILOVER_TRIGGER_STREAK = 3;
+const BACKEND_RECOVERY_TRIGGER_STREAK = 4;
+const BACKEND_SWITCH_COOLDOWN_MS = 12_000;
+const BACKEND_HEALTH_STALE_MS = 25_000;
+const SIDECAR_HEALTH_REFRESH_MS = 6000;
 const UPLOAD_STREAM_ROLES = ["teacher", "students"];
 
 const appInfoEl = document.querySelector("#app-info");
@@ -21,6 +36,7 @@ const meetingIdEl = document.querySelector("#meeting-id");
 const apiBaseUrlEl = document.querySelector("#api-base-url");
 const wsUrlEl = document.querySelector("#ws-url");
 const uploadStatusEl = document.querySelector("#upload-status");
+const dashboardUploadStatusEl = document.querySelector("#dashboard-upload-status");
 const resultJsonEl = document.querySelector("#result-json");
 const liveTranscriptEl = document.querySelector("#live-transcript");
 const speakerEventsEl = document.querySelector("#speaker-events");
@@ -79,8 +95,12 @@ const btnRefreshClusters = document.querySelector("#btn-refresh-clusters");
 const btnAttachTeams = document.querySelector("#btn-attach-teams");
 const btnDetachTeams = document.querySelector("#btn-detach-teams");
 const attachStatusEl = document.querySelector("#attach-status");
-const backendBadgeEl = document.querySelector("#backend-badge");
+const backendBadgeEls = [
+  document.querySelector("#backend-badge"),
+  document.querySelector("#backend-badge-dashboard")
+].filter(Boolean);
 const recordingTimerEl = document.querySelector("#recording-timer");
+const dashboardRecordingTimerEl = document.querySelector("#dashboard-recording-timer");
 const btnToggleDebug = document.querySelector("#btn-toggle-debug");
 const debugDrawerEl = document.querySelector("#debug-drawer");
 const debugTabButtons = Array.from(document.querySelectorAll("[data-debug-tab-btn]"));
@@ -236,6 +256,33 @@ let sessionConfigOverrides = {
   booking_ref: "",
   teams_join_url: ""
 };
+const backendSwitchState = {
+  autoEnabled: true,
+  preferredBackend: "cloud",
+  activeBackend: "cloud",
+  cloudFailureStreak: 0,
+  cloudRecoveryStreak: 0,
+  edgeFailureStreak: 0,
+  edgeRecoveryStreak: 0,
+  lastSwitchAtMs: 0,
+  lastReason: "",
+  speechBackendMode: "cloud-primary",
+  dependencyHealth: null,
+  lastHealthAtMs: 0,
+  autoSwitchInFlight: false
+};
+const echoCalibrationState = {
+  active: false,
+  startedAtMs: 0,
+  corrSamples: [],
+  ratioSamples: [],
+  softCorr: ECHO_CORR_THRESHOLD,
+  strongCorr: ECHO_STRONG_CORR_THRESHOLD,
+  teacherRatio: ECHO_TEACHER_STUDENT_RMS_RATIO,
+  calibrated: false,
+  holdUntilMs: 0
+};
+let lastSidecarHealthRefreshMs = 0;
 
 const FINALIZE_STAGE_ORDER = [
   "queued",
@@ -272,8 +319,12 @@ function setResultPayload(payload) {
 }
 
 function setUploadStatus(message) {
-  if (!uploadStatusEl) return;
-  uploadStatusEl.textContent = message;
+  if (uploadStatusEl) {
+    uploadStatusEl.textContent = message;
+  }
+  if (dashboardUploadStatusEl) {
+    dashboardUploadStatusEl.textContent = message;
+  }
 }
 
 function setDisabled(el, disabled) {
@@ -350,23 +401,20 @@ function renderAttachStatus(input) {
   }
 }
 
-function updateBackendBadge() {
-  if (!backendBadgeEl) return;
-  backendBadgeEl.textContent = `Backend: ${effectiveDiarizationBackend()}`;
-}
-
 function ensureSessionTimer() {
   if (sessionTimer) return;
   sessionTimer = window.setInterval(() => {
-    if (!recordingTimerEl && !flowSessionTimerEl) return;
+    if (!recordingTimerEl && !flowSessionTimerEl && !dashboardRecordingTimerEl) return;
     if (!sessionStartedAtMs || !isAnyUploadActive()) {
       if (recordingTimerEl) recordingTimerEl.textContent = "00:00";
       if (flowSessionTimerEl) flowSessionTimerEl.textContent = "00:00";
+      if (dashboardRecordingTimerEl) dashboardRecordingTimerEl.textContent = "00:00";
       return;
     }
     const clock = toClock(Date.now() - sessionStartedAtMs);
     if (recordingTimerEl) recordingTimerEl.textContent = clock;
     if (flowSessionTimerEl) flowSessionTimerEl.textContent = clock;
+    if (dashboardRecordingTimerEl) dashboardRecordingTimerEl.textContent = clock;
   }, 1000);
 }
 
@@ -380,6 +428,9 @@ function stopSessionTimer() {
   }
   if (flowSessionTimerEl && !isAnyUploadActive()) {
     flowSessionTimerEl.textContent = "00:00";
+  }
+  if (dashboardRecordingTimerEl && !isAnyUploadActive()) {
+    dashboardRecordingTimerEl.textContent = "00:00";
   }
 }
 
@@ -727,9 +778,234 @@ function effectiveInterviewerNames() {
   };
 }
 
+function clampNumber(value, minValue, maxValue) {
+  const valueNumber = Number.isFinite(value) ? Number(value) : minValue;
+  return Math.max(minValue, Math.min(maxValue, valueNumber));
+}
+
+function percentileValue(values, percentile) {
+  if (!Array.isArray(values) || values.length === 0) return 0;
+  const sorted = values
+    .filter((item) => Number.isFinite(item))
+    .slice()
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) return 0;
+  const normalized = clampNumber(percentile, 0, 100) / 100;
+  const rank = normalized * (sorted.length - 1);
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return sorted[lower];
+  const weight = rank - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function normalizeBackend(input) {
+  return String(input || "").trim().toLowerCase() === "edge" ? "edge" : "cloud";
+}
+
+function initBackendSwitchState() {
+  backendSwitchState.autoEnabled = readJsonStorage("if.desktop.auto_backend_switch_enabled", true) !== false;
+  writeJsonStorage("if.desktop.auto_backend_switch_enabled", backendSwitchState.autoEnabled);
+  const selectedBackend = normalizeBackend(diarizationBackendEl?.value || "cloud");
+  backendSwitchState.preferredBackend = selectedBackend;
+  if (!backendSwitchState.activeBackend) {
+    backendSwitchState.activeBackend = selectedBackend;
+  }
+}
+
+function cloudHealthSignal(healthSnapshot) {
+  if (!healthSnapshot || typeof healthSnapshot !== "object") {
+    return { degraded: false, reason: "dependency health unavailable" };
+  }
+  const updatedAtMs = Date.parse(String(healthSnapshot.updated_at || ""));
+  if (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs > BACKEND_HEALTH_STALE_MS) {
+    return {
+      degraded: true,
+      reason: `dependency health stale ${Math.round((Date.now() - updatedAtMs) / 1000)}s`
+    };
+  }
+  const primaryEndpoints = healthSnapshot?.primary?.endpoints || {};
+  const hotEndpoints = ["resolve", "analysis_events", "analysis_report"];
+  const degradedEndpoints = [];
+  for (const endpoint of hotEndpoints) {
+    const status = String(primaryEndpoints?.[endpoint]?.status || "");
+    if (status === "degraded" || status === "open_circuit") {
+      degradedEndpoints.push(`${endpoint}:${status}`);
+    }
+  }
+  if (degradedEndpoints.length > 0) {
+    return {
+      degraded: true,
+      reason: `primary degraded (${degradedEndpoints.join(",")})`
+    };
+  }
+  if (String(healthSnapshot.active_backend || "primary") === "secondary") {
+    return {
+      degraded: true,
+      reason: "primary unavailable, inference failover active"
+    };
+  }
+  return { degraded: false, reason: "" };
+}
+
+async function ensureSidecarRunning(reason = "auto-switch") {
+  await refreshSidecarStatus().catch(() => {
+    // ignore status pull failures and continue to active start.
+  });
+  if (sidecarActive) {
+    return true;
+  }
+  try {
+    const started = await desktopAPI.diarizationStart({});
+    if (sidecarStatusEl) {
+      sidecarStatusEl.textContent = JSON.stringify(started, null, 2);
+    }
+  } catch (error) {
+    sidecarActive = false;
+    backendSwitchState.lastReason = `sidecar start failed: ${error.message}`;
+    logLine(`Sidecar auto-start failed (${reason}): ${error.message}`);
+    updateBackendBadge();
+    return false;
+  }
+  await refreshSidecarStatus().catch(() => {
+    // ignore one-time status pull failure after start.
+  });
+  if (sidecarActive) {
+    logLine(`Sidecar ready (${reason}).`);
+  }
+  return sidecarActive;
+}
+
+async function switchDiarizationBackend(nextBackend, reason, options = {}) {
+  const targetBackend = normalizeBackend(nextBackend);
+  const currentBackend = effectiveDiarizationBackend();
+  if (targetBackend === currentBackend) {
+    return false;
+  }
+  const automatic = options.automatic !== false;
+  const persist = options.persist !== false;
+  const skipCooldown = Boolean(options.skipCooldown);
+  if (automatic && !skipCooldown) {
+    const switchedAgo = Date.now() - backendSwitchState.lastSwitchAtMs;
+    if (switchedAgo < BACKEND_SWITCH_COOLDOWN_MS) {
+      return false;
+    }
+  }
+  if (targetBackend === "edge") {
+    const ready = await ensureSidecarRunning(reason || "switch-to-edge");
+    if (!ready) {
+      return false;
+    }
+  }
+  backendSwitchState.activeBackend = targetBackend;
+  backendSwitchState.lastSwitchAtMs = Date.now();
+  backendSwitchState.lastReason = String(reason || "backend switch");
+  if (diarizationBackendEl) {
+    diarizationBackendEl.value = targetBackend;
+  }
+  updateBackendBadge();
+  updateButtons();
+  logLine(`Diarization backend switched to ${targetBackend} (${automatic ? "auto" : "manual"}): ${backendSwitchState.lastReason}`);
+  if (persist) {
+    try {
+      await saveSessionConfig();
+    } catch (error) {
+      logLine(`Persist backend switch failed: ${error.message}`);
+    }
+  }
+  return true;
+}
+
+async function evaluateBackendHealthAndMaybeSwitch(statePayload) {
+  backendSwitchState.dependencyHealth = statePayload?.dependency_health || null;
+  backendSwitchState.speechBackendMode = String(statePayload?.speech_backend_mode || backendSwitchState.speechBackendMode || "");
+  backendSwitchState.lastHealthAtMs = Date.now();
+  const cloudSignal = cloudHealthSignal(backendSwitchState.dependencyHealth);
+  if (cloudSignal.degraded) {
+    backendSwitchState.cloudFailureStreak += 1;
+    backendSwitchState.cloudRecoveryStreak = 0;
+    backendSwitchState.lastReason = cloudSignal.reason;
+  } else {
+    backendSwitchState.cloudFailureStreak = 0;
+    backendSwitchState.cloudRecoveryStreak += 1;
+  }
+  if (effectiveDiarizationBackend() === "edge") {
+    if (sidecarActive) {
+      backendSwitchState.edgeFailureStreak = 0;
+      backendSwitchState.edgeRecoveryStreak += 1;
+    } else {
+      backendSwitchState.edgeFailureStreak += 1;
+      backendSwitchState.edgeRecoveryStreak = 0;
+    }
+  } else {
+    backendSwitchState.edgeFailureStreak = 0;
+    backendSwitchState.edgeRecoveryStreak = 0;
+  }
+  updateBackendBadge();
+  if (!backendSwitchState.autoEnabled || backendSwitchState.autoSwitchInFlight) {
+    return;
+  }
+  const currentBackend = effectiveDiarizationBackend();
+  backendSwitchState.autoSwitchInFlight = true;
+  try {
+    if (
+      currentBackend === "cloud" &&
+      backendSwitchState.cloudFailureStreak >= BACKEND_FAILOVER_TRIGGER_STREAK
+    ) {
+      await switchDiarizationBackend("edge", cloudSignal.reason || "cloud degraded", {
+        automatic: true,
+        persist: true
+      });
+      return;
+    }
+    if (
+      currentBackend === "edge" &&
+      (
+        backendSwitchState.edgeFailureStreak >= BACKEND_FAILOVER_TRIGGER_STREAK ||
+        (
+          backendSwitchState.preferredBackend === "cloud" &&
+          backendSwitchState.cloudRecoveryStreak >= BACKEND_RECOVERY_TRIGGER_STREAK
+        )
+      )
+    ) {
+      await switchDiarizationBackend(
+        "cloud",
+        backendSwitchState.edgeFailureStreak >= BACKEND_FAILOVER_TRIGGER_STREAK
+          ? "edge degraded"
+          : "cloud recovered",
+        {
+          automatic: true,
+          persist: true
+        }
+      );
+    }
+  } finally {
+    backendSwitchState.autoSwitchInFlight = false;
+  }
+}
+
 function effectiveDiarizationBackend() {
-  const value = String(diarizationBackendEl?.value || "cloud").trim();
-  return value === "edge" ? "edge" : "cloud";
+  return normalizeBackend(backendSwitchState.activeBackend || diarizationBackendEl?.value || "cloud");
+}
+
+function updateBackendBadge() {
+  if (!backendBadgeEls.length) return;
+  const activeBackend = effectiveDiarizationBackend();
+  const mode = backendSwitchState.speechBackendMode ? ` | ${backendSwitchState.speechBackendMode}` : "";
+  const source = backendSwitchState.autoEnabled ? "auto" : "manual";
+  const hasRecentFailure = backendSwitchState.cloudFailureStreak > 0 || backendSwitchState.edgeFailureStreak > 0;
+  for (const badgeEl of backendBadgeEls) {
+    badgeEl.classList.remove("chip-neutral", "chip-info", "chip-accent");
+    if (activeBackend === "edge") {
+      badgeEl.classList.add("chip-accent");
+    } else if (hasRecentFailure) {
+      badgeEl.classList.add("chip-info");
+    } else {
+      badgeEl.classList.add("chip-neutral");
+    }
+    badgeEl.textContent = `Backend: ${activeBackend} (${source})${mode}`;
+    badgeEl.title = backendSwitchState.lastReason || "";
+  }
 }
 
 function normalizeFinalizeStage(rawStage) {
@@ -784,8 +1060,13 @@ function setFinalizeStatus(input) {
   const status = String(input?.status || "queued");
   const stage = normalizeFinalizeStage(input?.stage);
   const progress = Number.isFinite(input?.progress) ? Number(input.progress) : 0;
+  const degraded = Boolean(input?.degraded);
+  const backendUsed = String(input?.backend_used || "");
+  const warningText = Array.isArray(input?.warnings) && input.warnings.length > 0 ? ` warnings=${JSON.stringify(input.warnings)}` : "";
   const errorText = Array.isArray(input?.errors) && input.errors.length > 0 ? ` errors=${JSON.stringify(input.errors)}` : "";
-  finalizeV2StatusEl.textContent = `status=${status} stage=${stage} progress=${progress}%${errorText}`;
+  const backendText = backendUsed ? ` backend=${backendUsed}` : "";
+  finalizeV2StatusEl.textContent =
+    `status=${status} stage=${stage} progress=${progress}% degraded=${degraded}${backendText}${warningText}${errorText}`;
   renderFinalizeTimeline({ status, stage, progress });
 }
 
@@ -1563,14 +1844,30 @@ async function triggerFinalizeV2() {
 
 async function refreshSidecarStatus() {
   if (!sidecarStatusEl) return;
+  lastSidecarHealthRefreshMs = Date.now();
   try {
     const status = await desktopAPI.diarizationGetStatus();
     sidecarActive = Boolean(status?.status === "running" && status?.healthy);
     sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+    if (!sidecarActive && effectiveDiarizationBackend() === "edge") {
+      backendSwitchState.edgeFailureStreak += 1;
+    }
   } catch (error) {
     sidecarActive = false;
     sidecarStatusEl.textContent = `sidecar status failed: ${error.message}`;
+    if (effectiveDiarizationBackend() === "edge") {
+      backendSwitchState.edgeFailureStreak += 1;
+    }
   }
+  updateBackendBadge();
+}
+
+async function refreshSidecarStatusIfNeeded(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastSidecarHealthRefreshMs < SIDECAR_HEALTH_REFRESH_MS) {
+    return;
+  }
+  await refreshSidecarStatus();
 }
 
 async function requestAttachToTeams() {
@@ -2137,6 +2434,94 @@ function markEchoSuppression(suppressed) {
     recentEchoSuppression.length > 0 ? total / recentEchoSuppression.length : 0;
 }
 
+function resetEchoCalibrationState() {
+  echoCalibrationState.active = false;
+  echoCalibrationState.startedAtMs = 0;
+  echoCalibrationState.corrSamples = [];
+  echoCalibrationState.ratioSamples = [];
+  echoCalibrationState.softCorr = ECHO_CORR_THRESHOLD;
+  echoCalibrationState.strongCorr = ECHO_STRONG_CORR_THRESHOLD;
+  echoCalibrationState.teacherRatio = ECHO_TEACHER_STUDENT_RMS_RATIO;
+  echoCalibrationState.calibrated = false;
+  echoCalibrationState.holdUntilMs = 0;
+}
+
+function startEchoCalibration() {
+  echoCalibrationState.active = true;
+  echoCalibrationState.startedAtMs = Date.now();
+  echoCalibrationState.corrSamples = [];
+  echoCalibrationState.ratioSamples = [];
+  echoCalibrationState.softCorr = ECHO_CORR_THRESHOLD;
+  echoCalibrationState.strongCorr = ECHO_STRONG_CORR_THRESHOLD;
+  echoCalibrationState.teacherRatio = ECHO_TEACHER_STUDENT_RMS_RATIO;
+  echoCalibrationState.calibrated = false;
+  echoCalibrationState.holdUntilMs = 0;
+}
+
+function updateEchoCalibration(timestampMs, corrValue, rmsRatio, studentRms) {
+  if (!echoCalibrationState.active) return;
+  if (studentRms < ECHO_STUDENT_MIN_RMS) return;
+  if (Number.isFinite(corrValue) && corrValue > 0) {
+    echoCalibrationState.corrSamples.push(corrValue);
+  }
+  if (Number.isFinite(rmsRatio) && rmsRatio > 0 && rmsRatio < 8) {
+    echoCalibrationState.ratioSamples.push(rmsRatio);
+  }
+  while (echoCalibrationState.corrSamples.length > 280) {
+    echoCalibrationState.corrSamples.shift();
+  }
+  while (echoCalibrationState.ratioSamples.length > 280) {
+    echoCalibrationState.ratioSamples.shift();
+  }
+  if (timestampMs - echoCalibrationState.startedAtMs < ECHO_CALIBRATION_MS) {
+    return;
+  }
+  const corrP70 = percentileValue(echoCalibrationState.corrSamples, 70);
+  const corrP90 = percentileValue(echoCalibrationState.corrSamples, 90);
+  const ratioP75 = percentileValue(echoCalibrationState.ratioSamples, 75);
+  echoCalibrationState.softCorr = clampNumber(
+    Math.max(ECHO_DYNAMIC_CORR_FLOOR, corrP70 - 0.03),
+    ECHO_DYNAMIC_CORR_FLOOR,
+    ECHO_DYNAMIC_CORR_CEIL
+  );
+  echoCalibrationState.strongCorr = clampNumber(
+    Math.max(echoCalibrationState.softCorr + 0.08, corrP90 + 0.02),
+    ECHO_DYNAMIC_CORR_FLOOR + 0.1,
+    0.97
+  );
+  echoCalibrationState.teacherRatio = clampNumber(
+    ratioP75 + 0.08,
+    ECHO_DYNAMIC_RATIO_FLOOR,
+    ECHO_DYNAMIC_RATIO_CEIL
+  );
+  echoCalibrationState.active = false;
+  echoCalibrationState.calibrated = true;
+  logLine(
+    `Echo calibration ready: soft_corr=${echoCalibrationState.softCorr.toFixed(3)} ` +
+      `strong_corr=${echoCalibrationState.strongCorr.toFixed(3)} ` +
+      `ratio=${echoCalibrationState.teacherRatio.toFixed(2)}`
+  );
+}
+
+function currentEchoThresholds(timestampMs) {
+  if (echoCalibrationState.active && timestampMs - echoCalibrationState.startedAtMs >= ECHO_CALIBRATION_MS) {
+    updateEchoCalibration(timestampMs, Number.NaN, Number.NaN, ECHO_STUDENT_MIN_RMS);
+  }
+  return {
+    softCorr: echoCalibrationState.softCorr,
+    strongCorr: echoCalibrationState.strongCorr,
+    teacherRatio: echoCalibrationState.teacherRatio
+  };
+}
+
+function isDoubleTalk(teacherRms, studentRms) {
+  if (teacherRms < ECHO_DOUBLE_TALK_MIN_RMS || studentRms < ECHO_DOUBLE_TALK_MIN_RMS) {
+    return false;
+  }
+  const ratio = teacherRms / Math.max(studentRms, 1e-6);
+  return ratio >= ECHO_DOUBLE_TALK_RATIO_LOW && ratio <= ECHO_DOUBLE_TALK_RATIO_HIGH;
+}
+
 function maybeSuppressTeacherChunk(samples, timestampMs) {
   if (recentStudentsChunks.length === 0) {
     markEchoSuppression(false);
@@ -2168,19 +2553,35 @@ function maybeSuppressTeacherChunk(samples, timestampMs) {
   }
 
   const hasStudentEnergy = best.studentRms >= ECHO_STUDENT_MIN_RMS;
-  const ratioThreshold = best.studentRms > 0 ? best.studentRms * ECHO_TEACHER_STUDENT_RMS_RATIO : 0;
+  const rmsRatio = best.studentRms > 0 ? teacherRms / best.studentRms : Number.POSITIVE_INFINITY;
+  updateEchoCalibration(timestampMs, best.corr, rmsRatio, best.studentRms);
+  const thresholds = currentEchoThresholds(timestampMs);
+  const ratioThreshold = best.studentRms > 0 ? best.studentRms * thresholds.teacherRatio : 0;
   const teacherDominant =
     best.studentRms > 0 && teacherRms >= best.studentRms * ECHO_TEACHER_DOMINANT_RMS_RATIO;
+  const doubleTalk = isDoubleTalk(teacherRms, best.studentRms);
   const hardLeak =
     hasStudentEnergy &&
-    best.corr >= ECHO_STRONG_CORR_THRESHOLD &&
+    best.corr >= thresholds.strongCorr &&
     Math.abs(best.lagMs) <= ECHO_MAX_LAG_MS;
   const softLeak =
     hasStudentEnergy &&
-    best.corr >= ECHO_CORR_THRESHOLD &&
+    best.corr >= thresholds.softCorr &&
     Math.abs(best.lagMs) <= ECHO_MAX_LAG_MS &&
     teacherRms <= ratioThreshold;
-  const shouldSuppress = !teacherDominant && (hardLeak || softLeak);
+  const holdLeak =
+    hasStudentEnergy &&
+    timestampMs <= echoCalibrationState.holdUntilMs &&
+    best.corr >= Math.max(ECHO_DYNAMIC_CORR_FLOOR, thresholds.softCorr - 0.06) &&
+    Math.abs(best.lagMs) <= ECHO_MAX_LAG_MS + 40 &&
+    !teacherDominant;
+  const shouldSuppress = !teacherDominant && !doubleTalk && (hardLeak || softLeak || holdLeak);
+  if (shouldSuppress) {
+    const holdMs = hardLeak ? ECHO_HOLD_MS : ECHO_HOLD_DECAY_MS;
+    echoCalibrationState.holdUntilMs = timestampMs + holdMs;
+  } else if (timestampMs > echoCalibrationState.holdUntilMs) {
+    echoCalibrationState.holdUntilMs = 0;
+  }
 
   markEchoSuppression(shouldSuppress);
   if (!shouldSuppress) {
@@ -2196,12 +2597,13 @@ function maybeSuppressTeacherChunk(samples, timestampMs) {
     },
     { skipTimestamp: true }
   );
-  const rmsRatio = best.studentRms > 0 ? teacherRms / best.studentRms : Number.POSITIVE_INFINITY;
-  const mode = hardLeak ? "hard" : "soft";
+  const mode = hardLeak ? "hard" : holdLeak ? "hold" : "soft";
   logLine(
     `Teacher echo suppressed (${mode}): corr=${best.corr.toFixed(3)} lag_ms=${Math.round(best.lagMs)} ` +
       `teacher_rms=${teacherRms.toFixed(4)} student_rms=${best.studentRms.toFixed(4)} ratio=` +
-      `${Number.isFinite(rmsRatio) ? rmsRatio.toFixed(2) : "inf"}`
+      `${Number.isFinite(rmsRatio) ? rmsRatio.toFixed(2) : "inf"} ` +
+      `th=[${thresholds.softCorr.toFixed(2)},${thresholds.strongCorr.toFixed(2)}]` +
+      ` calib=${echoCalibrationState.calibrated ? "on" : "warming"}`
   );
   return { chunk: new Int16Array(samples.length), suppressed: true };
 }
@@ -2239,6 +2641,36 @@ function emitCaptureStatus(role) {
   }
 }
 
+async function handleEdgeDiarizationFailure(reason) {
+  if (backendSwitchState.autoSwitchInFlight) {
+    return;
+  }
+  backendSwitchState.autoSwitchInFlight = true;
+  try {
+    sidecarActive = false;
+    backendSwitchState.edgeFailureStreak += 1;
+    backendSwitchState.edgeRecoveryStreak = 0;
+    backendSwitchState.lastReason = `edge diarization failed: ${reason}`;
+    updateBackendBadge();
+    logLine(`Edge diarization failure: ${reason}`);
+    if (backendSwitchState.autoEnabled) {
+      const switched = await switchDiarizationBackend("cloud", backendSwitchState.lastReason, {
+        automatic: true,
+        persist: true,
+        skipCooldown: true
+      });
+      if (switched) {
+        setUploadStatus(`Edge diarization failed, auto-switched to cloud: ${reason}`);
+        return;
+      }
+    }
+    setUploadStatus(`Edge diarization failed: ${reason}. Upload will stop.`);
+    stopUpload("edge-sidecar-failed");
+  } finally {
+    backendSwitchState.autoSwitchInFlight = false;
+  }
+}
+
 function processUploadQueue(role) {
   const ws = uploadSockets[role];
   if (!ws || ws.readyState !== window.WebSocket.OPEN || !uploadSocketReady[role]) return;
@@ -2270,6 +2702,12 @@ function processUploadQueue(role) {
       content_b64: contentB64
     };
 
+    if (role === "students" && effectiveDiarizationBackend() === "edge" && !sidecarActive) {
+      if (!backendSwitchState.autoSwitchInFlight) {
+        void handleEdgeDiarizationFailure("sidecar inactive");
+      }
+    }
+
     if (role === "students" && effectiveDiarizationBackend() === "edge" && sidecarActive) {
       let diarizationBaseUrl = "";
       try {
@@ -2279,27 +2717,22 @@ function processUploadQueue(role) {
         diarizationBaseUrl = "";
       }
       if (diarizationBaseUrl) {
-      desktopAPI
-        .diarizationPushChunk({
-          baseUrl: diarizationBaseUrl,
-          sessionId: meetingIdValue(),
-          seq: uploadSeq[role],
-          timestampMs,
-          content_b64: contentB64
-        })
-        .then((resp) => {
-          if (resp?.upload) {
-            logLine(`Edge diarization uploaded speaker-logs turns=${resp.upload.turns || 0}`);
-          }
-        })
-        .catch((error) => {
-          sidecarActive = false;
-          logLine(`Edge diarization push failed: ${error.message}`);
-          setUploadStatus(`Edge diarization failed: ${error.message}. Upload will stop.`);
-          stopUpload("edge-sidecar-failed").catch((stopError) => {
-            logLine(`Stop upload after sidecar failure failed: ${stopError.message}`);
+        desktopAPI
+          .diarizationPushChunk({
+            baseUrl: diarizationBaseUrl,
+            sessionId: meetingIdValue(),
+            seq: uploadSeq[role],
+            timestampMs,
+            content_b64: contentB64
+          })
+          .then((resp) => {
+            if (resp?.upload) {
+              logLine(`Edge diarization uploaded speaker-logs turns=${resp.upload.turns || 0}`);
+            }
+          })
+          .catch((error) => {
+            void handleEdgeDiarizationFailure(error.message);
           });
-        });
       }
     }
 
@@ -2667,15 +3100,24 @@ async function startUpload() {
   if (attachStatus.status !== "attached") {
     throw new Error("Teams window must be attached before starting upload");
   }
-  if (effectiveDiarizationBackend() === "edge" && !sidecarActive) {
-    throw new Error("diarization backend=edge requires sidecar running");
+  if (effectiveDiarizationBackend() === "edge") {
+    const sidecarReady = await ensureSidecarRunning("start-upload");
+    if (!sidecarReady) {
+      throw new Error("diarization backend=edge requires sidecar running");
+    }
   }
   if (isAnyUploadActive()) {
     throw new Error("upload already started");
   }
+  backendSwitchState.cloudFailureStreak = 0;
+  backendSwitchState.cloudRecoveryStreak = 0;
+  backendSwitchState.edgeFailureStreak = 0;
+  backendSwitchState.edgeRecoveryStreak = 0;
   suppressAutoRecover = false;
   recentStudentsChunks.length = 0;
   recentEchoSuppression.length = 0;
+  resetEchoCalibrationState();
+  startEchoCalibration();
   captureMetrics.teacher.echo_suppressed_chunks = 0;
   captureMetrics.teacher.echo_suppression_recent_rate = 0;
   updateCaptureMetrics("teacher", {
@@ -2729,6 +3171,7 @@ function stopUpload(reason = "client-stop") {
   logLine(`Stop Upload clicked. reason=${reason}`);
   UPLOAD_STREAM_ROLES.forEach((role) => closeUploadSocket(role, reason));
   sessionStartedAtMs = 0;
+  resetEchoCalibrationState();
   updateCaptureMetrics("teacher", { capture_state: micStream ? "running" : "idle" });
   updateCaptureMetrics("students", { capture_state: systemAudioStream ? "running" : "idle" });
 }
@@ -2936,6 +3379,12 @@ async function refreshLiveView() {
     apiRequest("enrollment/state", "GET"),
     apiRequest("unresolved-clusters", "GET")
   ]);
+  await refreshSidecarStatusIfNeeded(false).catch((error) => {
+    logLine(`Sidecar health refresh failed: ${error.message}`);
+  });
+  await evaluateBackendHealthAndMaybeSwitch(state).catch((error) => {
+    logLine(`Backend health state machine failed: ${error.message}`);
+  });
 
   const eventItems = Array.isArray(events?.items) ? events.items : [];
   const eventIndex =
@@ -2954,6 +3403,9 @@ async function refreshLiveView() {
     "",
     `Capture Teacher: ${JSON.stringify(state.capture_by_stream?.teacher || {})}`,
     `Capture Students: ${JSON.stringify(state.capture_by_stream?.students || {})}`,
+    "",
+    `Speech Backend Mode: ${JSON.stringify(state.speech_backend_mode || "unknown")}`,
+    `Quality Metrics: ${JSON.stringify(state.quality_metrics || {})}`,
     "",
     `ASR Teacher: ${JSON.stringify(state.asr_by_stream?.teacher || {})}`,
     `ASR Students: ${JSON.stringify(state.asr_by_stream?.students || {})}`
@@ -3083,8 +3535,19 @@ function bindEvents() {
 
   if (diarizationBackendEl) {
     diarizationBackendEl.addEventListener("change", () => {
-      updateBackendBadge();
-      updateButtons();
+      const selected = normalizeBackend(diarizationBackendEl.value);
+      backendSwitchState.preferredBackend = selected;
+      backendSwitchState.cloudFailureStreak = 0;
+      backendSwitchState.cloudRecoveryStreak = 0;
+      backendSwitchState.edgeFailureStreak = 0;
+      backendSwitchState.edgeRecoveryStreak = 0;
+      void switchDiarizationBackend(selected, "manual selection", {
+        automatic: false,
+        persist: true,
+        skipCooldown: true
+      }).catch((error) => {
+        logLine(`Manual backend switch failed: ${error.message}`);
+      });
     });
   }
 
@@ -3593,8 +4056,10 @@ function bindEvents() {
     btnSidecarStart.addEventListener("click", async () => {
       try {
         const status = await desktopAPI.diarizationStart({});
-        sidecarActive = true;
-        sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+        if (sidecarStatusEl) {
+          sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+        }
+        await refreshSidecarStatus();
         logLine("Sidecar started.");
       } catch (error) {
         sidecarActive = false;
@@ -3609,7 +4074,16 @@ function bindEvents() {
       try {
         const status = await desktopAPI.diarizationStop();
         sidecarActive = false;
-        sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+        if (sidecarStatusEl) {
+          sidecarStatusEl.textContent = JSON.stringify(status, null, 2);
+        }
+        if (effectiveDiarizationBackend() === "edge") {
+          await switchDiarizationBackend("cloud", "manual sidecar stop", {
+            automatic: true,
+            persist: true,
+            skipCooldown: true
+          });
+        }
         logLine("Sidecar stopped.");
       } catch (error) {
         logLine(`Sidecar stop failed: ${error.message}`);
@@ -3635,6 +4109,13 @@ function bindEvents() {
   }
 
   document.addEventListener("keydown", (event) => {
+    const key = String(event.key || "").toLowerCase();
+    const debugHotKey = key === "d" && event.shiftKey && (event.metaKey || event.ctrlKey);
+    if (debugHotKey) {
+      event.preventDefault();
+      toggleDebugDrawer();
+      return;
+    }
     if (event.key === "Escape" && evidenceModalEl && !evidenceModalEl.classList.contains("hidden")) {
       closeEvidenceModal();
     }
@@ -3652,6 +4133,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       });
     }
     loadDashboardState();
+    initBackendSwitchState();
     applyUiDensity(uiDensity);
     renderMeetingList();
     if (participantRows().length === 0) {

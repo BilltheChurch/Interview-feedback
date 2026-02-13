@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from app.schemas import BindingMeta, ClusterState, ResolveEvidence, SessionState
 from app.services.name_resolver import NameCandidate
@@ -28,6 +29,22 @@ class BinderPolicy:
         self._profile_auto_threshold = profile_auto_threshold
         self._profile_confirm_threshold = profile_confirm_threshold
         self._profile_margin_threshold = profile_margin_threshold
+
+    @staticmethod
+    def _looks_like_person_name(name: str | None) -> bool:
+        if not name:
+            return False
+        normalized = " ".join(name.strip().split())
+        if not normalized:
+            return False
+        tokens = [token for token in re.split(r"\s+", normalized) if token]
+        if len(tokens) > 3:
+            return False
+        if not re.search(r"[a-zA-Z\u4e00-\u9fff]", normalized):
+            return False
+        if re.search(r"\b(the|and|with|from|about|which|where|when)\b", normalized.casefold()):
+            return False
+        return True
 
     @staticmethod
     def _roster_hit(name: str | None, state: SessionState) -> bool | None:
@@ -87,6 +104,14 @@ class BinderPolicy:
         candidate_name = top_candidate.name if top_candidate else None
         candidate_confidence = top_candidate.confidence if top_candidate else 0.0
         roster_hit = self._roster_hit(candidate_name, state)
+        reliable_candidate = (
+            candidate_name is not None
+            and roster_hit is True
+            and self._looks_like_person_name(candidate_name)
+        )
+        if not reliable_candidate:
+            candidate_name = None
+            candidate_confidence = 0.0
 
         decision = "unknown"
         speaker_name: str | None = existing_name
@@ -239,13 +264,14 @@ class BinderPolicy:
 
         if name_candidates:
             top = name_candidates[0]
-            evidence.binding_source = "name_extract"
-            evidence.reason = "roster name extracted from ASR"
-            return BindResult(
-                speaker_name=top.name,
-                decision="confirm",
-                evidence=evidence,
-            )
+            if self._roster_hit(top.name, state) is True and self._looks_like_person_name(top.name):
+                evidence.binding_source = "name_extract"
+                evidence.reason = "roster name extracted from ASR"
+                return BindResult(
+                    speaker_name=top.name,
+                    decision="confirm",
+                    evidence=evidence,
+                )
 
         speaker_name, decision, binding_source = self._legacy_sv_decide(
             state=state,

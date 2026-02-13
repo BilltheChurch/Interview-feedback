@@ -556,6 +556,25 @@ export function buildResultV2(params: {
   finalizeJobId: string;
   modelVersions: Record<string, string>;
   thresholds: Record<string, number | string | boolean>;
+  backendTimeline?: Array<{
+    ts: string;
+    endpoint: string;
+    backend: string;
+    outcome: "ok" | "failed" | "skipped";
+    detail: string;
+    attempt: number;
+  }>;
+  qualityGateSnapshot?: {
+    finalize_success_target: number;
+    students_unknown_ratio_target: number;
+    sv_top1_target: number;
+    echo_reduction_target: number;
+    observed_unknown_ratio: number;
+    observed_students_turns: number;
+    observed_students_unknown: number;
+    observed_echo_suppressed_chunks: number;
+    observed_echo_recent_rate: number;
+  };
 }): ResultV2 {
   return {
     session: {
@@ -578,6 +597,8 @@ export function buildResultV2(params: {
       model_versions: params.modelVersions,
       thresholds: params.thresholds,
       unknown_ratio: computeUnknownRatio(params.transcript),
+      backend_timeline: params.backendTimeline ?? [],
+      quality_gate_snapshot: params.qualityGateSnapshot,
       generated_at: params.finalizedAt,
     },
   };

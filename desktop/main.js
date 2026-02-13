@@ -214,13 +214,13 @@ function setWindowMode(nextMode) {
   }
 
   if (mode === 'session') {
-    mainWindow.setMinimumSize(380, 640);
-    mainWindow.setMaximumSize(520, 2000);
+    mainWindow.setMinimumSize(860, 700);
+    mainWindow.setMaximumSize(2600, 2000);
     const current = mainWindow.getBounds();
-    const nextWidth = Math.max(380, Math.min(520, current.width || 420));
-    const nextHeight = Math.max(700, current.height || 860);
+    const nextWidth = Math.max(980, current.width || 1140);
+    const nextHeight = Math.max(760, current.height || 860);
     mainWindow.setBounds({ ...current, width: nextWidth, height: nextHeight }, true);
-    mainWindow.setAlwaysOnTop(true, 'floating');
+    mainWindow.setAlwaysOnTop(false);
     mainWindow.setFullScreenable(false);
     mainWindow.setResizable(true);
     return { mode, applied: true };

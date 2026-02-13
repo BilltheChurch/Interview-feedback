@@ -12,6 +12,13 @@ import {
 import type { TranscriptItem } from "./finalize_v2";
 import { filterMemos, nextMemoId, parseMemoPayload } from "./memos";
 import { emptySpeakerLogs, mergeSpeakerLogs, parseSpeakerLogsPayload } from "./speaker_logs";
+import {
+  InferenceFailoverClient,
+  InferenceRequestError,
+  type DependencyHealthSnapshot,
+  type InferenceBackendTimelineItem
+} from "./inference_client";
+import { analyzeEventsLocally } from "./local_events_analyzer";
 import type {
   FinalizeV2Status,
   MemoItem,
@@ -165,6 +172,9 @@ interface SpeakerEvent {
   evidence?: ResolveEvidence | null;
   note?: string | null;
   metadata?: Record<string, unknown> | null;
+  backend?: "primary" | "secondary" | "worker";
+  fallback_reason?: string | null;
+  confidence_bucket?: "high" | "medium" | "low" | "unknown";
 }
 
 interface EnrollmentStartRequest {
@@ -278,6 +288,16 @@ interface FeedbackCache {
   timings: FeedbackTimings;
 }
 
+interface QualityMetrics {
+  unknown_ratio: number;
+  students_utterance_count: number;
+  students_unknown_count: number;
+  echo_suppressed_chunks: number;
+  echo_suppression_recent_rate: number;
+  echo_leak_rate: number;
+  suppression_false_positive_rate: number;
+}
+
 interface AsrState {
   enabled: boolean;
   provider: "dashscope";
@@ -369,6 +389,12 @@ interface AudioChunkFrame {
 
 interface Env {
   INFERENCE_BASE_URL: string;
+  INFERENCE_BASE_URL_PRIMARY?: string;
+  INFERENCE_BASE_URL_SECONDARY?: string;
+  INFERENCE_FAILOVER_ENABLED?: string;
+  INFERENCE_RETRY_MAX?: string;
+  INFERENCE_RETRY_BACKOFF_MS?: string;
+  INFERENCE_CIRCUIT_OPEN_MS?: string;
   INFERENCE_API_KEY?: string;
   INFERENCE_TIMEOUT_MS?: string;
   INFERENCE_RESOLVE_PATH?: string;
@@ -456,6 +482,7 @@ const STORAGE_KEY_MEMOS = "memos";
 const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
 const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
 const STORAGE_KEY_FEEDBACK_CACHE = "feedback_cache";
+const STORAGE_KEY_DEPENDENCY_HEALTH = "dependency_health";
 
 const STORAGE_KEY_INGEST_STATE = "ingest_state";
 const STORAGE_KEY_ASR_STATE = "asr_state";
@@ -1378,6 +1405,9 @@ export default {
         asr_model: env.ASR_MODEL ?? DASHSCOPE_DEFAULT_MODEL,
         asr_window_seconds: parsePositiveInt(env.ASR_WINDOW_SECONDS, 10),
         asr_hop_seconds: parsePositiveInt(env.ASR_HOP_SECONDS, 3),
+        inference_failover_enabled: parseBool(env.INFERENCE_FAILOVER_ENABLED, true),
+        inference_retry_max: parsePositiveInt(env.INFERENCE_RETRY_MAX, 2),
+        inference_circuit_open_ms: parsePositiveInt(env.INFERENCE_CIRCUIT_OPEN_MS, 15000),
         stream_roles: STREAM_ROLES
       });
     }
@@ -1540,6 +1570,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     students: false
   };
   private asrRealtimeByStream: Record<StreamRole, AsrRealtimeRuntime>;
+  private inferenceClient: InferenceFailoverClient;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1548,6 +1579,22 @@ export class MeetingSessionDO extends DurableObject<Env> {
       teacher: this.buildRealtimeRuntime("teacher"),
       students: this.buildRealtimeRuntime("students")
     };
+    const primaryBaseUrl = normalizeBaseUrl((env.INFERENCE_BASE_URL_PRIMARY ?? env.INFERENCE_BASE_URL ?? "").trim());
+    if (!primaryBaseUrl) {
+      throw new Error("INFERENCE_BASE_URL or INFERENCE_BASE_URL_PRIMARY must be configured");
+    }
+    const secondaryRaw = normalizeBaseUrl((env.INFERENCE_BASE_URL_SECONDARY ?? "").trim());
+    this.inferenceClient = new InferenceFailoverClient({
+      primaryBaseUrl,
+      secondaryBaseUrl: secondaryRaw || null,
+      failoverEnabled: parseBool(env.INFERENCE_FAILOVER_ENABLED, true),
+      apiKey: (env.INFERENCE_API_KEY ?? "").trim() || undefined,
+      timeoutMs: parseTimeoutMs(env.INFERENCE_TIMEOUT_MS),
+      retryMax: Math.max(0, Math.min(5, parsePositiveInt(env.INFERENCE_RETRY_MAX, 2))),
+      retryBackoffMs: Math.max(50, parsePositiveInt(env.INFERENCE_RETRY_BACKOFF_MS, 180)),
+      circuitOpenMs: Math.max(1_000, parsePositiveInt(env.INFERENCE_CIRCUIT_OPEN_MS, 15_000)),
+      now: () => this.currentIsoTs()
+    });
   }
 
   async alarm(): Promise<void> {
@@ -1679,45 +1726,69 @@ export class MeetingSessionDO extends DurableObject<Env> {
     state.enrollment_state = enrollment;
   }
 
+  private async callInferenceWithFailover<T>(params: {
+    endpoint: "resolve" | "enroll" | "analysis_events" | "analysis_report";
+    path: string;
+    body: unknown;
+    timeoutMs?: number;
+  }): Promise<{
+    data: T;
+    backend: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
+    try {
+      const response = await this.inferenceClient.callJson<T>({
+        endpoint: params.endpoint,
+        path: params.path,
+        body: params.body,
+        timeoutMs: params.timeoutMs
+      });
+      await this.storeDependencyHealth(response.health);
+      return response;
+    } catch (error) {
+      if (error instanceof InferenceRequestError) {
+        await this.storeDependencyHealth(error.health);
+      } else {
+        await this.storeDependencyHealth(this.inferenceClient.snapshot());
+      }
+      throw error;
+    }
+  }
+
   private async callInferenceEnroll(
     sessionId: string,
     participantName: string,
     audio: AudioPayload,
     state: SessionState
-  ): Promise<InferenceEnrollResponse> {
+  ): Promise<{
+    payload: InferenceEnrollResponse;
+    backend: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
     const enrollPath = this.env.INFERENCE_ENROLL_PATH ?? "/speaker/enroll";
-    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
     const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
-    try {
-      response = await fetch(baseUrl + enrollPath, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(this.env.INFERENCE_API_KEY ? { "x-api-key": this.env.INFERENCE_API_KEY } : {})
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          participant_name: participantName,
-          audio,
-          state
-        } satisfies InferenceEnrollRequest),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-    const payloadText = await response.text();
-    if (!response.ok) {
-      throw new Error(`inference enroll non-success: status=${response.status} body=${payloadText.slice(0, 240)}`);
-    }
-    try {
-      return JSON.parse(payloadText) as InferenceEnrollResponse;
-    } catch {
-      throw new Error("inference enroll returned non-JSON response");
-    }
+    const response = await this.callInferenceWithFailover<InferenceEnrollResponse>({
+      endpoint: "enroll",
+      path: enrollPath,
+      timeoutMs,
+      body: {
+        session_id: sessionId,
+        participant_name: participantName,
+        audio,
+        state
+      } satisfies InferenceEnrollRequest
+    });
+    return {
+      payload: response.data,
+      backend: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
   }
 
   private buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime {
@@ -1920,6 +1991,102 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   private async loadSpeakerEvents(): Promise<SpeakerEvent[]> {
     return (await this.ctx.storage.get<SpeakerEvent[]>(STORAGE_KEY_EVENTS)) ?? [];
+  }
+
+  private async storeDependencyHealth(health: DependencyHealthSnapshot): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_DEPENDENCY_HEALTH, health);
+  }
+
+  private async loadDependencyHealth(): Promise<DependencyHealthSnapshot> {
+    const stored = await this.ctx.storage.get<DependencyHealthSnapshot>(STORAGE_KEY_DEPENDENCY_HEALTH);
+    if (stored) return stored;
+    const snapshot = this.inferenceClient.snapshot();
+    await this.storeDependencyHealth(snapshot);
+    return snapshot;
+  }
+
+  private confidenceBucketFromEvidence(evidence: ResolveEvidence | null | undefined): "high" | "medium" | "low" | "unknown" {
+    const topScore = typeof evidence?.profile_top_score === "number" ? evidence.profile_top_score : null;
+    const svScore = typeof evidence?.sv_score === "number" ? evidence.sv_score : null;
+    const score = topScore ?? svScore;
+    if (score === null || !Number.isFinite(score)) return "unknown";
+    if (score >= 0.8) return "high";
+    if (score >= 0.6) return "medium";
+    return "low";
+  }
+
+  private echoLeakRate(transcript: TranscriptItem[]): number {
+    const teacher = transcript
+      .filter((item) => item.stream_role === "teacher")
+      .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+    const students = transcript
+      .filter((item) => item.stream_role === "students")
+      .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+    if (teacher.length === 0 || students.length === 0) return 0;
+
+    let overlapLeak = 0;
+    let totalStudents = 0;
+    for (const item of students) {
+      totalStudents += 1;
+      const normalized = item.text.trim().toLowerCase();
+      if (!normalized) continue;
+      const hit = teacher.find((t) => {
+        const overlap = Math.min(t.end_ms, item.end_ms) - Math.max(t.start_ms, item.start_ms);
+        if (overlap <= 0) return false;
+        const left = t.text.trim().toLowerCase();
+        if (!left) return false;
+        const short = normalized.length < left.length ? normalized : left;
+        const long = normalized.length < left.length ? left : normalized;
+        if (short.length < 12) return false;
+        return long.includes(short);
+      });
+      if (hit) overlapLeak += 1;
+    }
+    if (totalStudents === 0) return 0;
+    return overlapLeak / totalStudents;
+  }
+
+  private suppressionFalsePositiveRate(
+    transcript: TranscriptItem[],
+    captureByStream: Record<StreamRole, CaptureState>
+  ): number {
+    const suppressed = Number(captureByStream.teacher.echo_suppressed_chunks ?? 0);
+    if (!Number.isFinite(suppressed) || suppressed <= 0) return 0;
+    const teacherTurns = transcript.filter((item) => item.stream_role === "teacher").length;
+    if (teacherTurns <= 0) return 0;
+    const ratio = suppressed / Math.max(teacherTurns, 1);
+    return Math.max(0, Math.min(1, ratio * 0.1));
+  }
+
+  private buildQualityMetrics(
+    transcript: TranscriptItem[],
+    captureByStream: Record<StreamRole, CaptureState>
+  ): QualityMetrics {
+    const students = transcript.filter((item) => item.stream_role === "students");
+    const unknown = students.filter((item) => !item.speaker_name || item.decision === "unknown").length;
+    const unknownRatio = students.length > 0 ? unknown / students.length : 0;
+    const echoSuppressed = Number(captureByStream.teacher.echo_suppressed_chunks ?? 0);
+    const echoRecent = Number(captureByStream.teacher.echo_suppression_recent_rate ?? 0);
+    return {
+      unknown_ratio: unknownRatio,
+      students_utterance_count: students.length,
+      students_unknown_count: unknown,
+      echo_suppressed_chunks: Number.isFinite(echoSuppressed) ? Math.max(0, Math.floor(echoSuppressed)) : 0,
+      echo_suppression_recent_rate: Number.isFinite(echoRecent) ? Math.max(0, Math.min(1, echoRecent)) : 0,
+      echo_leak_rate: this.echoLeakRate(transcript),
+      suppression_false_positive_rate: this.suppressionFalsePositiveRate(transcript, captureByStream)
+    };
+  }
+
+  private speechBackendMode(
+    state: SessionState,
+    dependencyHealth: DependencyHealthSnapshot
+  ): "cloud-primary" | "cloud-secondary" | "edge-sidecar" | "hybrid" {
+    const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
+    const activeInference = dependencyHealth.active_backend === "secondary" ? "cloud-secondary" : "cloud-primary";
+    if (diarizationBackend === "edge" && activeInference === "cloud-secondary") return "hybrid";
+    if (diarizationBackend === "edge") return "edge-sidecar";
+    return activeInference;
   }
 
   private async appendSpeakerEvent(event: SpeakerEvent): Promise<void> {
@@ -2268,12 +2435,21 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const stored = (await this.ctx.storage.get<FinalizeV2Status>(STORAGE_KEY_FINALIZE_V2_STATUS)) ?? null;
     if (!stored) return null;
     const heartbeat = typeof stored.heartbeat_at === "string" ? stored.heartbeat_at : stored.started_at;
-    if (!heartbeat) return stored;
-    if (stored.heartbeat_at === heartbeat) return stored;
     const normalized: FinalizeV2Status = {
       ...stored,
-      heartbeat_at: heartbeat
+      heartbeat_at: heartbeat ?? this.currentIsoTs(),
+      warnings: Array.isArray(stored.warnings) ? stored.warnings : [],
+      degraded: Boolean(stored.degraded),
+      backend_used: stored.backend_used ?? "primary"
     };
+    if (
+      stored.heartbeat_at === normalized.heartbeat_at &&
+      Array.isArray(stored.warnings) &&
+      stored.degraded === normalized.degraded &&
+      stored.backend_used === normalized.backend_used
+    ) {
+      return normalized;
+    }
     await this.ctx.storage.put(STORAGE_KEY_FINALIZE_V2_STATUS, normalized);
     return normalized;
   }
@@ -2281,7 +2457,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
   private async storeFinalizeV2Status(status: FinalizeV2Status): Promise<void> {
     const normalized: FinalizeV2Status = {
       ...status,
-      heartbeat_at: status.heartbeat_at ?? status.started_at ?? this.currentIsoTs()
+      heartbeat_at: status.heartbeat_at ?? status.started_at ?? this.currentIsoTs(),
+      warnings: Array.isArray(status.warnings) ? status.warnings : [],
+      degraded: Boolean(status.degraded),
+      backend_used: status.backend_used ?? "primary"
     };
     await this.ctx.storage.put(STORAGE_KEY_FINALIZE_V2_STATUS, normalized);
     await this.scheduleFinalizeWatchdog(normalized);
@@ -2738,6 +2917,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const enrollWav = pcm16ToWavBytes(mergedPcm);
         await this.maybeAutoEnrollStudentsUtterance(sessionId, utterance, enrollWav, resolvedInfo);
       } catch (error) {
+        const inferenceError = error instanceof InferenceRequestError ? error : null;
         await this.appendSpeakerEvent({
           ts: new Date().toISOString(),
           stream_role: "students",
@@ -2749,10 +2929,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
           decision: "unknown",
           evidence: null,
           note: `students auto-resolve failed: ${(error as Error).message}`,
+          backend: inferenceError ? inferenceError.health.active_backend : "primary",
+          fallback_reason: inferenceError ? "resolve_all_backends_failed" : null,
+          confidence_bucket: "unknown",
           metadata: {
             profile_score: resolvedInfo?.evidence?.profile_top_score ?? null,
             profile_margin: resolvedInfo?.evidence?.profile_margin ?? null,
-            binding_locked: false
+            binding_locked: false,
+            timeline: inferenceError?.timeline ?? null
           }
         });
       }
@@ -3126,51 +3310,33 @@ export class MeetingSessionDO extends DurableObject<Env> {
     audio: AudioPayload,
     asrText: string | null,
     currentState: SessionState
-  ): Promise<ResolveResponse> {
+  ): Promise<{
+    resolved: ResolveResponse;
+    backend: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
     const resolvePath = this.env.INFERENCE_RESOLVE_PATH ?? "/speaker/resolve";
-    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
     const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS);
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-    let inferenceResponse: Response;
-    try {
-      inferenceResponse = await fetch(baseUrl + resolvePath, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(this.env.INFERENCE_API_KEY
-            ? { "x-api-key": this.env.INFERENCE_API_KEY }
-            : {})
-        },
-        body: JSON.stringify({
-          session_id: sessionId,
-          audio,
-          asr_text: asrText,
-          state: currentState
-        }),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const inferenceText = await inferenceResponse.text();
-    if (!inferenceResponse.ok) {
-      throw new Error(
-        `inference backend non-success: status=${inferenceResponse.status} body=${inferenceText.slice(0, 240)}`
-      );
-    }
-
-    let resolved: ResolveResponse;
-    try {
-      resolved = JSON.parse(inferenceText) as ResolveResponse;
-    } catch {
-      throw new Error("inference backend returned non-JSON response");
-    }
-
-    return resolved;
+    const response = await this.callInferenceWithFailover<ResolveResponse>({
+      endpoint: "resolve",
+      path: resolvePath,
+      timeoutMs,
+      body: {
+        session_id: sessionId,
+        audio,
+        asr_text: asrText,
+        state: currentState
+      }
+    });
+    return {
+      resolved: response.data,
+      backend: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
   }
 
   private async autoResolveStudentsUtterance(
@@ -3196,7 +3362,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       channels: TARGET_CHANNELS
     };
 
-    const resolved = await this.invokeInferenceResolve(sessionId, audioPayload, utterance.text, currentState);
+    const resolveCall = await this.invokeInferenceResolve(sessionId, audioPayload, utterance.text, currentState);
+    const resolved = resolveCall.resolved;
     const mergedState = normalizeSessionState({
       ...resolved.updated_state,
       capture_by_stream: currentState.capture_by_stream
@@ -3219,10 +3386,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
       speaker_name: boundSpeakerName,
       decision: resolved.decision,
       evidence: resolved.evidence,
+      backend: resolveCall.backend,
+      fallback_reason: resolveCall.degraded ? "inference_failover" : null,
+      confidence_bucket: this.confidenceBucketFromEvidence(resolved.evidence),
       metadata: {
         profile_score: resolved.evidence.profile_top_score ?? null,
         profile_margin: resolved.evidence.profile_margin ?? null,
-        binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false
+        binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false,
+        warnings: resolveCall.warnings,
+        timeline: resolveCall.timeline
       }
     });
     return {
@@ -3269,7 +3441,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       sample_rate: TARGET_SAMPLE_RATE,
       channels: TARGET_CHANNELS
     };
-    const enrollResult = await this.callInferenceEnroll(sessionId, participantName, enrollAudio, state);
+    const enrollCall = await this.callInferenceEnroll(sessionId, participantName, enrollAudio, state);
+    const enrollResult = enrollCall.payload;
     const nextState = normalizeSessionState({
       ...enrollResult.updated_state,
       capture_by_stream: state.capture_by_stream
@@ -3286,6 +3459,26 @@ export class MeetingSessionDO extends DurableObject<Env> {
     this.refreshEnrollmentMode(nextState);
     await this.ctx.storage.put(STORAGE_KEY_STATE, nextState);
     await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+    if (enrollCall.degraded) {
+      await this.appendSpeakerEvent({
+        ts: this.currentIsoTs(),
+        stream_role: "students",
+        source: "inference_resolve",
+        identity_source: "enrollment_match",
+        utterance_id: utterance.utterance_id,
+        cluster_id: resolved?.cluster_id ?? null,
+        speaker_name: participantName,
+        decision: "confirm",
+        note: "enrollment call used secondary inference backend",
+        backend: enrollCall.backend,
+        fallback_reason: "inference_failover",
+        confidence_bucket: "medium",
+        metadata: {
+          warnings: enrollCall.warnings,
+          timeline: enrollCall.timeline
+        }
+      });
+    }
   }
 
   private resolveTeacherIdentity(state: SessionState, asrText: string): { speakerName: string; identitySource: NonNullable<SpeakerEvent["identity_source"]> } {
@@ -3344,7 +3537,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       speaker_name: identity.speakerName,
       decision: "auto",
       evidence: null,
-      note: `teacher direct bind for session ${sessionId}`
+      note: `teacher direct bind for session ${sessionId}`,
+      backend: "worker",
+      fallback_reason: null,
+      confidence_bucket: "high"
     });
   }
 
@@ -3476,6 +3672,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           try {
             await this.autoResolveStudentsUtterance(sessionId, utterance, wavBytes);
           } catch (error) {
+            const inferenceError = error instanceof InferenceRequestError ? error : null;
             await this.appendSpeakerEvent({
               ts: new Date().toISOString(),
               stream_role: "students",
@@ -3485,7 +3682,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
               speaker_name: null,
               decision: "unknown",
               evidence: null,
-              note: `students auto-resolve failed: ${(error as Error).message}`
+              note: `students auto-resolve failed: ${(error as Error).message}`,
+              backend: inferenceError ? inferenceError.health.active_backend : "primary",
+              fallback_reason: inferenceError ? "resolve_all_backends_failed" : null,
+              confidence_bucket: "unknown",
+              metadata: {
+                timeline: inferenceError?.timeline ?? null
+              }
             });
           }
         } else if (streamRole === "teacher") {
@@ -3551,6 +3754,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
       ...current,
       ...patch,
       errors: patch.errors ?? current.errors,
+      warnings: patch.warnings ?? current.warnings,
+      degraded: patch.degraded ?? current.degraded,
+      backend_used: patch.backend_used ?? current.backend_used,
       started_at: current.started_at ?? nowIso,
       heartbeat_at: patch.heartbeat_at ?? nowIso
     };
@@ -3558,66 +3764,95 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return next;
   }
 
-  private async invokeInferenceAnalysisEvents(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async invokeInferenceAnalysisEvents(payload: Record<string, unknown>): Promise<{
+    events: Record<string, unknown>[];
+    backend_used: "primary" | "secondary" | "local";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+    fallback_reason: string | null;
+  }> {
     const path = this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events";
-    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
     const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
     try {
-      response = await fetch(baseUrl + path, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(this.env.INFERENCE_API_KEY ? { "x-api-key": this.env.INFERENCE_API_KEY } : {})
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
+      const response = await this.callInferenceWithFailover<{ events?: Record<string, unknown>[] }>({
+        endpoint: "analysis_events",
+        path,
+        timeoutMs,
+        body: payload
       });
-    } finally {
-      clearTimeout(timeout);
-    }
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`analysis/events failed: status=${response.status} body=${text.slice(0, 240)}`);
-    }
-    try {
-      return JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      throw new Error("analysis/events returned non-JSON response");
+      const events = Array.isArray(response.data?.events) ? response.data.events : [];
+      return {
+        events,
+        backend_used: response.backend,
+        degraded: response.degraded,
+        warnings: response.warnings,
+        timeline: response.timeline,
+        fallback_reason: null
+      };
+    } catch (error) {
+      if (!(error instanceof InferenceRequestError)) {
+        throw error;
+      }
+      const sessionId = String(payload.session_id ?? "unknown-session");
+      const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
+      const memos = Array.isArray(payload.memos) ? payload.memos : [];
+      const stats = Array.isArray(payload.stats) ? payload.stats : [];
+      const localEvents = analyzeEventsLocally({
+        sessionId,
+        transcript: transcript as Array<{
+          utterance_id: string;
+          stream_role: "mixed" | "teacher" | "students";
+          cluster_id?: string | null;
+          speaker_name?: string | null;
+          text: string;
+          start_ms: number;
+          end_ms: number;
+          duration_ms: number;
+        }>,
+        memos: memos as Array<{
+          memo_id: string;
+          created_at_ms: number;
+          type: "observation" | "evidence" | "question" | "decision" | "score";
+          text: string;
+          anchors?: { mode: "time" | "utterance"; time_range_ms?: [number, number]; utterance_ids?: string[] };
+        }>,
+        stats: stats as Array<{ speaker_key: string; talk_time_ms: number; turns: number }>
+      });
+      const warning = `analysis/events fallback local analyzer: ${error.message}`;
+      return {
+        events: localEvents as unknown as Record<string, unknown>[],
+        backend_used: "local",
+        degraded: true,
+        warnings: [warning],
+        timeline: error.timeline,
+        fallback_reason: "analysis_events_all_backends_failed"
+      };
     }
   }
 
-  private async invokeInferenceAnalysisReport(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async invokeInferenceAnalysisReport(payload: Record<string, unknown>): Promise<{
+    data: Record<string, unknown>;
+    backend_used: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
     const path = this.env.INFERENCE_REPORT_PATH ?? "/analysis/report";
-    const baseUrl = normalizeBaseUrl(this.env.INFERENCE_BASE_URL);
     const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
-    try {
-      response = await fetch(baseUrl + path, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(this.env.INFERENCE_API_KEY ? { "x-api-key": this.env.INFERENCE_API_KEY } : {})
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`analysis/report failed: status=${response.status} body=${text.slice(0, 240)}`);
-    }
-    try {
-      return JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      throw new Error("analysis/report returned non-JSON response");
-    }
+    const response = await this.callInferenceWithFailover<Record<string, unknown>>({
+      endpoint: "analysis_report",
+      path,
+      timeoutMs,
+      body: payload
+    });
+    return {
+      data: response.data,
+      backend_used: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
   }
 
   private deriveSpeakerLogsFromTranscript(
@@ -3735,12 +3970,20 @@ export class MeetingSessionDO extends DurableObject<Env> {
     jobId: string,
     metadata: Record<string, unknown>
   ): Promise<void> {
+    const finalizeWarnings: string[] = [];
+    const backendTimeline: InferenceBackendTimelineItem[] = [];
+    let finalizeBackendUsed: FinalizeV2Status["backend_used"] = "primary";
+    let finalizeDegraded = false;
+
     const startedAt = this.currentIsoTs();
     await this.updateFinalizeV2Status(jobId, {
       status: "running",
       stage: "freeze",
       progress: 5,
-      started_at: startedAt
+      started_at: startedAt,
+      warnings: [],
+      degraded: false,
+      backend_used: "primary"
     });
     await this.setFinalizeLock(true);
 
@@ -3966,6 +4209,22 @@ export class MeetingSessionDO extends DurableObject<Env> {
       };
       const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
       const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
+      backendTimeline.push(...eventsResult.timeline);
+      if (eventsResult.warnings.length > 0) {
+        finalizeWarnings.push(...eventsResult.warnings);
+      }
+      if (eventsResult.degraded) {
+        finalizeDegraded = true;
+      }
+      finalizeBackendUsed = eventsResult.backend_used === "local" ? "local" : eventsResult.backend_used;
+      if (eventsResult.fallback_reason) {
+        finalizeWarnings.push(`events fallback: ${eventsResult.fallback_reason}`);
+      }
+      await this.updateFinalizeV2Status(jobId, {
+        warnings: finalizeWarnings,
+        degraded: finalizeDegraded,
+        backend_used: finalizeBackendUsed
+      });
 
       await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
       await this.ensureFinalizeJobActive(jobId);
@@ -3982,6 +4241,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           locale: "zh-CN"
         }).catch((error) => {
           console.error(`analysis/report warmup failed session=${sessionId}:`, error);
+          finalizeWarnings.push(`analysis/report warmup failed: ${(error as Error).message}`);
           return null;
         })
       );
@@ -3995,6 +4255,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
           thresholdMeta[key] = value;
         }
       }
+      const captureByStream = state.capture_by_stream ?? defaultCaptureByStream();
+      const qualityMetrics = this.buildQualityMetrics(transcript, captureByStream);
+      const qualityGateSnapshot = {
+        finalize_success_target: 0.995,
+        students_unknown_ratio_target: 0.1,
+        sv_top1_target: 0.95,
+        echo_reduction_target: 0.8,
+        observed_unknown_ratio: qualityMetrics.unknown_ratio,
+        observed_students_turns: qualityMetrics.students_utterance_count,
+        observed_students_unknown: qualityMetrics.students_unknown_count,
+        observed_echo_suppressed_chunks: qualityMetrics.echo_suppressed_chunks,
+        observed_echo_recent_rate: qualityMetrics.echo_suppression_recent_rate
+      };
       const resultV2 = buildResultV2({
         sessionId,
         finalizedAt,
@@ -4030,7 +4303,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
           feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
           ...thresholdMeta
-        }
+        },
+        backendTimeline,
+        qualityGateSnapshot
       });
 
       const resultV2Key = resultObjectKeyV2(sessionId);
@@ -4055,7 +4330,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         stage: "persist",
         progress: 100,
         finished_at: finalizedAt,
-        errors: []
+        errors: [],
+        warnings: finalizeWarnings,
+        degraded: finalizeDegraded,
+        backend_used: finalizeBackendUsed
       });
     } catch (error) {
       const message = (error as Error).message;
@@ -4066,7 +4344,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
           stage: "persist",
           progress: 100,
           finished_at: this.currentIsoTs(),
-          errors: [...current.errors, message]
+          errors: [...current.errors, message],
+          warnings: [...current.warnings, ...finalizeWarnings],
+          degraded: true,
+          backend_used: current.backend_used
         });
       }
     } finally {
@@ -4410,7 +4691,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
 
     if (action === "state" && request.method === "GET") {
-      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream, feedbackCache] =
+      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream, feedbackCache, dependencyHealth] =
         await Promise.all([
         this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
         this.loadSpeakerEvents(),
@@ -4422,7 +4703,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         this.loadFinalizeV2Status(),
         this.loadSpeakerLogs(),
         this.loadAsrCursorByStream(),
-        this.loadFeedbackCache(sessionId)
+        this.loadFeedbackCache(sessionId),
+        this.loadDependencyHealth()
       ]);
 
       const utteranceCountByStream = {
@@ -4431,6 +4713,28 @@ export class MeetingSessionDO extends DurableObject<Env> {
         students: utterancesByStream.students.length
       };
       const normalizedState = normalizeSessionState(state);
+      const eventByUtterance = new Map(
+        events
+          .filter((item) => item.utterance_id)
+          .map((item) => [String(item.utterance_id), item])
+      );
+      const metricsTranscript: TranscriptItem[] = [...utterancesByStream.teacher, ...utterancesByStream.students]
+        .map((item) => {
+          const event = eventByUtterance.get(item.utterance_id);
+          return {
+            utterance_id: item.utterance_id,
+            stream_role: item.stream_role,
+            cluster_id: event?.cluster_id ?? null,
+            speaker_name: event?.speaker_name ?? null,
+            decision: event?.decision ?? null,
+            text: item.text,
+            start_ms: item.start_ms,
+            end_ms: item.end_ms,
+            duration_ms: item.duration_ms
+          };
+        });
+      const qualityMetrics = this.buildQualityMetrics(metricsTranscript, normalizedState.capture_by_stream ?? defaultCaptureByStream());
+      const speechBackendMode = this.speechBackendMode(normalizedState, dependencyHealth);
 
       return jsonResponse({
         session_id: sessionId,
@@ -4451,6 +4755,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
         finalize_v2: finalizeV2Status,
         speaker_logs: speakerLogs,
         asr_cursor_by_stream: asrCursorByStream,
+        dependency_health: dependencyHealth,
+        speech_backend_mode: speechBackendMode,
+        quality_metrics: qualityMetrics,
         feedback: {
           ready: feedbackCache.ready,
           updated_at: feedbackCache.updated_at,
@@ -4873,6 +5180,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           status: "idle",
           stage: "idle",
           progress: 0,
+          warnings: [],
+          degraded: false,
+          backend_used: "primary",
           version: "v2"
         });
       }
@@ -4965,6 +5275,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           decision: "auto",
           evidence: null,
           note: `cluster ${clusterId} mapped to ${participantName}`,
+          backend: "worker",
+          fallback_reason: null,
+          confidence_bucket: "high",
           metadata: {
             binding_locked: payload.lock !== false
           }
@@ -5031,12 +5344,18 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const limit = Number.isInteger(urlLimit) && urlLimit > 0 ? Math.min(urlLimit, 2000) : 100;
       const events = await this.loadSpeakerEvents();
       const scoped = filteredRole ? events.filter((item) => item.stream_role === filteredRole) : events;
+      const normalizedItems = scoped.slice(-limit).map((item) => ({
+        ...item,
+        backend: item.backend ?? (item.source === "inference_resolve" ? "primary" : "worker"),
+        fallback_reason: item.fallback_reason ?? null,
+        confidence_bucket: item.confidence_bucket ?? this.confidenceBucketFromEvidence(item.evidence)
+      }));
       return jsonResponse({
         session_id: sessionId,
         stream_role: filteredRole ?? "all",
         count: scoped.length,
         limit,
-        items: scoped.slice(-limit)
+        items: normalizedItems
       });
     }
 
@@ -5203,8 +5522,17 @@ export class MeetingSessionDO extends DurableObject<Env> {
         }
 
         let resolved: ResolveResponse;
+        let resolveBackend: "primary" | "secondary" = "primary";
+        let degraded = false;
+        let resolveWarnings: string[] = [];
+        let resolveTimeline: InferenceBackendTimelineItem[] = [];
         try {
-          resolved = await this.invokeInferenceResolve(sessionId, payload.audio, payload.asr_text ?? null, currentState);
+          const resolveCall = await this.invokeInferenceResolve(sessionId, payload.audio, payload.asr_text ?? null, currentState);
+          resolved = resolveCall.resolved;
+          resolveBackend = resolveCall.backend;
+          degraded = resolveCall.degraded;
+          resolveWarnings = resolveCall.warnings;
+          resolveTimeline = resolveCall.timeline;
         } catch (error) {
           return jsonResponse({ detail: `inference request failed: ${(error as Error).message}` }, 502);
         }
@@ -5233,10 +5561,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
           speaker_name: boundSpeakerName,
           decision: resolved.decision,
           evidence: resolved.evidence,
+          backend: resolveBackend,
+          fallback_reason: degraded ? "inference_failover" : null,
+          confidence_bucket: this.confidenceBucketFromEvidence(resolved.evidence),
           metadata: {
             profile_score: resolved.evidence.profile_top_score ?? null,
             profile_margin: resolved.evidence.profile_margin ?? null,
-            binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false
+            binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false,
+            warnings: resolveWarnings,
+            timeline: resolveTimeline
           }
         });
 
@@ -5270,6 +5603,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
             status: current.status,
             stage: current.stage,
             progress: current.progress,
+            warnings: current.warnings,
+            degraded: current.degraded,
+            backend_used: current.backend_used,
             version: "v2"
           });
         }
@@ -5279,6 +5615,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           stage: "freeze",
           progress: 0,
           errors: [],
+          warnings: [],
+          degraded: false,
+          backend_used: "primary",
           version: "v2",
           started_at: this.currentIsoTs(),
           heartbeat_at: this.currentIsoTs(),
@@ -5294,6 +5633,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           session_id: sessionId,
           job_id: nextStatus.job_id,
           status: "queued",
+          warnings: [],
+          degraded: false,
+          backend_used: "primary",
           version: "v2"
         });
       }

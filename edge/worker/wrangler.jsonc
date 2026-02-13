@@ -13,7 +13,13 @@
   ],
 
   "vars": {
+    "INFERENCE_BASE_URL_PRIMARY": "https://if.frontierace.ai",
+    "INFERENCE_BASE_URL_SECONDARY": "",
     "INFERENCE_TIMEOUT_MS": "60000",
+    "INFERENCE_FAILOVER_ENABLED": "true",
+    "INFERENCE_RETRY_MAX": "2",
+    "INFERENCE_RETRY_BACKOFF_MS": "180",
+    "INFERENCE_CIRCUIT_OPEN_MS": "15000",
     "INFERENCE_RESOLVE_PATH": "/speaker/resolve",
     "INFERENCE_ENROLL_PATH": "/speaker/enroll",
     "INFERENCE_EVENTS_PATH": "/analysis/events",

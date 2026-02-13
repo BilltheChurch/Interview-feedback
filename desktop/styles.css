@@ -1,19 +1,19 @@
 :root {
   color-scheme: light;
-  --bg: #ecf2f7;
+  --bg: #f6f2ea;
   --panel: #ffffff;
-  --ink: #152238;
-  --muted: #627186;
-  --border: #d4deea;
-  --accent: #0d7068;
-  --accent-soft: #ddf2ef;
-  --chip: #f4f7fb;
+  --ink: #1e2a32;
+  --muted: #637380;
+  --border: #d8ddd7;
+  --accent: #0d6a63;
+  --accent-soft: #dcf0ed;
+  --chip: #f6f4ef;
   --space-1: 8px;
   --space-2: 12px;
   --space-3: 16px;
   --space-4: 22px;
   --space-5: 28px;
-  --radius-card: 14px;
+  --radius-card: 16px;
   --font-size-body: 13px;
   --font-size-muted: 12px;
   --control-height: 38px;
@@ -34,7 +34,10 @@ body {
   margin: 0;
   font-family: var(--font-ui);
   color: var(--ink);
-  background: radial-gradient(circle at top left, #ffffff 0%, #ecf2f7 42%, #dce7f1 100%);
+  background:
+    radial-gradient(circle at 8% -4%, #ffffff 0%, #f8f3eb 34%, transparent 62%),
+    radial-gradient(circle at 96% 5%, #e5f4ef 0%, #f6f2ea 42%, transparent 75%),
+    linear-gradient(160deg, #f9f5ee 0%, #efe8dc 100%);
 }
 
 h1,
@@ -66,7 +69,7 @@ p {
 }
 
 .app-root.mode-session {
-  overflow: hidden;
+  overflow: auto;
 }
 
 .panel {
@@ -75,7 +78,7 @@ p {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   padding: var(--space-4);
-  box-shadow: 0 9px 24px rgba(16, 40, 68, 0.08);
+  box-shadow: 0 10px 32px rgba(38, 45, 50, 0.08);
 }
 
 .dash-hero {
@@ -163,14 +166,21 @@ p {
 }
 
 button {
-  border: 1px solid #9bc8c2;
-  background: #e3f5f3;
-  color: #094d47;
-  border-radius: 8px;
+  border: 1px solid #9dc3be;
+  background: #e4f2ee;
+  color: #0f524d;
+  border-radius: 10px;
   min-height: calc(var(--control-height) - 2px);
   padding: 8px 14px;
   font-size: var(--font-size-body);
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: #7fb0a9;
+  background: #d6ece6;
+  transform: translateY(-1px);
 }
 
 button.primary {
@@ -306,24 +316,72 @@ button:disabled {
 }
 
 .session-view {
-  height: 100%;
+  min-height: 100%;
   display: grid;
   grid-template-rows: auto 1fr auto auto;
   gap: var(--space-2);
 }
 
-.session-top {
+.session-hero {
   display: grid;
   gap: var(--space-2);
 }
 
-.session-stack {
+.session-hero-main {
+  display: grid;
+  gap: 4px;
+}
+
+.session-hero-main h2 {
+  font-size: 30px;
+  line-height: 1.05;
+}
+
+.eyebrow {
+  color: #7f6f56;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.session-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.session-hero-actions {
+  justify-content: flex-start;
+}
+
+.session-shell {
   min-height: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
   gap: var(--space-2);
-  grid-auto-rows: minmax(180px, auto);
-  overflow: auto;
-  padding-right: 2px;
+}
+
+.primary-workspace {
+  display: grid;
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.context-rail {
+  display: grid;
+  gap: var(--space-2);
+  min-height: 0;
+  align-content: start;
+}
+
+.finalize-card {
+  border: 1px solid #d8e0dd;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbf8f1 0%, #f6f2e9 100%);
+  padding: var(--space-2);
+  display: grid;
+  gap: var(--space-2);
 }
 
 .flow-panel {
@@ -333,7 +391,7 @@ button:disabled {
 
 .flow-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(1, minmax(0, 1fr));
   gap: var(--space-2);
 }
 
@@ -519,7 +577,8 @@ audio {
   min-height: 0;
   display: grid;
   gap: var(--space-2);
-  max-height: 52vh;
+  max-height: 60vh;
+  background: #fffdfa;
 }
 
 .review-tab {
@@ -599,15 +658,23 @@ audio {
 
 .debug-drawer {
   min-height: 0;
-  max-height: 46px;
+  max-height: 0;
   overflow: hidden;
-  transition: max-height 200ms ease;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-width: 0;
+  opacity: 0;
+  transition: max-height 220ms ease, opacity 220ms ease, padding 220ms ease, border-width 220ms ease;
   display: grid;
   gap: 8px;
 }
 
 .debug-drawer.open {
-  max-height: 42vh;
+  max-height: 52vh;
+  opacity: 1;
+  border-width: 1px;
+  padding-top: var(--space-3);
+  padding-bottom: var(--space-3);
 }
 
 .debug-tabs {
@@ -699,8 +766,12 @@ audio {
   z-index: 2;
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 900px) {
   .dash-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .session-shell {
     grid-template-columns: 1fr;
   }
 

@@ -108,8 +108,16 @@ class InferenceOrchestrator:
         roster = state.roster or []
         if not roster:
             return None
+        stripped = raw_name.strip()
+        if not stripped:
+            return None
+        token_count = len([token for token in re.split(r"\s+", stripped) if token])
         normalized = self._normalize_text_key(raw_name)
         if not normalized:
+            return None
+        # Reject long English phrases (e.g. "studying in the Netherlands...") from
+        # being treated as candidate names.
+        if not re.search(r"[\u4e00-\u9fff]", normalized) and token_count >= 4:
             return None
 
         best_name: str | None = None
@@ -127,8 +135,6 @@ class InferenceOrchestrator:
                 and (normalized in roster_norm or roster_norm in normalized)
             ):
                 return item.name
-            if len(normalized) >= 4 and (normalized in roster_norm or roster_norm in normalized):
-                return item.name
 
             roster_tokens = self._tokenize_name(item.name)
             if not src_tokens or not roster_tokens:
@@ -138,6 +144,18 @@ class InferenceOrchestrator:
             if union == 0:
                 continue
             score = intersect / union
+            if not re.search(r"[\u4e00-\u9fff]", normalized):
+                if token_count == 1:
+                    # For Latin names, only allow fuzzy match when the token starts
+                    # with the roster token to avoid matching arbitrary phrases.
+                    if not any(
+                        src.startswith(roster_token) or roster_token.startswith(src)
+                        for src in src_tokens
+                        for roster_token in roster_tokens
+                    ):
+                        continue
+                elif token_count > 2:
+                    continue
             if score > best_score:
                 best_score = score
                 best_name = item.name
@@ -204,6 +222,24 @@ class InferenceOrchestrator:
             locked=locked,
             updated_at=updated_at,
         )
+
+    @staticmethod
+    def _is_recent_binding(updated_at: str | None, *, window_seconds: int = 30) -> bool:
+        if not updated_at:
+            return False
+        try:
+            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        delta = datetime.now(timezone.utc) - ts.astimezone(timezone.utc)
+        return delta.total_seconds() <= window_seconds
+
+    @staticmethod
+    def _confidence_for_meta(profile_top_score: float | None, sv_score: float) -> float:
+        base = profile_top_score if profile_top_score is not None else sv_score
+        if base is None:
+            base = 0.0
+        return max(min(float(base), 1.0), -1.0)
 
     def _match_profile(
         self, state: SessionState, embedding: np.ndarray
@@ -356,6 +392,37 @@ class InferenceOrchestrator:
             now_iso=self._now_iso(),
         )
         bind_result.evidence.segment_count = len(segments)
+        now_iso = self._now_iso()
+
+        # Stabilize confirm/unknown outputs within a short time window so the
+        # same cluster does not bounce between different candidate names.
+        if (
+            binding_meta
+            and not binding_meta.locked
+            and binding_meta.participant_name
+            and self._is_recent_binding(binding_meta.updated_at, window_seconds=30)
+        ):
+            if bind_result.decision == "unknown":
+                bind_result.speaker_name = binding_meta.participant_name
+                bind_result.decision = "confirm"
+                bind_result.evidence.binding_source = binding_meta.source
+                bind_result.evidence.reason = "stabilized by recent cluster candidate"
+            elif bind_result.speaker_name and bind_result.speaker_name != binding_meta.participant_name:
+                bind_result.speaker_name = binding_meta.participant_name
+                bind_result.evidence.binding_source = binding_meta.source
+                bind_result.evidence.reason = "stabilized by recent cluster candidate"
+
+        if bind_result.speaker_name and bind_result.decision in {"auto", "confirm"}:
+            source = bind_result.evidence.binding_source
+            if source not in {"enrollment_match", "name_extract", "manual_map"}:
+                source = "name_extract"
+            state.cluster_binding_meta[cluster_id] = BindingMeta(
+                participant_name=bind_result.speaker_name,
+                source=source,  # type: ignore[arg-type]
+                confidence=self._confidence_for_meta(top_score, sv_score),
+                locked=False,
+                updated_at=now_iso,
+            )
 
         logger.info(
             "resolve session=%s cluster=%s score=%.4f decision=%s speaker=%s source=%s",

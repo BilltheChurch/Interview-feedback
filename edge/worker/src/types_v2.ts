@@ -74,6 +74,9 @@ export interface FinalizeV2Status {
   stage: FinalizeV2Stage;
   progress: number;
   errors: string[];
+  warnings: string[];
+  degraded: boolean;
+  backend_used: "primary" | "secondary" | "local" | "mixed";
   version: "v2";
   started_at: string;
   heartbeat_at?: string;
@@ -169,6 +172,25 @@ export interface ResultV2 {
     model_versions: Record<string, string>;
     thresholds: Record<string, number | string | boolean>;
     unknown_ratio: number;
+    backend_timeline?: Array<{
+      ts: string;
+      endpoint: string;
+      backend: string;
+      outcome: "ok" | "failed" | "skipped";
+      detail: string;
+      attempt: number;
+    }>;
+    quality_gate_snapshot?: {
+      finalize_success_target: number;
+      students_unknown_ratio_target: number;
+      sv_top1_target: number;
+      echo_reduction_target: number;
+      observed_unknown_ratio: number;
+      observed_students_turns: number;
+      observed_students_unknown: number;
+      observed_echo_suppressed_chunks: number;
+      observed_echo_recent_rate: number;
+    };
     generated_at: string;
   };
 }
