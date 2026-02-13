@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   finalizeV2: (payload) => ipcRenderer.invoke('session:finalizeV2', payload),
   getFinalizeStatus: (payload) => ipcRenderer.invoke('session:getFinalizeStatus', payload),
   getResultV2: (payload) => ipcRenderer.invoke('session:getResultV2', payload),
+  getFeedbackReady: (payload) => ipcRenderer.invoke('session:getFeedbackReady', payload),
+  openFeedback: (payload) => ipcRenderer.invoke('session:openFeedback', payload),
+  regenerateFeedbackClaim: (payload) => ipcRenderer.invoke('session:regenerateFeedbackClaim', payload),
+  exportFeedback: (payload) => ipcRenderer.invoke('session:exportFeedback', payload),
   diarizationStart: (payload) => ipcRenderer.invoke('diarization:start', payload),
   diarizationStop: () => ipcRenderer.invoke('diarization:stop'),
   diarizationGetStatus: () => ipcRenderer.invoke('diarization:getStatus'),
@@ -22,8 +26,15 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   calendarGetStatus: () => ipcRenderer.invoke('calendar:getStatus'),
   calendarConnectMicrosoft: () => ipcRenderer.invoke('calendar:connectMicrosoft'),
   calendarGetUpcomingMeetings: (payload) => ipcRenderer.invoke('calendar:getUpcomingMeetings', payload),
+  calendarCreateOnlineMeeting: (payload) => ipcRenderer.invoke('calendar:createOnlineMeeting', payload),
   calendarDisconnectMicrosoft: () => ipcRenderer.invoke('calendar:disconnectMicrosoft'),
   openPrivacySettings: (payload) => ipcRenderer.invoke('system:openPrivacySettings', payload),
+  openExternalUrl: (payload) => ipcRenderer.invoke('system:openExternalUrl', payload),
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
-  getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source')
+  getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source'),
+  onDeepLinkStart: (listener) => {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("deeplink:start", wrapped);
+    return () => ipcRenderer.removeListener("deeplink:start", wrapped);
+  }
 });

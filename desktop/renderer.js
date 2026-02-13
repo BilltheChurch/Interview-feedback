@@ -85,6 +85,11 @@ const btnToggleDebug = document.querySelector("#btn-toggle-debug");
 const debugDrawerEl = document.querySelector("#debug-drawer");
 const debugTabButtons = Array.from(document.querySelectorAll("[data-debug-tab-btn]"));
 const btnOpenReview = document.querySelector("#btn-open-review");
+const btnOpenFeedback = document.querySelector("#btn-open-feedback");
+const btnFeedbackReady = document.querySelector("#btn-feedback-ready");
+const btnFeedbackExportText = document.querySelector("#btn-feedback-export-text");
+const btnFeedbackExportMd = document.querySelector("#btn-feedback-export-md");
+const btnFeedbackExportDocx = document.querySelector("#btn-feedback-export-docx");
 const reviewPanelEl = document.querySelector("#review-panel");
 const reviewTabOverallBtn = document.querySelector("#btn-review-tab-overall");
 const reviewTabPersonBtn = document.querySelector("#btn-review-tab-person");
@@ -117,7 +122,17 @@ const btnGraphDisconnect = document.querySelector("#btn-graph-disconnect");
 const graphStatusEl = document.querySelector("#graph-status");
 const btnOpenAccessibilitySettings = document.querySelector("#btn-open-accessibility-settings");
 const btnOpenAutomationSettings = document.querySelector("#btn-open-automation-settings");
+const btnGraphCreateMeeting = document.querySelector("#btn-graph-create-meeting");
 const attachHintEl = document.querySelector("#attach-hint");
+const btnUiDensity = document.querySelector("#btn-ui-density");
+const flowStageLabelEl = document.querySelector("#flow-stage-label");
+const flowSessionTimerEl = document.querySelector("#flow-session-timer");
+const flowFeedbackSlaEl = document.querySelector("#flow-feedback-sla");
+const evidenceModalEl = document.querySelector("#evidence-modal");
+const evidenceModalContentEl = document.querySelector("#evidence-modal-content");
+const evidenceModalCloseEl = document.querySelector("#evidence-modal-close");
+const btnEvidenceModalClose = document.querySelector("#btn-evidence-modal-close");
+const btnRegenerateClaim = document.querySelector("#btn-regenerate-claim");
 
 const transcriptFormatter = window.IFTranscriptFormatter || {};
 const liveMetricsEngine = window.IFLiveMetrics || {};
@@ -208,9 +223,19 @@ let sessionStartedAtMs = 0;
 let attachStatus = { status: "searching", reason: "initializing" };
 let currentReviewTab = "overall";
 let latestLiveSnapshot = null;
+let latestFeedbackReport = null;
+let selectedClaimContext = null;
 const logBuffer = [];
 let appMode = "dashboard";
 let dashboardMeetings = [];
+let uiDensity = "comfort";
+let deepLinkUnsubscribe = null;
+let sessionConfigOverrides = {
+  mode: "",
+  template_id: "",
+  booking_ref: "",
+  teams_join_url: ""
+};
 
 const FINALIZE_STAGE_ORDER = [
   "queued",
@@ -333,12 +358,15 @@ function updateBackendBadge() {
 function ensureSessionTimer() {
   if (sessionTimer) return;
   sessionTimer = window.setInterval(() => {
-    if (!recordingTimerEl) return;
+    if (!recordingTimerEl && !flowSessionTimerEl) return;
     if (!sessionStartedAtMs || !isAnyUploadActive()) {
-      recordingTimerEl.textContent = "00:00";
+      if (recordingTimerEl) recordingTimerEl.textContent = "00:00";
+      if (flowSessionTimerEl) flowSessionTimerEl.textContent = "00:00";
       return;
     }
-    recordingTimerEl.textContent = toClock(Date.now() - sessionStartedAtMs);
+    const clock = toClock(Date.now() - sessionStartedAtMs);
+    if (recordingTimerEl) recordingTimerEl.textContent = clock;
+    if (flowSessionTimerEl) flowSessionTimerEl.textContent = clock;
   }, 1000);
 }
 
@@ -349,6 +377,9 @@ function stopSessionTimer() {
   }
   if (recordingTimerEl && !isAnyUploadActive()) {
     recordingTimerEl.textContent = "00:00";
+  }
+  if (flowSessionTimerEl && !isAnyUploadActive()) {
+    flowSessionTimerEl.textContent = "00:00";
   }
 }
 
@@ -419,6 +450,25 @@ function writeJsonStorage(key, value) {
   }
 }
 
+function normalizedUiDensity(input) {
+  return String(input || "").trim().toLowerCase() === "compact" ? "compact" : "comfort";
+}
+
+function applyUiDensity(density) {
+  uiDensity = normalizedUiDensity(density);
+  if (appRootEl) {
+    appRootEl.setAttribute("data-density", uiDensity);
+  }
+  if (btnUiDensity) {
+    btnUiDensity.textContent = `Density: ${uiDensity === "compact" ? "Compact" : "Comfort"}`;
+  }
+  writeJsonStorage("if.desktop.ui_density", uiDensity);
+}
+
+function toggleUiDensity() {
+  applyUiDensity(uiDensity === "compact" ? "comfort" : "compact");
+}
+
 function setAppMode(mode) {
   const normalized = mode === "session" ? "session" : "dashboard";
   appMode = normalized;
@@ -469,6 +519,25 @@ function setParticipantsInUI(names) {
   }
 }
 
+function updateSessionConfigOverrides(patch = {}) {
+  const mode = String(patch.mode || "").trim();
+  const templateId = String(patch.template_id || "").trim();
+  const bookingRef = String(patch.booking_ref || "").trim();
+  const teamsJoinUrl = String(patch.teams_join_url || "").trim();
+  if (mode === "1v1" || mode === "group") {
+    sessionConfigOverrides.mode = mode;
+  }
+  if (templateId) {
+    sessionConfigOverrides.template_id = templateId;
+  }
+  if (bookingRef) {
+    sessionConfigOverrides.booking_ref = bookingRef;
+  }
+  if (teamsJoinUrl) {
+    sessionConfigOverrides.teams_join_url = teamsJoinUrl;
+  }
+}
+
 function sanitizeMeetingId(input) {
   const text = String(input || "")
     .trim()
@@ -499,6 +568,7 @@ function persistDashboardMeetings() {
 
 function loadDashboardState() {
   dashboardMeetings = mergeMeetingsById(readJsonStorage("if.desktop.dashboard.meetings", []));
+  uiDensity = normalizedUiDensity(readJsonStorage("if.desktop.ui_density", "comfort"));
   const graphConfig = readJsonStorage("if.desktop.graph.config", null);
   if (graphConfig?.clientId && graphClientIdEl) {
     graphClientIdEl.value = graphConfig.clientId;
@@ -550,6 +620,9 @@ function applyMeetingToSession(meeting) {
   if (meetingIdEl) {
     meetingIdEl.value = meetingId;
   }
+  updateSessionConfigOverrides({
+    teams_join_url: String(meeting?.join_url || "").trim()
+  });
   const participants = Array.isArray(meeting?.participants) ? meeting.participants : [];
   const names = participants
     .map((entry) => (typeof entry === "string" ? entry : entry?.name))
@@ -774,13 +847,186 @@ async function anchorMemoToLastUtterance() {
   logLine(`Memo anchor set to utterance ${picked.utterance_id}`);
 }
 
+function openEvidenceModal(payload) {
+  selectedClaimContext = payload?.claim || null;
+  if (btnRegenerateClaim) {
+    btnRegenerateClaim.disabled = !selectedClaimContext;
+  }
+  if (evidenceModalContentEl) {
+    const lines = [];
+    const evidence = payload?.evidence || null;
+    const claim = payload?.claim || null;
+    if (claim) {
+      lines.push(`Claim: ${claim.text || "-"}`);
+      lines.push(`Person: ${claim.person_key || "-"}`);
+      lines.push(`Dimension: ${claim.dimension || "-"}`);
+      lines.push(`Type: ${claim.claim_type || "-"}`);
+      lines.push("");
+    }
+    if (evidence) {
+      const start = Number(evidence?.time_range_ms?.[0]);
+      const end = Number(evidence?.time_range_ms?.[1]);
+      lines.push(`Evidence ID: ${evidence.evidence_id || "-"}`);
+      lines.push(`Speaker: ${evidence?.speaker?.display_name || evidence?.speaker?.cluster_id || "unknown"}`);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        lines.push(`Time: ${toClock(start)} - ${toClock(end)}`);
+      }
+      lines.push(`Quote: ${String(evidence.quote || "").trim() || "-"}`);
+      lines.push("");
+    }
+    const contextItems = Array.isArray(payload?.context) ? payload.context : [];
+    if (contextItems.length > 0) {
+      lines.push("Context:");
+      for (const item of contextItems) {
+        const startMs = Number(item?.start_ms);
+        const endMs = Number(item?.end_ms);
+        const speaker = String(item?.speaker_name || item?.cluster_id || item?.stream_role || "unknown");
+        const quote = String(item?.text || "").trim();
+        lines.push(`[${toClock(startMs)}-${toClock(endMs)}] ${speaker}: ${quote}`);
+      }
+    } else {
+      lines.push("Context: no transcript context available.");
+    }
+    evidenceModalContentEl.textContent = lines.join("\n");
+  }
+  if (evidenceModalEl) {
+    evidenceModalEl.classList.remove("hidden");
+    evidenceModalEl.setAttribute("aria-hidden", "false");
+  }
+}
+
+function closeEvidenceModal() {
+  selectedClaimContext = null;
+  if (btnRegenerateClaim) {
+    btnRegenerateClaim.disabled = true;
+  }
+  if (evidenceModalEl) {
+    evidenceModalEl.classList.add("hidden");
+    evidenceModalEl.setAttribute("aria-hidden", "true");
+  }
+}
+
+function findClaimFromReport(report, personKey, dimension, claimType, claimId) {
+  if (!report) return null;
+  if (!personKey || !dimension || !claimType) return null;
+  const people = Array.isArray(report?.per_person) ? report.per_person : [];
+  const person = people.find((item) => String(item?.person_key || "") === personKey);
+  if (!person) return null;
+  const dim = Array.isArray(person?.dimensions)
+    ? person.dimensions.find((item) => String(item?.dimension || "") === dimension)
+    : null;
+  if (!dim) return null;
+  const claims = Array.isArray(dim?.[claimType]) ? dim[claimType] : [];
+  if (!claims.length) return null;
+  const claim = claimId
+    ? claims.find((item) => String(item?.claim_id || "") === claimId) || claims[0]
+    : claims[0];
+  if (!claim) return null;
+  return {
+    claim_id: claim.claim_id,
+    text: claim.text,
+    claim_type: claimType,
+    person_key: person.person_key,
+    dimension: dim.dimension
+  };
+}
+
+function transcriptContextForEvidence(report, evidenceId, size = 1) {
+  if (!report || !evidenceId) return [];
+  const evidence = Array.isArray(report?.evidence)
+    ? report.evidence.find((item) => String(item?.evidence_id || "") === evidenceId)
+    : null;
+  if (!evidence) return [];
+  const transcript = Array.isArray(report?.transcript) ? report.transcript : [];
+  if (!transcript.length) return [];
+  const utteranceIds = Array.isArray(evidence.utterance_ids) ? evidence.utterance_ids : [];
+  const anchorIdx = transcript.findIndex((item) => utteranceIds.includes(item.utterance_id));
+  if (anchorIdx < 0) {
+    return [];
+  }
+  const startIdx = Math.max(0, anchorIdx - size);
+  const endIdx = Math.min(transcript.length - 1, anchorIdx + size);
+  return transcript.slice(startIdx, endIdx + 1);
+}
+
+function handleEvidenceChipClick(buttonEl) {
+  const report = latestFeedbackReport;
+  if (!report) return;
+  const evidenceId = String(buttonEl.dataset.evidenceId || "").trim();
+  if (!evidenceId) return;
+  const evidence = Array.isArray(report?.evidence)
+    ? report.evidence.find((item) => String(item?.evidence_id || "") === evidenceId)
+    : null;
+  const personKey = String(buttonEl.dataset.personKey || "").trim();
+  const dimension = String(buttonEl.dataset.dimension || "").trim();
+  const claimType = String(buttonEl.dataset.claimType || "").trim();
+  const claimId = String(buttonEl.dataset.claimId || "").trim();
+  const claim = findClaimFromReport(report, personKey, dimension, claimType, claimId);
+  const context = transcriptContextForEvidence(report, evidenceId, 1);
+  openEvidenceModal({
+    evidence,
+    claim,
+    context
+  });
+}
+
+function chipHtml({
+  evidenceId,
+  personKey,
+  dimension,
+  claimType,
+  claimId
+}) {
+  return `<button type="button" class="evidence-chip" data-evidence-id="${escapeHtml(evidenceId)}" data-person-key="${escapeHtml(
+    personKey || ""
+  )}" data-dimension="${escapeHtml(dimension || "")}" data-claim-type="${escapeHtml(
+    claimType || ""
+  )}" data-claim-id="${escapeHtml(claimId || "")}">${escapeHtml(evidenceId)}</button>`;
+}
+
+function renderClaimRows(person, dimension, claimType, claims) {
+  const titleMap = {
+    strengths: "Strengths",
+    risks: "Risks",
+    actions: "Actions"
+  };
+  const rows = claims
+    .map((claim) => {
+      const refs = Array.isArray(claim?.evidence_refs) ? claim.evidence_refs : [];
+      const chips = refs
+        .map((id) =>
+          chipHtml({
+            evidenceId: String(id),
+            personKey: person.person_key,
+            dimension: dimension.dimension,
+            claimType,
+            claimId: claim.claim_id
+          })
+        )
+        .join("");
+      return `
+        <div class="claim-row">
+          <div class="muted small">${escapeHtml(titleMap[claimType])}</div>
+          <div>
+            <div>${escapeHtml(claim?.text || "")}</div>
+            <div class="claim-chip-group">${chips || "<span class='muted small'>No evidence</span>"}</div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+  return rows || `<div class="muted small">No ${escapeHtml(titleMap[claimType])} claims.</div>`;
+}
+
 function renderReportV2(payload) {
+  const report = payload?.report?.session ? payload.report : payload;
+  latestFeedbackReport = report;
   if (!reportV2El) return;
   reportV2El.textContent = JSON.stringify(payload, null, 2);
 
-  const overall = payload?.overall || {};
-  const people = Array.isArray(payload?.per_person) ? payload.per_person : [];
-  const evidenceItems = Array.isArray(payload?.evidence) ? payload.evidence : [];
+  const overall = report?.overall || {};
+  const people = Array.isArray(report?.per_person) ? report.per_person : [];
+  const evidenceItems = Array.isArray(report?.evidence) ? report.evidence : [];
   const evidenceById = new Map();
   for (const item of evidenceItems) {
     if (item?.evidence_id) {
@@ -793,21 +1039,32 @@ function renderReportV2(payload) {
     const sectionHtml = sections
       .map((section) => {
         const bullets = Array.isArray(section?.bullets) ? section.bullets : [];
+        const evidenceIds = Array.isArray(section?.evidence_ids) ? section.evidence_ids : [];
         const lines = bullets.map((bullet) => `<li>${escapeHtml(bullet)}</li>`).join("");
+        const chips = evidenceIds.map((id) => chipHtml({ evidenceId: String(id) })).join("");
         return `
           <article class="review-card">
             <strong>${escapeHtml(section?.topic || "topic")}</strong>
             <ul>${lines || "<li>No summary bullets.</li>"}</ul>
+            <div class="claim-chip-group">${chips || "<span class='muted small'>No evidence refs</span>"}</div>
           </article>
         `;
       })
       .join("");
+    const quality = payload?.quality || report?.quality || {};
+    const timings = payload?.timings || {};
     reviewOverallEl.innerHTML = `
       <div class="review-section">
         <div class="review-card">
           <strong>Session</strong>
-          <div>session_id=${escapeHtml(payload?.session?.session_id || "-")}</div>
-          <div>tentative=${escapeHtml(String(payload?.session?.tentative ?? false))}, unresolved=${escapeHtml(String(payload?.session?.unresolved_cluster_count ?? 0))}</div>
+          <div>session_id=${escapeHtml(report?.session?.session_id || "-")}</div>
+          <div>tentative=${escapeHtml(String(report?.session?.tentative ?? false))}, unresolved=${escapeHtml(
+      String(report?.session?.unresolved_cluster_count ?? 0)
+    )}</div>
+          <div class="muted small">quality.claims=${escapeHtml(String(quality?.claim_count ?? 0))} needs_evidence=${escapeHtml(
+      String(quality?.needs_evidence_count ?? 0)
+    )}</div>
+          <div class="muted small">timings(total=${escapeHtml(String(timings?.total_ms ?? 0))}ms)</div>
         </div>
         ${sectionHtml || "<div class='review-card'>No overall summary sections.</div>"}
       </div>
@@ -817,45 +1074,36 @@ function renderReportV2(payload) {
   if (reviewPerPersonEl) {
     const peopleHtml = people
       .map((person) => {
-        const scorecard = Array.isArray(person?.scorecard) ? person.scorecard : [];
-        const scoreHtml = scorecard
-          .map((entry) => {
-            const evidenceIds = Array.isArray(entry?.evidence_ids) ? entry.evidence_ids : [];
-            const evidenceSummary = evidenceIds
-              .map((id) => {
-                const item = evidenceById.get(String(id));
-                if (!item) return escapeHtml(String(id));
-                const range = Array.isArray(item?.time_range_ms) && item.time_range_ms.length === 2
-                  ? `${toClock(item.time_range_ms[0])}-${toClock(item.time_range_ms[1])}`
-                  : "--:--";
-                return `${escapeHtml(String(id))} @ ${range}`;
-              })
-              .join(", ");
+        const dimensions = Array.isArray(person?.dimensions) ? person.dimensions : [];
+        const dimensionHtml = dimensions
+          .map((dimension) => {
+            const strengths = Array.isArray(dimension?.strengths) ? dimension.strengths : [];
+            const risks = Array.isArray(dimension?.risks) ? dimension.risks : [];
+            const actions = Array.isArray(dimension?.actions) ? dimension.actions : [];
             return `
-              <div class="score-row">
-                <div><strong>${escapeHtml(entry?.dimension || "dimension")}</strong></div>
-                <div>${escapeHtml(String(entry?.score ?? "-"))}/5</div>
-                <div>
-                  <div>${escapeHtml(entry?.rationale || "")}</div>
-                  <div class="muted small">evidence: ${escapeHtml(evidenceSummary || "none")}</div>
-                </div>
-              </div>
+              <section class="dimension-block">
+                <strong>${escapeHtml(dimension?.dimension || "dimension")}</strong>
+                ${renderClaimRows(person, dimension, "strengths", strengths)}
+                ${renderClaimRows(person, dimension, "risks", risks)}
+                ${renderClaimRows(person, dimension, "actions", actions)}
+              </section>
             `;
           })
           .join("");
-
-        const strengths = (person?.strengths || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-        const risks = (person?.risks || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-        const nextActions = (person?.next_actions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-        const stats = person?.stats || {};
+        const summary = person?.summary || {};
+        const summaryStrengths = (summary.strengths || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+        const summaryRisks = (summary.risks || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+        const summaryActions = (summary.actions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
         return `
-          <article class="review-card">
-            <h3>${escapeHtml(person?.display_name || person?.person_key || person?.person_id || "Unknown")}</h3>
-            <div class="muted small">talk_time=${escapeHtml(String(stats?.talk_time_ms ?? 0))}ms turns=${escapeHtml(String(stats?.turns ?? 0))} interruptions=${escapeHtml(String(stats?.interruptions ?? 0))}</div>
-            ${scoreHtml || "<div class='muted'>No scorecard available.</div>"}
-            <div><strong>Strengths</strong><ul>${strengths || "<li>None</li>"}</ul></div>
-            <div><strong>Risks</strong><ul>${risks || "<li>None</li>"}</ul></div>
-            <div><strong>Next Actions</strong><ul>${nextActions || "<li>None</li>"}</ul></div>
+          <article class="review-person">
+            <h3>${escapeHtml(person?.display_name || person?.person_key || "Unknown")}</h3>
+            ${dimensionHtml || "<div class='muted'>No dimensions yet.</div>"}
+            <div class="review-card">
+              <strong>Summary</strong>
+              <div><strong>Strengths</strong><ul>${summaryStrengths || "<li>None</li>"}</ul></div>
+              <div><strong>Risks</strong><ul>${summaryRisks || "<li>None</li>"}</ul></div>
+              <div><strong>Actions</strong><ul>${summaryActions || "<li>None</li>"}</ul></div>
+            </div>
           </article>
         `;
       })
@@ -867,15 +1115,19 @@ function renderReportV2(payload) {
     const evidenceHtml = evidenceItems
       .slice(0, 200)
       .map((item) => {
-        const range = Array.isArray(item?.time_range_ms) && item.time_range_ms.length === 2
-          ? `${toClock(item.time_range_ms[0])}-${toClock(item.time_range_ms[1])}`
-          : "--:--";
+        const range =
+          Array.isArray(item?.time_range_ms) && item.time_range_ms.length === 2
+            ? `${toClock(item.time_range_ms[0])}-${toClock(item.time_range_ms[1])}`
+            : "--:--";
         const quote = item?.quote ? escapeHtml(String(item.quote)) : "";
+        const speakerLabel = item?.speaker?.display_name || item?.speaker?.cluster_id || "unknown";
+        const chip = chipHtml({ evidenceId: String(item?.evidence_id || "evidence") });
         return `
           <article class="review-card">
             <div><strong>${escapeHtml(item?.evidence_id || "evidence")}</strong> @ ${range}</div>
-            <div class="muted small">${escapeHtml(item?.speaker?.display_name || item?.speaker?.cluster_id || "unknown")}</div>
+            <div class="muted small">${escapeHtml(speakerLabel)}</div>
             <div>${quote || "<span class='muted'>No quote.</span>"}</div>
+            <div class="claim-chip-group">${chip}</div>
           </article>
         `;
       })
@@ -1007,6 +1259,227 @@ async function disconnectGraphCalendar() {
   logLine("Graph disconnected.");
 }
 
+async function createMeetingWithGraph() {
+  await saveGraphConfig();
+  const subject = String(dashboardMeetingTitleEl?.value || "").trim() || "Group Interview Session";
+  const startRaw = String(dashboardMeetingStartEl?.value || "").trim();
+  const startAt = startRaw ? new Date(startRaw).toISOString() : "";
+  const participants = parseParticipantLines(dashboardMeetingParticipantsEl?.value || "").map((name) => ({ name }));
+  const payload = await desktopAPI.calendarCreateOnlineMeeting({
+    subject,
+    startAt,
+    participants
+  });
+  dashboardMeetings = mergeMeetingsById([...dashboardMeetings, payload]);
+  persistDashboardMeetings();
+  renderMeetingList();
+  if (dashboardMeetingUrlEl) {
+    dashboardMeetingUrlEl.value = String(payload?.join_url || "");
+  }
+  if (payload?.join_url) {
+    updateSessionConfigOverrides({ teams_join_url: payload.join_url, mode: "group" });
+  }
+  logLine(`Graph online meeting created: ${payload?.meeting_id || "unknown"}`);
+  await refreshGraphStatus();
+  return payload;
+}
+
+function setFeedbackSlaText(message, warn = false) {
+  if (!flowFeedbackSlaEl) return;
+  flowFeedbackSlaEl.textContent = message;
+  flowFeedbackSlaEl.style.color = warn ? "#9b2f2f" : "";
+}
+
+function reportFromPayload(payload) {
+  if (!payload) return null;
+  if (payload.report && payload.report.session) return payload.report;
+  if (payload.session) return payload;
+  return null;
+}
+
+async function checkFeedbackReady() {
+  const payload = await desktopAPI.getFeedbackReady({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    sessionId: meetingIdValue()
+  });
+  const totalMs = Number(payload?.timings?.total_ms || 0);
+  const ready = Boolean(payload?.ready);
+  const statusText = `Ready=${ready} total=${totalMs}ms / target<=3000ms`;
+  setFeedbackSlaText(statusText, !ready || totalMs > 3000);
+  setResultPayload(payload);
+  logLine(`feedback-ready checked: ready=${ready} total_ms=${totalMs}`);
+  return payload;
+}
+
+async function openFeedbackReport() {
+  const openedAt = Date.now();
+  const payload = await desktopAPI.openFeedback({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    sessionId: meetingIdValue(),
+    body: {}
+  });
+  const serverMs = Number(payload?.opened_in_ms || 0);
+  const elapsedMs = serverMs > 0 ? serverMs : Date.now() - openedAt;
+  const ready = Boolean(payload?.ready);
+  setFeedbackSlaText(
+    `Opened in ${elapsedMs}ms / target<=3000ms / ready=${ready}`,
+    elapsedMs > 3000 || !ready
+  );
+  const report = reportFromPayload(payload);
+  if (!report) {
+    throw new Error("feedback-open returned no report payload");
+  }
+  renderReportV2(payload);
+  setResultPayload(payload);
+  openReviewPanel("overall");
+  logLine(`feedback-open completed in ${elapsedMs}ms`);
+  return payload;
+}
+
+function base64ToBytes(base64) {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function triggerDownload(fileName, bytes, mimeType) {
+  const blob = new Blob([bytes], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 5000);
+}
+
+async function copyTextToClipboard(content) {
+  const text = String(content || "");
+  if (!text) return false;
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const ok = document.execCommand("copy");
+  textarea.remove();
+  return ok;
+}
+
+async function exportFeedback(format) {
+  const payload = await desktopAPI.exportFeedback({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    sessionId: meetingIdValue(),
+    body: { format }
+  });
+  if (payload?.format === "plain_text") {
+    const copied = await copyTextToClipboard(payload.content || "");
+    if (!copied) {
+      throw new Error("failed to copy plain text report");
+    }
+    logLine("Feedback plain text copied to clipboard.");
+    setResultPayload({
+      export: "plain_text",
+      copied: true,
+      file_name: payload?.file_name || ""
+    });
+    return payload;
+  }
+  if (payload?.encoding === "utf-8") {
+    triggerDownload(payload.file_name || `feedback.${format === "markdown" ? "md" : "txt"}`, payload.content || "", payload.mime_type || "text/plain; charset=utf-8");
+    logLine(`Feedback exported: ${payload.file_name || "report"}`);
+    return payload;
+  }
+  if (payload?.encoding === "base64") {
+    const bytes = base64ToBytes(String(payload.content || ""));
+    triggerDownload(payload.file_name || "feedback.docx", bytes, payload.mime_type || "application/octet-stream");
+    logLine(`Feedback exported: ${payload.file_name || "feedback.docx"}`);
+    return payload;
+  }
+  throw new Error("unsupported export payload");
+}
+
+async function regenerateSelectedClaim() {
+  if (!selectedClaimContext) {
+    throw new Error("no claim selected");
+  }
+  const defaultHint = String(selectedClaimContext.text || "").trim();
+  const hint = window.prompt("Optional hint for this claim regeneration:", defaultHint);
+  const payload = await desktopAPI.regenerateFeedbackClaim({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    sessionId: meetingIdValue(),
+    body: {
+      person_key: selectedClaimContext.person_key,
+      dimension: selectedClaimContext.dimension,
+      claim_type: selectedClaimContext.claim_type,
+      claim_id: selectedClaimContext.claim_id,
+      text_hint: hint === null ? undefined : String(hint || "").trim()
+    }
+  });
+  await openFeedbackReport();
+  logLine(`Claim regenerated: person=${selectedClaimContext.person_key} dimension=${selectedClaimContext.dimension}`);
+  return payload;
+}
+
+async function handleDeepLinkStart(payload) {
+  const sessionId = sanitizeMeetingId(payload?.session_id || meetingIdValue());
+  if (meetingIdEl) {
+    meetingIdEl.value = sessionId;
+  }
+  const mode = String(payload?.mode || "").trim();
+  const templateId = String(payload?.template_id || "").trim();
+  const bookingRef = String(payload?.booking_ref || "").trim();
+  const teamsJoinUrl = String(payload?.teams_join_url || "").trim();
+  updateSessionConfigOverrides({
+    mode,
+    template_id: templateId,
+    booking_ref: bookingRef,
+    teams_join_url: teamsJoinUrl
+  });
+  const participants = Array.isArray(payload?.participants) ? payload.participants : [];
+  const names = participants
+    .map((item) => (typeof item === "string" ? item : item?.name))
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (names.length > 0) {
+    setParticipantsInUI(names);
+  }
+  const item = {
+    source: "deeplink",
+    meeting_id: sessionId,
+    title: bookingRef || templateId || sessionId,
+    start_at: new Date().toISOString(),
+    end_at: "",
+    join_url: teamsJoinUrl,
+    participants: names.map((name) => ({ name }))
+  };
+  dashboardMeetings = mergeMeetingsById([...dashboardMeetings, item]);
+  persistDashboardMeetings();
+  renderMeetingList();
+  await saveSessionConfig({
+    mode,
+    template_id: templateId,
+    booking_ref: bookingRef,
+    teams_join_url: teamsJoinUrl
+  });
+  if (teamsJoinUrl) {
+    await desktopAPI.openExternalUrl({ url: teamsJoinUrl });
+  }
+  setAppMode("session");
+  setUploadStatus("Session initialized by deep link. Start audio and upload when Teams call is ready.");
+  logLine(`Deep link loaded: session=${sessionId} mode=${mode || "1v1"} participants=${names.length}`);
+}
+
 function addMeetingFromDashboardForm() {
   const title = String(dashboardMeetingTitleEl?.value || "").trim();
   if (!title) {
@@ -1024,6 +1497,9 @@ function addMeetingFromDashboardForm() {
     join_url: String(dashboardMeetingUrlEl?.value || "").trim(),
     participants
   };
+  if (item.join_url) {
+    updateSessionConfigOverrides({ teams_join_url: item.join_url });
+  }
   dashboardMeetings = mergeMeetingsById([...dashboardMeetings, item]);
   persistDashboardMeetings();
   renderMeetingList();
@@ -2426,17 +2902,27 @@ async function applyClusterMappingFromButton(buttonEl) {
   logLine(`Cluster mapped: ${clusterId} -> ${participantName} lock=${Boolean(lockEl?.checked)}`);
 }
 
-async function saveSessionConfig() {
+async function saveSessionConfig(overrides = {}) {
+  updateSessionConfigOverrides(overrides);
   const names = effectiveInterviewerNames();
+  const participants = validateParticipantsInput();
   const body = {
-    teams_participants: validateParticipantsInput(),
+    participants,
+    teams_participants: participants,
     teams_interviewer_name: names.teamsInterviewerName,
     interviewer_name: names.interviewerName,
-    diarization_backend: effectiveDiarizationBackend()
+    diarization_backend: effectiveDiarizationBackend(),
+    mode: sessionConfigOverrides.mode || undefined,
+    template_id: sessionConfigOverrides.template_id || undefined,
+    booking_ref: sessionConfigOverrides.booking_ref || undefined,
+    teams_join_url: sessionConfigOverrides.teams_join_url || undefined
   };
   const payload = await apiRequest("config", "POST", body);
   setResultPayload(payload);
   logLine(`Session config saved. roster_count=${payload.roster_count || 0}`);
+  if (flowStageLabelEl && sessionConfigOverrides.mode) {
+    flowStageLabelEl.textContent = `Mode: ${sessionConfigOverrides.mode.toUpperCase()} | Stage: Q1 in progress`;
+  }
 }
 
 async function refreshLiveView() {
@@ -2680,11 +3166,15 @@ function bindEvents() {
 
       if (action === "start") {
         applyMeetingToSession(meeting);
+        if (meeting?.join_url) {
+          await desktopAPI.openExternalUrl({ url: String(meeting.join_url) });
+        }
         const status = await requestAttachToTeams();
         if (status?.status === "attached") {
           setAppMode("session");
         } else {
-          throw new Error(`Teams attach required before session. status=${status?.status || "unknown"}`);
+          setAppMode("session");
+          setUploadStatus(`Waiting for Teams attach. status=${status?.status || "unknown"}`);
         }
         await refreshLiveView().catch(() => {
           // ignore initial fetch failures
@@ -2753,6 +3243,18 @@ function bindEvents() {
     });
   }
 
+  if (btnGraphCreateMeeting) {
+    btnGraphCreateMeeting.addEventListener("click", async () => {
+      try {
+        const meeting = await createMeetingWithGraph();
+        applyMeetingToSession(meeting);
+      } catch (error) {
+        logLine(`Graph create meeting failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
   if (btnGraphDisconnect) {
     btnGraphDisconnect.addEventListener("click", async () => {
       try {
@@ -2770,6 +3272,12 @@ function bindEvents() {
     });
   }
 
+  if (btnUiDensity) {
+    btnUiDensity.addEventListener("click", () => {
+      toggleUiDensity();
+    });
+  }
+
   for (const button of debugTabButtons) {
     button.addEventListener("click", () => {
       const tabName = String(button.dataset.debugTabBtn || "logs");
@@ -2782,6 +3290,56 @@ function bindEvents() {
       openReviewPanel(currentReviewTab || "overall");
     });
   }
+  if (btnFeedbackReady) {
+    btnFeedbackReady.addEventListener("click", async () => {
+      try {
+        await checkFeedbackReady();
+      } catch (error) {
+        logLine(`Feedback-ready failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+  if (btnOpenFeedback) {
+    btnOpenFeedback.addEventListener("click", async () => {
+      try {
+        await openFeedbackReport();
+      } catch (error) {
+        logLine(`Open feedback failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+  if (btnFeedbackExportText) {
+    btnFeedbackExportText.addEventListener("click", async () => {
+      try {
+        await exportFeedback("plain_text");
+      } catch (error) {
+        logLine(`Export plain text failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+  if (btnFeedbackExportMd) {
+    btnFeedbackExportMd.addEventListener("click", async () => {
+      try {
+        await exportFeedback("markdown");
+      } catch (error) {
+        logLine(`Export markdown failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+  if (btnFeedbackExportDocx) {
+    btnFeedbackExportDocx.addEventListener("click", async () => {
+      try {
+        await exportFeedback("docx");
+      } catch (error) {
+        logLine(`Export docx failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
   if (reviewTabOverallBtn) {
     reviewTabOverallBtn.addEventListener("click", () => openReviewPanel("overall"));
   }
@@ -2790,6 +3348,37 @@ function bindEvents() {
   }
   if (reviewTabEvidenceBtn) {
     reviewTabEvidenceBtn.addEventListener("click", () => openReviewPanel("evidence"));
+  }
+  if (reviewPanelEl) {
+    reviewPanelEl.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const chip = target.closest(".evidence-chip");
+      if (!(chip instanceof HTMLElement)) return;
+      handleEvidenceChipClick(chip);
+    });
+  }
+
+  if (evidenceModalCloseEl) {
+    evidenceModalCloseEl.addEventListener("click", () => {
+      closeEvidenceModal();
+    });
+  }
+  if (btnEvidenceModalClose) {
+    btnEvidenceModalClose.addEventListener("click", () => {
+      closeEvidenceModal();
+    });
+  }
+  if (btnRegenerateClaim) {
+    btnRegenerateClaim.addEventListener("click", async () => {
+      try {
+        await regenerateSelectedClaim();
+        closeEvidenceModal();
+      } catch (error) {
+        logLine(`Regenerate claim failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
   }
 
   btnInitMic.addEventListener("click", async () => {
@@ -3044,11 +3633,26 @@ function bindEvents() {
       }
     });
   }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && evidenceModalEl && !evidenceModalEl.classList.contains("hidden")) {
+      closeEvidenceModal();
+    }
+  });
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
   try {
+    if (typeof desktopAPI.onDeepLinkStart === "function") {
+      deepLinkUnsubscribe = desktopAPI.onDeepLinkStart((payload) => {
+        handleDeepLinkStart(payload).catch((error) => {
+          logLine(`Deep link handling failed: ${error.message}`);
+          setResultPayload({ error: error.message });
+        });
+      });
+    }
     loadDashboardState();
+    applyUiDensity(uiDensity);
     renderMeetingList();
     if (participantRows().length === 0) {
       addParticipantRow();
@@ -3061,6 +3665,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     updateButtons();
     await renderRuntimeInfo();
     bindEvents();
+    if (btnRegenerateClaim) {
+      btnRegenerateClaim.disabled = true;
+    }
     if (graphClientIdEl?.value) {
       await desktopAPI.calendarSetConfig({
         clientId: String(graphClientIdEl.value || "").trim(),
@@ -3094,6 +3701,14 @@ window.addEventListener("DOMContentLoaded", async () => {
 window.addEventListener("beforeunload", () => {
   suppressAutoRecover = true;
   clearRecordingTimer();
+  if (typeof deepLinkUnsubscribe === "function") {
+    try {
+      deepLinkUnsubscribe();
+    } catch {
+      // noop
+    }
+    deepLinkUnsubscribe = null;
+  }
 
   if (meterFrameId) {
     window.cancelAnimationFrame(meterFrameId);

@@ -15,9 +15,11 @@ const { TeamsWindowTracker } = require('./lib/teamsWindowTracker');
 const { GraphCalendarClient } = require('./lib/graphCalendar');
 
 const APP_TITLE = 'Interview Feedback Desktop (Phase 2.3)';
+const CUSTOM_PROTOCOL = 'interviewfeedback';
 let preferredDisplaySourceId = null;
 let mainWindow = null;
 let windowMode = 'dashboard';
+let pendingDeepLinkPayload = null;
 
 function logDesktop(message, details = null) {
   const stamp = new Date().toISOString();
@@ -46,6 +48,79 @@ const teamsWindowTracker = new TeamsWindowTracker({
   pollMs: 400,
   log: (message, details) => logDesktop(`[teams-attach] ${message}`, details)
 });
+
+function parseDeepLink(rawUrl) {
+  const url = new URL(String(rawUrl || ""));
+  if (url.protocol !== `${CUSTOM_PROTOCOL}:`) {
+    throw new Error(`unsupported protocol: ${url.protocol}`);
+  }
+  const participantsB64 = String(
+    url.searchParams.get("participants_b64") ||
+    url.searchParams.get("participants") ||
+    ""
+  ).trim();
+  let participants = [];
+  if (participantsB64) {
+    try {
+      let decoded = participantsB64;
+      if (!participantsB64.startsWith("[") && !participantsB64.startsWith("{")) {
+        decoded = Buffer.from(participantsB64, "base64").toString("utf8");
+      }
+      const parsed = JSON.parse(decoded);
+      if (Array.isArray(parsed)) {
+        participants = parsed;
+      }
+    } catch (error) {
+      logDesktop("[deep-link] participants decode failed", { error: error?.message || String(error) });
+    }
+  }
+  const candidateName = String(
+    url.searchParams.get("candidate_name") ||
+    url.searchParams.get("candidate_display_name") ||
+    ""
+  ).trim();
+  if (candidateName && participants.length === 0) {
+    participants = [{ name: candidateName }];
+  }
+  return {
+    raw_url: rawUrl,
+    session_id: String(url.searchParams.get("session_id") || "").trim(),
+    mode: String(url.searchParams.get("mode") || "").trim() || "1v1",
+    teams_join_url: String(url.searchParams.get("teams_join_url") || "").trim(),
+    template_id: String(url.searchParams.get("template_id") || "").trim(),
+    booking_ref: String(url.searchParams.get("booking_ref") || "").trim(),
+    return_url: String(url.searchParams.get("return_url") || "").trim(),
+    participants
+  };
+}
+
+function dispatchDeepLink(payload) {
+  if (!payload) return;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    pendingDeepLinkPayload = payload;
+    return;
+  }
+  if (!mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send("deeplink:start", payload);
+    pendingDeepLinkPayload = null;
+    return;
+  }
+  pendingDeepLinkPayload = payload;
+}
+
+function handleDeepLink(rawUrl) {
+  try {
+    const payload = parseDeepLink(rawUrl);
+    dispatchDeepLink(payload);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  } catch (error) {
+    logDesktop("[deep-link] parse failed", { rawUrl, error: error?.message || String(error) });
+  }
+}
 
 function base64ToInt16(contentB64) {
   const buf = Buffer.from(String(contentB64 || ''), 'base64');
@@ -110,6 +185,27 @@ async function requestJson(url, init = {}) {
   };
 }
 
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    const deepLinkArg = argv.find((arg) => typeof arg === "string" && arg.startsWith(`${CUSTOM_PROTOCOL}://`));
+    if (deepLinkArg) {
+      handleDeepLink(deepLinkArg);
+    } else if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+app.on("open-url", (event, rawUrl) => {
+  event.preventDefault();
+  handleDeepLink(rawUrl);
+});
+
 function setWindowMode(nextMode) {
   const mode = nextMode === 'session' ? 'session' : 'dashboard';
   windowMode = mode;
@@ -163,6 +259,12 @@ function createWindow() {
 
   createdWindow.loadFile(path.join(__dirname, 'index.html'));
   createdWindow.setVisibleOnAllWorkspaces(false, { visibleOnFullScreen: false });
+  createdWindow.webContents.once("did-finish-load", () => {
+    if (pendingDeepLinkPayload) {
+      createdWindow.webContents.send("deeplink:start", pendingDeepLinkPayload);
+      pendingDeepLinkPayload = null;
+    }
+  });
 
   createdWindow.webContents.on('render-process-gone', (_event, details) => {
     logDesktop('[desktop] renderer process gone', details);
@@ -353,6 +455,95 @@ function registerIpcHandlers() {
     return response.data;
   });
 
+  ipcMain.handle('session:getFeedbackReady', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('session feedback-ready payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/feedback-ready`
+    );
+    if (!response.ok) {
+      throw new Error(`feedback-ready failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
+    }
+    return response.data;
+  });
+
+  ipcMain.handle('session:openFeedback', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('session feedback-open payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/feedback-open`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload.body || {})
+      }
+    );
+    if (!response.ok) {
+      throw new Error(`feedback-open failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
+    }
+    return response.data;
+  });
+
+  ipcMain.handle('session:regenerateFeedbackClaim', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('session feedback-regenerate payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/feedback-regenerate-claim`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload.body || {})
+      }
+    );
+    if (!response.ok) {
+      throw new Error(
+        `feedback-regenerate-claim failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`
+      );
+    }
+    return response.data;
+  });
+
+  ipcMain.handle('session:exportFeedback', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('session export payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/export`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload.body || {})
+      }
+    );
+    if (!response.ok) {
+      throw new Error(`feedback export failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
+    }
+    return response.data;
+  });
+
   ipcMain.handle('diarization:start', async (_event, payload) => {
     const options = payload && typeof payload === 'object' ? payload : {};
     return sidecar.start(options);
@@ -514,6 +705,18 @@ function registerIpcHandlers() {
     });
   });
 
+  ipcMain.handle('calendar:createOnlineMeeting', async (_event, payload) => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.createOnlineMeeting({
+      subject: String(payload?.subject || '').trim(),
+      startAt: String(payload?.startAt || '').trim(),
+      endAt: String(payload?.endAt || '').trim(),
+      participants: Array.isArray(payload?.participants) ? payload.participants : []
+    });
+  });
+
   ipcMain.handle('calendar:disconnectMicrosoft', async () => {
     if (!graphCalendar) {
       throw new Error('graph calendar is not initialized');
@@ -536,9 +739,26 @@ function registerIpcHandlers() {
       url
     };
   });
+
+  ipcMain.handle('system:openExternalUrl', async (_event, payload) => {
+    const target = String(payload?.url || '').trim();
+    if (!target) {
+      throw new Error('url is required');
+    }
+    await shell.openExternal(target);
+    return { ok: true, url: target };
+  });
 }
 
 app.whenReady().then(() => {
+  try {
+    if (!app.isDefaultProtocolClient(CUSTOM_PROTOCOL)) {
+      app.setAsDefaultProtocolClient(CUSTOM_PROTOCOL);
+    }
+  } catch (error) {
+    logDesktop('[deep-link] setAsDefaultProtocolClient failed', { error: error?.message || String(error) });
+  }
+
   graphCalendar = new GraphCalendarClient({
     cachePath: path.join(app.getPath('userData'), 'graph', 'token-cache.json'),
     clientId: process.env.MS_GRAPH_CLIENT_ID || '',
@@ -606,6 +826,10 @@ app.whenReady().then(() => {
 
   registerIpcHandlers();
   createWindow();
+  const deepLinkArg = process.argv.find((arg) => typeof arg === "string" && arg.startsWith(`${CUSTOM_PROTOCOL}://`));
+  if (deepLinkArg) {
+    handleDeepLink(deepLinkArg);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

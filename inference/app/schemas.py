@@ -271,21 +271,39 @@ class EvidenceRef(BaseModel):
         return value
 
 
-class ScorecardItem(BaseModel):
+class DimensionClaim(BaseModel):
+    claim_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=3000)
+    evidence_refs: list[str] = Field(min_length=1)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def validate_evidence_refs(cls, value: list[str]):
+        refs = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if not refs:
+            raise ValueError("each claim must include at least one evidence ref")
+        return refs
+
+
+class DimensionFeedback(BaseModel):
     dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
-    score: int = Field(ge=1, le=5)
-    rationale: str = Field(min_length=1, max_length=1200)
-    evidence_ids: list[str] = Field(default_factory=list)
+    strengths: list[DimensionClaim] = Field(min_length=1)
+    risks: list[DimensionClaim] = Field(min_length=1)
+    actions: list[DimensionClaim] = Field(min_length=1)
 
 
-class PersonFeedback(BaseModel):
-    person_key: str
-    display_name: str
-    scorecard: list[ScorecardItem]
+class PersonSummary(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
-    next_actions: list[str] = Field(default_factory=list)
-    stats: SpeakerStat
+    actions: list[str] = Field(default_factory=list)
+
+
+class PersonFeedbackItem(BaseModel):
+    person_key: str = Field(min_length=1, max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    dimensions: list[DimensionFeedback] = Field(min_length=1)
+    summary: PersonSummary = Field(default_factory=PersonSummary)
 
 
 class SummarySection(BaseModel):
@@ -314,7 +332,17 @@ class AnalysisReportRequest(BaseModel):
     locale: str = "zh-CN"
 
 
+class ReportQualityMeta(BaseModel):
+    generated_at: str
+    build_ms: int = Field(default=0, ge=0)
+    validation_ms: int = Field(default=0, ge=0)
+    claim_count: int = Field(default=0, ge=0)
+    invalid_claim_count: int = Field(default=0, ge=0)
+    needs_evidence_count: int = Field(default=0, ge=0)
+
+
 class AnalysisReportResponse(BaseModel):
     session_id: str
     overall: OverallFeedback
-    per_person: list[PersonFeedback] = Field(default_factory=list)
+    per_person: list[PersonFeedbackItem] = Field(default_factory=list, min_length=1)
+    quality: ReportQualityMeta | None = None

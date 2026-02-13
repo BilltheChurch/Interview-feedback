@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { PublicClientApplication } = require("@azure/msal-node");
 
-const DEFAULT_SCOPES = ["User.Read", "Calendars.Read"];
+const DEFAULT_SCOPES = ["User.Read", "Calendars.Read", "OnlineMeetings.ReadWrite"];
 
 function safeString(value) {
   return String(value || "").trim();
@@ -239,6 +239,66 @@ class GraphCalendarClient {
       source: "graph",
       count: meetings.length,
       meetings
+    };
+  }
+
+  async createOnlineMeeting(options = {}) {
+    const subject = safeString(options.subject) || "Interview Session";
+    const now = Date.now();
+    const startAt = safeString(options.startAt) || new Date(now + 5 * 60 * 1000).toISOString();
+    const endAt = safeString(options.endAt) || new Date(now + 65 * 60 * 1000).toISOString();
+    const participants = Array.isArray(options.participants) ? options.participants : [];
+
+    const token = await this._acquireAccessToken();
+    const response = await fetch("https://graph.microsoft.com/v1.0/me/onlineMeetings", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token.accessToken}`,
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        startDateTime: startAt,
+        endDateTime: endAt,
+        subject,
+        participants: participants.length
+          ? {
+              attendees: participants
+                .map((item) => {
+                  const email = safeString(item?.email);
+                  const name = safeString(item?.name);
+                  if (!email) return null;
+                  return {
+                    upn: email,
+                    identity: {
+                      user: {
+                        id: email,
+                        displayName: name || email
+                      }
+                    }
+                  };
+                })
+                .filter(Boolean)
+            }
+          : undefined
+      })
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Graph createOnlineMeeting failed: ${response.status} ${text.slice(0, 300)}`);
+    }
+    const item = await response.json();
+    const joinSettings = item?.joinMeetingIdSettings || {};
+    return {
+      source: "graph",
+      meeting_id: safeString(item?.id) || `graph-online-${Math.random().toString(36).slice(2, 10)}`,
+      title: safeString(item?.subject) || subject,
+      start_at: safeString(item?.startDateTime) || startAt,
+      end_at: safeString(item?.endDateTime) || endAt,
+      join_url: safeString(item?.joinWebUrl),
+      meeting_code: safeString(joinSettings?.joinMeetingId),
+      passcode: safeString(joinSettings?.passcode),
+      participants
     };
   }
 }

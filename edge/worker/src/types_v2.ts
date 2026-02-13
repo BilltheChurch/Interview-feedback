@@ -94,6 +94,40 @@ export interface EvidenceItem {
   confidence: number;
 }
 
+export interface DimensionClaim {
+  claim_id: string;
+  text: string;
+  evidence_refs: string[];
+  confidence: number;
+}
+
+export interface DimensionFeedback {
+  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+  strengths: DimensionClaim[];
+  risks: DimensionClaim[];
+  actions: DimensionClaim[];
+}
+
+export interface PersonFeedbackItem {
+  person_key: string;
+  display_name: string;
+  dimensions: DimensionFeedback[];
+  summary: {
+    strengths: string[];
+    risks: string[];
+    actions: string[];
+  };
+}
+
+export interface ReportQualityMeta {
+  generated_at: string;
+  build_ms: number;
+  validation_ms: number;
+  claim_count: number;
+  invalid_claim_count: number;
+  needs_evidence_count: number;
+}
+
 export interface SpeakerStatItem {
   speaker_key: string;
   speaker_name?: string | null;
@@ -128,7 +162,8 @@ export interface ResultV2 {
   memos: MemoItem[];
   evidence: EvidenceItem[];
   overall: unknown;
-  per_person: unknown[];
+  per_person: PersonFeedbackItem[];
+  quality: ReportQualityMeta;
   trace: {
     finalize_job_id: string;
     model_versions: Record<string, string>;

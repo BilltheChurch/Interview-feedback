@@ -110,6 +110,7 @@
               <button id="btn-graph-save-config" type="button">Save Graph Config</button>
               <button id="btn-graph-connect" type="button">Connect Microsoft</button>
               <button id="btn-graph-sync" type="button">Sync Upcoming Meetings</button>
+              <button id="btn-graph-create-meeting" type="button">Create Group Meeting</button>
               <button id="btn-graph-disconnect" type="button">Disconnect</button>
             </div>
 
@@ -139,6 +140,7 @@
               <p class="muted small">Attached workflow during active Teams meeting</p>
             </div>
             <div class="actions compact">
+              <button id="btn-ui-density" type="button">Density: Comfort</button>
               <button id="btn-back-dashboard" type="button">Dashboard</button>
               <button id="btn-save-session-config" type="button">Save Config</button>
             </div>
@@ -154,9 +156,34 @@
         </header>
 
         <section class="session-stack">
+          <section class="panel flow-panel">
+            <div class="panel-header">
+              <h2>Flow</h2>
+              <span class="muted small">Question progress + instant feedback access</span>
+            </div>
+            <div class="flow-grid">
+              <div class="flow-card">
+                <strong>Question Stage</strong>
+                <div id="flow-stage-label" class="muted">Q1 in progress</div>
+              </div>
+              <div class="flow-card">
+                <strong>Session Timer</strong>
+                <div id="flow-session-timer" class="muted">00:00</div>
+              </div>
+              <div class="flow-card">
+                <strong>Feedback SLA</strong>
+                <div id="flow-feedback-sla" class="muted">Target: <= 3s full report</div>
+              </div>
+            </div>
+            <div class="actions wrap">
+              <button id="btn-feedback-ready" type="button">Check Feedback Ready</button>
+              <button id="btn-open-feedback" type="button" class="primary">Open Feedback (<=3s)</button>
+            </div>
+          </section>
+
           <section class="panel memo-panel">
             <div class="panel-header">
-              <h2>Memos</h2>
+              <h2>Notes &amp; Marks</h2>
               <span class="muted small">Structured notes become report evidence.</span>
             </div>
             <div class="field-grid field-grid-2">
@@ -188,7 +215,7 @@
 
           <section class="panel signal-panel">
             <div class="panel-header">
-              <h2>Recording Signal</h2>
+              <h2>Signals</h2>
               <span class="muted small">Waveform / health / quick checks</span>
             </div>
             <p id="capture-health" class="muted">Capture health initializing...</p>
@@ -219,8 +246,8 @@
 
           <section class="panel participant-panel">
             <div class="panel-header">
-              <h2>Participants</h2>
-              <span class="muted small">Speaking + engagement</span>
+              <h2>Enrollment</h2>
+              <span class="muted small">Speaker mapping + participation</span>
             </div>
 
             <div class="field participants-field">
@@ -243,7 +270,10 @@
 
         <footer class="bottom-strip panel">
           <div class="actions wrap">
-            <button id="btn-finalize-v2" type="button" class="primary">Finish &amp; Generate Report</button>
+            <button id="btn-finalize-v2" type="button">Finalize V2 (Background)</button>
+            <button id="btn-feedback-export-text" type="button">Copy Plain Text</button>
+            <button id="btn-feedback-export-md" type="button">Export Markdown</button>
+            <button id="btn-feedback-export-docx" type="button">Export DOCX</button>
             <button id="btn-open-review" type="button">Review</button>
             <button id="btn-toggle-debug" type="button">Debug</button>
             <button id="btn-refresh-live" type="button">Refresh Live View</button>
@@ -274,6 +304,20 @@
           <div id="review-per-person" class="review-tab hidden"></div>
           <div id="review-evidence" class="review-tab hidden"></div>
           <pre id="report-v2" class="result-box hidden">No report yet.</pre>
+        </section>
+
+        <section id="evidence-modal" class="evidence-modal hidden" aria-hidden="true">
+          <div class="evidence-modal-backdrop" id="evidence-modal-close"></div>
+          <article class="evidence-modal-card panel">
+            <div class="panel-header">
+              <h2>Evidence Detail</h2>
+              <button id="btn-evidence-modal-close" type="button">Close</button>
+            </div>
+            <pre id="evidence-modal-content" class="status-box">No evidence selected.</pre>
+            <div class="actions wrap">
+              <button id="btn-regenerate-claim" type="button">Regenerate Claim</button>
+            </div>
+          </article>
         </section>
 
         <section id="debug-drawer" class="panel debug-drawer">

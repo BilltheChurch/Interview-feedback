@@ -1,8 +1,26 @@
 import { DurableObject } from "cloudflare:workers";
-import { attachEvidenceToMemos, buildEvidence, buildResultV2, computeSpeakerStats } from "./finalize_v2";
+import {
+  attachEvidenceToMemos,
+  buildEvidence,
+  buildMemoFirstReport,
+  buildReportExportMarkdown,
+  buildReportExportText,
+  buildResultV2,
+  computeSpeakerStats,
+  validatePersonFeedbackEvidence
+} from "./finalize_v2";
+import type { TranscriptItem } from "./finalize_v2";
 import { filterMemos, nextMemoId, parseMemoPayload } from "./memos";
 import { emptySpeakerLogs, mergeSpeakerLogs, parseSpeakerLogsPayload } from "./speaker_logs";
-import type { FinalizeV2Status, MemoItem, SpeakerLogs } from "./types_v2";
+import type {
+  FinalizeV2Status,
+  MemoItem,
+  PersonFeedbackItem,
+  ReportQualityMeta,
+  ResultV2,
+  SpeakerStatItem,
+  SpeakerLogs
+} from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
 const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
@@ -83,10 +101,15 @@ interface SessionState {
 }
 
 interface SessionConfigRequest {
+  participants?: Array<RosterEntry | string>;
   teams_participants?: Array<RosterEntry | string>;
   teams_interviewer_name?: string;
   interviewer_name?: string;
   diarization_backend?: "cloud" | "edge";
+  mode?: "1v1" | "group";
+  template_id?: string;
+  booking_ref?: string;
+  teams_join_url?: string;
 }
 
 interface CaptureState {
@@ -179,6 +202,19 @@ interface FinalizeRequest {
   metadata?: Record<string, unknown>;
 }
 
+interface FeedbackRegenerateClaimRequest {
+  person_key: string;
+  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+  claim_type: "strengths" | "risks" | "actions";
+  claim_id?: string;
+  text_hint?: string;
+}
+
+interface FeedbackExportRequest {
+  format?: "plain_text" | "markdown" | "docx";
+  file_name?: string;
+}
+
 interface IngestState {
   meeting_id: string;
   last_seq: number;
@@ -221,6 +257,25 @@ interface UtteranceMerged {
   asr_provider: "dashscope";
   created_at: string;
   source_utterance_ids: string[];
+}
+
+interface FeedbackTimings {
+  assemble_ms: number;
+  validation_ms: number;
+  persist_ms: number;
+  total_ms: number;
+}
+
+interface FeedbackCache {
+  session_id: string;
+  updated_at: string;
+  ready: boolean;
+  person_summary_cache: PersonFeedbackItem[];
+  overall_summary_cache: unknown;
+  evidence_index_cache: Record<string, string[]>;
+  report: ResultV2 | null;
+  quality: ReportQualityMeta;
+  timings: FeedbackTimings;
 }
 
 interface AsrState {
@@ -352,7 +407,38 @@ const DEFAULT_STATE: SessionState = {
   enrollment_state: buildDefaultEnrollmentState()
 };
 
-const SESSION_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result)$/;
+function emptyReportQualityMeta(nowIso: string): ReportQualityMeta {
+  return {
+    generated_at: nowIso,
+    build_ms: 0,
+    validation_ms: 0,
+    claim_count: 0,
+    invalid_claim_count: 0,
+    needs_evidence_count: 0
+  };
+}
+
+function emptyFeedbackCache(sessionId: string, nowIso: string): FeedbackCache {
+  return {
+    session_id: sessionId,
+    updated_at: nowIso,
+    ready: false,
+    person_summary_cache: [],
+    overall_summary_cache: {},
+    evidence_index_cache: {},
+    report: null,
+    quality: emptyReportQualityMeta(nowIso),
+    timings: {
+      assemble_ms: 0,
+      validation_ms: 0,
+      persist_ms: 0,
+      total_ms: 0
+    }
+  };
+}
+
+const SESSION_ROUTE_REGEX =
+  /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|export)$/;
 const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state)$/;
 const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
 const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
@@ -369,6 +455,7 @@ const STORAGE_KEY_FINALIZE_LOCK = "finalize_lock";
 const STORAGE_KEY_MEMOS = "memos";
 const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
 const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
+const STORAGE_KEY_FEEDBACK_CACHE = "feedback_cache";
 
 const STORAGE_KEY_INGEST_STATE = "ingest_state";
 const STORAGE_KEY_ASR_STATE = "asr_state";
@@ -386,6 +473,11 @@ const ONE_SECOND_PCM_BYTES = 32000;
 const INFERENCE_MAX_AUDIO_SECONDS = 30;
 const DASHSCOPE_DEFAULT_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const DASHSCOPE_DEFAULT_MODEL = "fun-asr-realtime-2025-11-07";
+const FEEDBACK_REFRESH_INTERVAL_MS = 10_000;
+const FEEDBACK_TOTAL_BUDGET_MS = 3_000;
+const FEEDBACK_ASSEMBLE_BUDGET_MS = 900;
+const FEEDBACK_VALIDATE_BUDGET_MS = 600;
+const FEEDBACK_PERSIST_FETCH_BUDGET_MS = 700;
 
 function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(payload), {
@@ -571,6 +663,145 @@ function tailPcm16BytesToWavForSeconds(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let j = 0; j < 8; j += 1) {
+      c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function encodeUtf8(input: string): Uint8Array {
+  return new TextEncoder().encode(input);
+}
+
+function makeZipStored(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+  const chunks: Uint8Array[] = [];
+  const centralChunks: Uint8Array[] = [];
+  let offset = 0;
+  for (const file of files) {
+    const nameBytes = encodeUtf8(file.name);
+    const fileData = file.data;
+    const crc = crc32(fileData);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, 0, true);
+    localView.setUint16(12, 0, true);
+    localView.setUint32(14, crc, true);
+    localView.setUint32(18, fileData.length, true);
+    localView.setUint32(22, fileData.length, true);
+    localView.setUint16(26, nameBytes.length, true);
+    localView.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+    chunks.push(localHeader, fileData);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, 0, true);
+    centralView.setUint16(14, 0, true);
+    centralView.setUint32(16, crc, true);
+    centralView.setUint32(20, fileData.length, true);
+    centralView.setUint32(24, fileData.length, true);
+    centralView.setUint16(28, nameBytes.length, true);
+    centralView.setUint16(30, 0, true);
+    centralView.setUint16(32, 0, true);
+    centralView.setUint16(34, 0, true);
+    centralView.setUint16(36, 0, true);
+    centralView.setUint32(38, 0, true);
+    centralView.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+    centralChunks.push(centralHeader);
+
+    offset += localHeader.length + fileData.length;
+  }
+
+  const centralSize = centralChunks.reduce((sum, item) => sum + item.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(4, 0, true);
+  endView.setUint16(6, 0, true);
+  endView.setUint16(8, files.length, true);
+  endView.setUint16(10, files.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+  endView.setUint16(20, 0, true);
+
+  return concatUint8Arrays([...chunks, ...centralChunks, end]);
+}
+
+function xmlEscape(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildDocxBytesFromText(content: string): Uint8Array {
+  const paragraphXml = content
+    .split(/\r?\n/)
+    .map((line) => `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(line)}</w:t></w:r></w:p>`)
+    .join("");
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+ xmlns:v="urn:schemas-microsoft-com:vml"
+ xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+ xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+ xmlns:w10="urn:schemas-microsoft-com:office:word"
+ xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+ xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"
+ xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+ xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"
+ xmlns:wne="http://schemas.microsoft.com/office/2006/wordml"
+ xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+ mc:Ignorable="w14 w15 wp14">
+ <w:body>${paragraphXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body>
+</w:document>`;
+  return makeZipStored([
+    { name: "[Content_Types].xml", data: encodeUtf8(contentTypes) },
+    { name: "_rels/.rels", data: encodeUtf8(rels) },
+    { name: "word/document.xml", data: encodeUtf8(documentXml) }
+  ]);
 }
 
 function toWebSocketHandshakeUrl(raw: string): string {
@@ -1284,6 +1515,18 @@ export default {
     if (action === "result" && request.method !== "GET") {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
+    if (action === "feedback-ready" && request.method !== "GET") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "feedback-open" && request.method !== "POST") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "feedback-regenerate-claim" && request.method !== "POST") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "export" && request.method !== "POST") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
 
     return proxyToDO(request, env, sessionId, action);
   }
@@ -1737,6 +1980,288 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   private async storeSpeakerLogs(logs: SpeakerLogs): Promise<void> {
     await this.ctx.storage.put(STORAGE_KEY_SPEAKER_LOGS, logs);
+  }
+
+  private async loadFeedbackCache(sessionId: string): Promise<FeedbackCache> {
+    const existing = await this.ctx.storage.get<FeedbackCache>(STORAGE_KEY_FEEDBACK_CACHE);
+    if (existing && existing.session_id === sessionId) {
+      return existing;
+    }
+    const created = emptyFeedbackCache(sessionId, this.currentIsoTs());
+    await this.ctx.storage.put(STORAGE_KEY_FEEDBACK_CACHE, created);
+    return created;
+  }
+
+  private async storeFeedbackCache(cache: FeedbackCache): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_FEEDBACK_CACHE, cache);
+    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, cache.updated_at);
+  }
+
+  private resolveStudentBindingForFeedback(
+    state: SessionState,
+    clusterId: string | null,
+    eventSpeakerName: string | null,
+    eventDecision: "auto" | "confirm" | "unknown" | null
+  ): { speaker_name: string | null; decision: "auto" | "confirm" | "unknown" | null } {
+    if (!clusterId) {
+      if (eventSpeakerName) {
+        return {
+          speaker_name: eventSpeakerName,
+          decision: eventDecision ?? "confirm"
+        };
+      }
+      return { speaker_name: null, decision: "unknown" };
+    }
+    const bound = state.bindings[clusterId] ?? null;
+    const meta = state.cluster_binding_meta[clusterId];
+    if (meta?.locked && bound) return { speaker_name: bound, decision: "auto" };
+    if (meta?.source === "manual_map" && bound) return { speaker_name: bound, decision: "auto" };
+    if (meta?.source === "enrollment_match" && bound) return { speaker_name: bound, decision: "auto" };
+    if (meta?.source === "name_extract" && bound) return { speaker_name: bound, decision: "confirm" };
+    if (bound) return { speaker_name: bound, decision: "auto" };
+    if (eventSpeakerName) {
+      return {
+        speaker_name: eventSpeakerName,
+        decision: eventDecision ?? "confirm"
+      };
+    }
+    return { speaker_name: null, decision: "unknown" };
+  }
+
+  private buildTranscriptForFeedback(
+    state: SessionState,
+    rawByStream: Record<StreamRole, UtteranceRaw[]>,
+    events: SpeakerEvent[],
+    speakerLogsStored: SpeakerLogs,
+    diarizationBackend: "cloud" | "edge"
+  ): TranscriptItem[] {
+    const eventByUtterance = new Map(
+      events
+        .filter((item) => item.stream_role === "students" && item.utterance_id)
+        .map((item) => [item.utterance_id as string, item])
+    );
+    const teacherEventByUtterance = new Map(
+      events
+        .filter((item) => item.stream_role === "teacher" && item.utterance_id)
+        .map((item) => [item.utterance_id as string, item])
+    );
+    const edgeTurns =
+      diarizationBackend === "edge"
+        ? [...speakerLogsStored.turns]
+            .filter((item) => item.stream_role === "students")
+            .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
+        : [];
+    const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
+      if (edgeTurns.length === 0) return null;
+      let bestCluster: string | null = null;
+      let bestOverlap = 0;
+      for (const turn of edgeTurns) {
+        const overlap = Math.min(endMs, turn.end_ms) - Math.max(startMs, turn.start_ms);
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          bestCluster = turn.cluster_id;
+        }
+      }
+      return bestOverlap > 0 ? bestCluster : null;
+    };
+
+    return [...rawByStream.teacher, ...rawByStream.students]
+      .map((item) => {
+        const event =
+          item.stream_role === "teacher"
+            ? teacherEventByUtterance.get(item.utterance_id)
+            : eventByUtterance.get(item.utterance_id);
+        const inferredStudentsCluster =
+          item.stream_role === "students" && diarizationBackend === "edge"
+            ? inferStudentsClusterFromEdgeTurns(item.start_ms, item.end_ms)
+            : null;
+        const clusterId =
+          event?.cluster_id ??
+          (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
+        const reconciled =
+          item.stream_role === "students"
+            ? this.resolveStudentBindingForFeedback(
+                state,
+                clusterId ?? null,
+                event?.speaker_name ?? null,
+                event?.decision ?? null
+              )
+            : {
+                speaker_name: event?.speaker_name ?? null,
+                decision: event?.decision ?? null
+              };
+        return {
+          utterance_id: item.utterance_id,
+          stream_role: item.stream_role,
+          cluster_id: clusterId ?? null,
+          speaker_name: reconciled.speaker_name,
+          decision: reconciled.decision,
+          text: item.text,
+          start_ms: item.start_ms,
+          end_ms: item.end_ms,
+          duration_ms: item.duration_ms
+        } satisfies TranscriptItem;
+      })
+      .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+  }
+
+  private buildEvidenceIndex(perPerson: PersonFeedbackItem[]): Record<string, string[]> {
+    const index: Record<string, string[]> = {};
+    for (const person of perPerson) {
+      for (const dimension of person.dimensions) {
+        const refs = new Set<string>();
+        const claims = [...dimension.strengths, ...dimension.risks, ...dimension.actions];
+        for (const claim of claims) {
+          for (const ref of claim.evidence_refs) {
+            if (ref) refs.add(ref);
+          }
+        }
+        index[`${person.person_key}:${dimension.dimension}`] = [...refs].slice(0, 12);
+      }
+    }
+    return index;
+  }
+
+  private mergeStatsWithRoster(stats: SpeakerStatItem[], state: SessionState): SpeakerStatItem[] {
+    const out: SpeakerStatItem[] = [...stats];
+    const seen = new Set<string>();
+    for (const stat of out) {
+      const key = String(stat.speaker_key || "").trim().toLowerCase();
+      const name = String(stat.speaker_name || "").trim().toLowerCase();
+      if (key) seen.add(key);
+      if (name) seen.add(name);
+    }
+    const roster = Array.isArray(state.roster) ? state.roster : [];
+    for (const entry of roster) {
+      const name = String(entry?.name || "").trim();
+      if (!name) continue;
+      const lower = name.toLowerCase();
+      if (seen.has(lower)) continue;
+      out.push({
+        speaker_key: name,
+        speaker_name: name,
+        talk_time_ms: 0,
+        turns: 0,
+        silence_ms: 0,
+        interruptions: 0,
+        interrupted_by_others: 0
+      });
+      seen.add(lower);
+    }
+    return out;
+  }
+
+  private async maybeRefreshFeedbackCache(sessionId: string, force = false): Promise<FeedbackCache> {
+    const current = await this.loadFeedbackCache(sessionId);
+    const nowMs = Date.now();
+    const updatedMs = Date.parse(current.updated_at);
+    if (!force && Number.isFinite(updatedMs) && nowMs - updatedMs < FEEDBACK_REFRESH_INTERVAL_MS) {
+      return current;
+    }
+
+    const totalStart = Date.now();
+    const assembleStart = Date.now();
+    const [stateRaw, events, rawByStream, memos, speakerLogsStored] = await Promise.all([
+      this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
+      this.loadSpeakerEvents(),
+      this.loadUtterancesRawByStream(),
+      this.loadMemos(),
+      this.loadSpeakerLogs()
+    ]);
+    const state = normalizeSessionState(stateRaw);
+    const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
+    const transcript = this.buildTranscriptForFeedback(state, rawByStream, events, speakerLogsStored, diarizationBackend);
+    const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
+    const evidence = buildEvidence({ memos, transcript });
+    const memosWithEvidence = attachEvidenceToMemos(memos, evidence);
+    const memoFirst = buildMemoFirstReport({
+      transcript,
+      memos: memosWithEvidence,
+      evidence,
+      stats
+    });
+    const assembleMs = Date.now() - assembleStart;
+
+    const validateStart = Date.now();
+    const validation = validatePersonFeedbackEvidence(memoFirst.per_person);
+    const validationMs = Date.now() - validateStart;
+
+    const unresolvedClusterCount = state.clusters.filter((cluster) => {
+      const bound = state.bindings[cluster.cluster_id];
+      const meta = state.cluster_binding_meta[cluster.cluster_id];
+      return !bound || !meta || !meta.locked;
+    }).length;
+    const tentative = unresolvedClusterCount > 0;
+    const finalizedAt = this.currentIsoTs();
+    const quality: ReportQualityMeta = {
+      ...validation.quality,
+      generated_at: finalizedAt,
+      build_ms: assembleMs,
+      validation_ms: validationMs
+    };
+
+    const result = buildResultV2({
+      sessionId,
+      finalizedAt,
+      tentative,
+      unresolvedClusterCount,
+      diarizationBackend,
+      transcript,
+      speakerLogs:
+        diarizationBackend === "edge"
+          ? this.buildEdgeSpeakerLogsForFinalize(finalizedAt, speakerLogsStored, state)
+          : this.deriveSpeakerLogsFromTranscript(finalizedAt, transcript, state, speakerLogsStored, "cloud"),
+      stats,
+      memos,
+      evidence,
+      overall: memoFirst.overall,
+      perPerson: memoFirst.per_person,
+      quality,
+      finalizeJobId: `feedback-open-${crypto.randomUUID()}`,
+      modelVersions: {
+        asr: DASHSCOPE_DEFAULT_MODEL,
+        analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
+        analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report",
+        summary_mode: "memo_first"
+      },
+      thresholds: {
+        feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
+        feedback_assemble_budget_ms: FEEDBACK_ASSEMBLE_BUDGET_MS,
+        feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
+        feedback_persist_fetch_budget_ms: FEEDBACK_PERSIST_FETCH_BUDGET_MS
+      }
+    });
+
+    const nextCache: FeedbackCache = {
+      session_id: sessionId,
+      updated_at: finalizedAt,
+      ready: validation.valid,
+      person_summary_cache: memoFirst.per_person,
+      overall_summary_cache: memoFirst.overall,
+      evidence_index_cache: this.buildEvidenceIndex(memoFirst.per_person),
+      report: result,
+      quality,
+      timings: {
+        assemble_ms: assembleMs,
+        validation_ms: validationMs,
+        persist_ms: 0,
+        total_ms: 0
+      }
+    };
+    const persistStart = Date.now();
+    await this.storeFeedbackCache(nextCache);
+    const persistMs = Date.now() - persistStart;
+    const totalMs = Date.now() - totalStart;
+    const meetsBudget =
+      totalMs <= FEEDBACK_TOTAL_BUDGET_MS &&
+      assembleMs <= FEEDBACK_ASSEMBLE_BUDGET_MS &&
+      validationMs <= FEEDBACK_VALIDATE_BUDGET_MS &&
+      persistMs <= FEEDBACK_PERSIST_FETCH_BUDGET_MS;
+    nextCache.timings.persist_ms = persistMs;
+    nextCache.timings.total_ms = totalMs;
+    nextCache.ready = validation.valid && meetsBudget;
+    await this.storeFeedbackCache(nextCache);
+    return nextCache;
   }
 
   private async loadFinalizeV2Status(): Promise<FinalizeV2Status | null> {
@@ -3404,9 +3929,31 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.storeSpeakerLogs(speakerLogs);
 
       await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
-      const stats = computeSpeakerStats(transcript);
+      const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
       const evidence = buildEvidence({ memos, transcript });
       const memosWithEvidence = attachEvidenceToMemos(memos, evidence);
+      const memoFirstStart = Date.now();
+      const memoFirstReport = buildMemoFirstReport({
+        transcript,
+        memos: memosWithEvidence,
+        evidence,
+        stats
+      });
+      const memoFirstBuildMs = Date.now() - memoFirstStart;
+      const validationStart = Date.now();
+      const validation = validatePersonFeedbackEvidence(memoFirstReport.per_person);
+      const validationMs = Date.now() - validationStart;
+      const quality: ReportQualityMeta = {
+        ...validation.quality,
+        generated_at: this.currentIsoTs(),
+        build_ms: memoFirstBuildMs,
+        validation_ms: validationMs
+      };
+      if (!validation.valid) {
+        throw new Error(
+          `report evidence validation failed: claim_count=${quality.claim_count} invalid_claim_count=${quality.invalid_claim_count}`
+        );
+      }
 
       await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 70 });
       await this.ensureFinalizeJobActive(jobId);
@@ -3422,16 +3969,22 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
       await this.ensureFinalizeJobActive(jobId);
-      const reportPayload = {
-        session_id: sessionId,
-        transcript,
-        memos: memosWithEvidence,
-        stats,
-        evidence,
-        events: analysisEvents,
-        locale: "zh-CN"
-      };
-      const reportResult = await this.invokeInferenceAnalysisReport(reportPayload);
+      // Keep calling report endpoint to preserve pipeline compatibility and warm
+      // model-side analytics, but memo-first output remains authoritative.
+      this.ctx.waitUntil(
+        this.invokeInferenceAnalysisReport({
+          session_id: sessionId,
+          transcript,
+          memos: memosWithEvidence,
+          stats,
+          evidence,
+          events: analysisEvents,
+          locale: "zh-CN"
+        }).catch((error) => {
+          console.error(`analysis/report warmup failed session=${sessionId}:`, error);
+          return null;
+        })
+      );
 
       await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
       await this.ensureFinalizeJobActive(jobId);
@@ -3453,13 +4006,18 @@ export class MeetingSessionDO extends DurableObject<Env> {
         stats,
         memos,
         evidence,
-        overall: reportResult.overall ?? {},
-        perPerson: Array.isArray(reportResult.per_person) ? reportResult.per_person : [],
+        overall: memoFirstReport.overall,
+        perPerson: memoFirstReport.per_person,
+        quality: {
+          ...quality,
+          generated_at: finalizedAt
+        },
         finalizeJobId: jobId,
         modelVersions: {
           asr: asrByStream.students.model,
           analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
-          analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report"
+          analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report",
+          summary_mode: "memo_first"
         },
         thresholds: {
           sv_t_low: 0.45,
@@ -3468,6 +4026,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           unresolved_cluster_count: unresolvedClusterCount,
           diarization_backend: diarizationBackend,
           finalize_timeout_ms: timeoutMs,
+          feedback_assemble_budget_ms: FEEDBACK_ASSEMBLE_BUDGET_MS,
+          feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
+          feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
           ...thresholdMeta
         }
       });
@@ -3479,6 +4040,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.ctx.storage.put(STORAGE_KEY_RESULT_KEY_V2, resultV2Key);
       await this.ctx.storage.put(STORAGE_KEY_FINALIZED_AT, finalizedAt);
       await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, finalizedAt);
+      const cache = await this.loadFeedbackCache(sessionId);
+      cache.updated_at = finalizedAt;
+      cache.report = resultV2;
+      cache.person_summary_cache = resultV2.per_person;
+      cache.overall_summary_cache = resultV2.overall;
+      cache.evidence_index_cache = this.buildEvidenceIndex(resultV2.per_person);
+      cache.quality = resultV2.quality;
+      cache.ready = resultV2.quality.needs_evidence_count === 0;
+      await this.storeFeedbackCache(cache);
 
       await this.updateFinalizeV2Status(jobId, {
         status: "succeeded",
@@ -3609,6 +4179,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
         );
       }
     }
+
+    this.ctx.waitUntil(
+      this.maybeRefreshFeedbackCache(sessionId, false).catch((error) => {
+        console.error(`feedback cache refresh failed session=${sessionId}:`, error);
+      })
+    );
   }
 
   private deriveMixedCaptureState(captureByStream: Record<StreamRole, CaptureState>): CaptureState["capture_state"] {
@@ -3834,7 +4410,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
 
     if (action === "state" && request.method === "GET") {
-      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream] =
+      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream, feedbackCache] =
         await Promise.all([
         this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
         this.loadSpeakerEvents(),
@@ -3845,7 +4421,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         this.loadMemos(),
         this.loadFinalizeV2Status(),
         this.loadSpeakerLogs(),
-        this.loadAsrCursorByStream()
+        this.loadAsrCursorByStream(),
+        this.loadFeedbackCache(sessionId)
       ]);
 
       const utteranceCountByStream = {
@@ -3873,7 +4450,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
         memo_count: memos.length,
         finalize_v2: finalizeV2Status,
         speaker_logs: speakerLogs,
-        asr_cursor_by_stream: asrCursorByStream
+        asr_cursor_by_stream: asrCursorByStream,
+        feedback: {
+          ready: feedbackCache.ready,
+          updated_at: feedbackCache.updated_at,
+          quality: feedbackCache.quality,
+          timings: feedbackCache.timings
+        }
       });
     }
 
@@ -3905,8 +4488,24 @@ export class MeetingSessionDO extends DurableObject<Env> {
         } else if (config.diarization_backend !== "edge" && config.diarization_backend !== "cloud") {
           config.diarization_backend = this.diarizationBackendDefault();
         }
+        const mode = valueAsString(payload.mode);
+        if (mode === "1v1" || mode === "group") {
+          config.mode = mode;
+        }
+        const templateId = valueAsString(payload.template_id);
+        if (templateId) {
+          config.template_id = templateId;
+        }
+        const bookingRef = valueAsString(payload.booking_ref);
+        if (bookingRef) {
+          config.booking_ref = bookingRef;
+        }
+        const teamsJoinUrl = valueAsString(payload.teams_join_url);
+        if (teamsJoinUrl) {
+          config.teams_join_url = teamsJoinUrl;
+        }
 
-        const roster = parseRosterEntries(payload.teams_participants);
+        const roster = parseRosterEntries(payload.participants ?? payload.teams_participants);
         if (roster.length > 0) {
           state.roster = roster;
         }
@@ -3914,6 +4513,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         state.config = config;
         await this.ctx.storage.put(STORAGE_KEY_STATE, state);
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
+        this.ctx.waitUntil(
+          this.maybeRefreshFeedbackCache(sessionId, true).catch((error) => {
+            console.error(`feedback cache refresh after config failed session=${sessionId}:`, error);
+          })
+        );
 
         return jsonResponse({
           session_id: sessionId,
@@ -4032,6 +4636,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         memos.push(item);
         await this.storeMemos(memos);
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+        this.ctx.waitUntil(
+          this.maybeRefreshFeedbackCache(sessionId, true).catch((error) => {
+            console.error(`feedback cache refresh after memo failed session=${sessionId}:`, error);
+          })
+        );
         return jsonResponse({
           session_id: sessionId,
           memo: item,
@@ -4054,6 +4663,175 @@ export class MeetingSessionDO extends DurableObject<Env> {
         session_id: sessionId,
         count: memos.length,
         items
+      });
+    }
+
+    if (action === "feedback-ready" && request.method === "GET") {
+      const cache = await this.maybeRefreshFeedbackCache(sessionId, false);
+      const cacheAgeMs = Math.max(0, Date.now() - Date.parse(cache.updated_at || this.currentIsoTs()));
+      return jsonResponse({
+        session_id: sessionId,
+        ready: cache.ready,
+        updated_at: cache.updated_at,
+        cache_age_ms: cacheAgeMs,
+        budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
+        timings: cache.timings,
+        quality: cache.quality
+      });
+    }
+
+    if (action === "feedback-open" && request.method === "POST") {
+      const startedAt = Date.now();
+      let cache = await this.maybeRefreshFeedbackCache(sessionId, false);
+      if (!cache.report) {
+        cache = await this.maybeRefreshFeedbackCache(sessionId, true);
+      }
+      const elapsedMs = Date.now() - startedAt;
+      if (!cache.report) {
+        return jsonResponse({ detail: "feedback report not ready" }, 503);
+      }
+      const withinBudget = elapsedMs <= FEEDBACK_TOTAL_BUDGET_MS;
+      return jsonResponse({
+        session_id: sessionId,
+        ready: cache.ready && withinBudget,
+        within_budget: withinBudget,
+        opened_in_ms: elapsedMs,
+        budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
+        timings: cache.timings,
+        quality: cache.quality,
+        report: cache.report
+      });
+    }
+
+    if (action === "feedback-regenerate-claim" && request.method === "POST") {
+      let payload: FeedbackRegenerateClaimRequest;
+      try {
+        payload = await readJson<FeedbackRegenerateClaimRequest>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      const personKey = String(payload.person_key || "").trim();
+      const claimType = payload.claim_type;
+      const dimension = payload.dimension;
+      if (!personKey || !claimType || !dimension) {
+        return badRequest("person_key, dimension and claim_type are required");
+      }
+
+      const cache = await this.maybeRefreshFeedbackCache(sessionId, true);
+      if (!cache.report) {
+        return jsonResponse({ detail: "feedback report not ready" }, 503);
+      }
+
+      const report = JSON.parse(JSON.stringify(cache.report)) as ResultV2;
+      const person = report.per_person.find((item) => item.person_key === personKey);
+      if (!person) {
+        return jsonResponse({ detail: `person_key not found: ${personKey}` }, 404);
+      }
+      const targetDimension = person.dimensions.find((item) => item.dimension === dimension);
+      if (!targetDimension) {
+        return jsonResponse({ detail: `dimension not found: ${dimension}` }, 404);
+      }
+      const claims = targetDimension[claimType];
+      const fallbackRefs = cache.evidence_index_cache[`${person.person_key}:${dimension}`] ?? [];
+      let targetClaim = payload.claim_id
+        ? claims.find((item) => item.claim_id === payload.claim_id)
+        : claims[0];
+      if (!targetClaim) {
+        targetClaim = {
+          claim_id: `c_${person.person_key}_${dimension}_${claimType}_${Date.now()}`,
+          text: "",
+          evidence_refs: [],
+          confidence: 0.66
+        };
+        claims.push(targetClaim);
+      }
+      const hint = String(payload.text_hint || "").trim();
+      targetClaim.text = hint || `${targetClaim.text || "已根据老师最新 memo 重新整理该条结论。"}（updated）`;
+      if (!Array.isArray(targetClaim.evidence_refs) || targetClaim.evidence_refs.length === 0) {
+        targetClaim.evidence_refs = fallbackRefs.slice(0, 2);
+      }
+      if (!Array.isArray(targetClaim.evidence_refs) || targetClaim.evidence_refs.length === 0) {
+        return jsonResponse(
+          {
+            detail: "claim regeneration requires evidence_refs; add evidence before regenerate",
+            person_key: person.person_key,
+            dimension
+          },
+          422
+        );
+      }
+      targetClaim.confidence = Math.min(0.95, Math.max(0.6, Number(targetClaim.confidence || 0.72)));
+
+      const validation = validatePersonFeedbackEvidence(report.per_person);
+      const nowIso = this.currentIsoTs();
+      report.quality = {
+        ...validation.quality,
+        generated_at: nowIso,
+        validation_ms: validation.quality.validation_ms
+      };
+      cache.updated_at = nowIso;
+      cache.report = report;
+      cache.person_summary_cache = report.per_person;
+      cache.overall_summary_cache = report.overall;
+      cache.quality = report.quality;
+      cache.ready = validation.valid;
+      await this.storeFeedbackCache(cache);
+
+      return jsonResponse({
+        session_id: sessionId,
+        ready: cache.ready,
+        quality: cache.quality,
+        person
+      });
+    }
+
+    if (action === "export" && request.method === "POST") {
+      let payload: FeedbackExportRequest = {};
+      try {
+        payload = await readJson<FeedbackExportRequest>(request);
+      } catch {
+        // keep empty payload for default format
+      }
+      const format = (payload.format ?? "plain_text") as "plain_text" | "markdown" | "docx";
+      const fileStem = String(payload.file_name || `${sessionId}-feedback`).trim() || `${sessionId}-feedback`;
+      const cache = await this.maybeRefreshFeedbackCache(sessionId, false);
+      if (!cache.report) {
+        return jsonResponse({ detail: "feedback report not ready" }, 503);
+      }
+
+      if (format === "plain_text") {
+        const content = buildReportExportText(cache.report);
+        return jsonResponse({
+          session_id: sessionId,
+          format,
+          file_name: `${fileStem}.txt`,
+          mime_type: "text/plain; charset=utf-8",
+          encoding: "utf-8",
+          content
+        });
+      }
+
+      if (format === "markdown") {
+        const content = buildReportExportMarkdown(cache.report);
+        return jsonResponse({
+          session_id: sessionId,
+          format,
+          file_name: `${fileStem}.md`,
+          mime_type: "text/markdown; charset=utf-8",
+          encoding: "utf-8",
+          content
+        });
+      }
+
+      const text = buildReportExportText(cache.report);
+      const docxBytes = buildDocxBytesFromText(text);
+      return jsonResponse({
+        session_id: sessionId,
+        format: "docx",
+        file_name: `${fileStem}.docx`,
+        mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        encoding: "base64",
+        content: bytesToBase64(docxBytes)
       });
     }
 

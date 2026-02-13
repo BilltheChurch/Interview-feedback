@@ -12,37 +12,10 @@ from app.services.report_generator import ReportGenerator
 
 class MockLLM:
     def generate_json(self, *, system_prompt: str, user_prompt: str):  # noqa: ARG002
-        return {
-            "overall": {
-                "summary_sections": [
-                    {"topic": "Q1", "bullets": ["团队先拆解约束后收敛方案"], "evidence_ids": ["e1"]}
-                ],
-                "team_dynamics": {
-                    "highlights": ["讨论结构清晰"],
-                    "risks": ["后半段打断偏多"],
-                },
-            },
-            "per_person": [
-                {
-                    "person_key": "Alice",
-                    "display_name": "Alice",
-                    "scorecard": [
-                        {
-                            "dimension": "leadership",
-                            "score": 4,
-                            "rationale": "主动推动收敛",
-                            "evidence_ids": ["e1"],
-                        }
-                    ],
-                    "strengths": ["主动总结"],
-                    "risks": ["偶尔打断"],
-                    "next_actions": ["控制打断频率"],
-                }
-            ],
-        }
+        return {}
 
 
-def test_report_generation_fills_all_dimensions() -> None:
+def test_report_generation_fills_all_dimensions_with_evidence_refs() -> None:
     generator = ReportGenerator(llm=MockLLM())
     req = AnalysisReportRequest(
         session_id="s-report",
@@ -109,11 +82,20 @@ def test_report_generation_fills_all_dimensions() -> None:
     assert len(result.per_person) == 1
     person = result.per_person[0]
     assert person.person_key == "Alice"
-    assert len(person.scorecard) == 5
-    assert {item.dimension for item in person.scorecard} == {
+    assert len(person.dimensions) == 5
+    assert {item.dimension for item in person.dimensions} == {
         "leadership",
         "collaboration",
         "logic",
         "structure",
         "initiative",
     }
+    for dimension in person.dimensions:
+        assert len(dimension.strengths) >= 1
+        assert len(dimension.risks) >= 1
+        assert len(dimension.actions) >= 1
+        for claim in [*dimension.strengths, *dimension.risks, *dimension.actions]:
+            assert claim.evidence_refs
+    assert result.quality is not None
+    assert result.quality.claim_count >= 15
+    assert result.quality.needs_evidence_count == 0
