@@ -265,8 +265,22 @@ class BinderPolicy:
         if name_candidates:
             top = name_candidates[0]
             if self._roster_hit(top.name, state) is True and self._looks_like_person_name(top.name):
+                if top.confidence >= 0.93:
+                    self._set_cluster_binding(
+                        state=state,
+                        cluster_id=cluster_id,
+                        participant_name=top.name,
+                        source="name_extract",
+                        confidence=max(min(top.confidence, 1.0), -1.0),
+                        locked=False,
+                        updated_at=now_iso,
+                    )
                 evidence.binding_source = "name_extract"
-                evidence.reason = "roster name extracted from ASR"
+                evidence.reason = (
+                    "roster name extracted from ASR (binding persisted)"
+                    if top.confidence >= 0.93
+                    else "roster name extracted from ASR"
+                )
                 return BindResult(
                     speaker_name=top.name,
                     decision="confirm",

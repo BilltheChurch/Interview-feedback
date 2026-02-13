@@ -26,7 +26,8 @@ import type {
   ReportQualityMeta,
   ResultV2,
   SpeakerStatItem,
-  SpeakerLogs
+  SpeakerLogs,
+  SpeakerMapItem
 } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
@@ -918,6 +919,25 @@ function extractNumberByKeys(value: unknown, keys: string[]): number | null {
 }
 
 function extractNameFromText(text: string): string | null {
+  const stopwords = new Set([
+    "the",
+    "and",
+    "with",
+    "from",
+    "about",
+    "which",
+    "where",
+    "when",
+    "doing",
+    "really",
+    "excited",
+    "levels",
+    "going",
+    "american",
+    "school",
+    "studying",
+    "netherlands"
+  ]);
   const patterns = [
     /\bmy name is\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
     /\bi am\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
@@ -927,7 +947,11 @@ function extractNameFromText(text: string): string | null {
     const match = text.match(pattern);
     if (!match || !match[1]) continue;
     const cleaned = match[1].trim().replace(/\s+/g, " ").replace(/[.,;:!?]+$/, "");
-    if (cleaned.length >= 2 && cleaned.length <= 80) {
+    const tokens = cleaned.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0 || tokens.length > 3) continue;
+    if (tokens.some((token) => !/^[A-Za-z][A-Za-z'-]{0,30}$/.test(token))) continue;
+    if (tokens.some((token) => stopwords.has(token.toLowerCase()))) continue;
+    if (cleaned.length >= 2 && cleaned.length <= 64) {
       return cleaned;
     }
   }
@@ -2168,7 +2192,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     state: SessionState,
     clusterId: string | null,
     eventSpeakerName: string | null,
-    eventDecision: "auto" | "confirm" | "unknown" | null
+    eventDecision: "auto" | "confirm" | "unknown" | null,
+    speakerMapByCluster: Map<string, SpeakerMapItem> = new Map()
   ): { speaker_name: string | null; decision: "auto" | "confirm" | "unknown" | null } {
     if (!clusterId) {
       if (eventSpeakerName) {
@@ -2179,13 +2204,30 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
       return { speaker_name: null, decision: "unknown" };
     }
-    const bound = state.bindings[clusterId] ?? null;
     const meta = state.cluster_binding_meta[clusterId];
+    const directBinding = valueAsString(state.bindings[clusterId]);
+    const metaBinding = valueAsString(meta?.participant_name);
+    const bound = directBinding || metaBinding || null;
     if (meta?.locked && bound) return { speaker_name: bound, decision: "auto" };
     if (meta?.source === "manual_map" && bound) return { speaker_name: bound, decision: "auto" };
-    if (meta?.source === "enrollment_match" && bound) return { speaker_name: bound, decision: "auto" };
+    if (meta?.source === "enrollment_match" && bound) {
+      return { speaker_name: bound, decision: directBinding ? "auto" : "confirm" };
+    }
     if (meta?.source === "name_extract" && bound) return { speaker_name: bound, decision: "confirm" };
-    if (bound) return { speaker_name: bound, decision: "auto" };
+    if (bound) return { speaker_name: bound, decision: directBinding ? "auto" : "confirm" };
+
+    const mapItem = speakerMapByCluster.get(clusterId);
+    const mapName = valueAsString(mapItem?.display_name ?? mapItem?.person_id);
+    if (mapName) {
+      if (mapItem?.source === "manual") {
+        return { speaker_name: mapName, decision: "auto" };
+      }
+      if (mapItem?.source === "enroll" || mapItem?.source === "name_extract") {
+        return { speaker_name: mapName, decision: "confirm" };
+      }
+      return { speaker_name: mapName, decision: eventDecision ?? "confirm" };
+    }
+
     if (eventSpeakerName) {
       return {
         speaker_name: eventSpeakerName,
@@ -2218,6 +2260,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
             .filter((item) => item.stream_role === "students")
             .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
         : [];
+    const speakerMapByCluster = new Map(
+      speakerLogsStored.speaker_map.map((item) => [item.cluster_id, item])
+    );
     const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
       if (edgeTurns.length === 0) return null;
       let bestCluster: string | null = null;
@@ -2251,7 +2296,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
                 state,
                 clusterId ?? null,
                 event?.speaker_name ?? null,
-                event?.decision ?? null
+                event?.decision ?? null,
+                speakerMapByCluster
               )
             : {
                 speaker_name: event?.speaker_name ?? null,
@@ -3895,8 +3941,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
       confidence: null
     }));
     const speaker_map = [...clusterMap.keys()].map((clusterId) => {
-      const bound = state.bindings[clusterId] ?? null;
       const meta = state.cluster_binding_meta[clusterId];
+      const metaName = valueAsString(meta?.participant_name);
+      const bound = state.bindings[clusterId] ?? (metaName || null);
       const source: "manual" | "enroll" | "name_extract" | "unknown" =
         meta?.source === "manual_map"
           ? "manual"
@@ -3939,8 +3986,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       (Array.isArray(base.speaker_map) ? base.speaker_map : []).map((item) => [item.cluster_id, item])
     );
     for (const clusterId of clusterIds) {
-      const bound = state.bindings[clusterId] ?? mapByCluster.get(clusterId)?.display_name ?? null;
       const meta = state.cluster_binding_meta[clusterId];
+      const metaName = valueAsString(meta?.participant_name);
+      const mapName = valueAsString(mapByCluster.get(clusterId)?.display_name ?? mapByCluster.get(clusterId)?.person_id);
+      const bound = state.bindings[clusterId] ?? (metaName || mapName || null);
       const source: "manual" | "enroll" | "name_extract" | "unknown" =
         meta?.source === "manual_map"
           ? "manual"
@@ -4050,6 +4099,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
               .filter((item) => item.stream_role === "students")
               .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
           : [];
+      const speakerMapByCluster = new Map(
+        speakerLogsStored.speaker_map.map((item) => [item.cluster_id, item])
+      );
       const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
         if (edgeTurns.length === 0) return null;
         let bestCluster: string | null = null;
@@ -4062,46 +4114,6 @@ export class MeetingSessionDO extends DurableObject<Env> {
           }
         }
         return bestOverlap > 0 ? bestCluster : null;
-      };
-      const resolveStudentBinding = (
-        clusterId: string | null,
-        eventSpeakerName: string | null,
-        eventDecision: "auto" | "confirm" | "unknown" | null
-      ): { speaker_name: string | null; decision: "auto" | "confirm" | "unknown" | null } => {
-        if (!clusterId) {
-          if (eventSpeakerName) {
-            return {
-              speaker_name: eventSpeakerName,
-              decision: eventDecision ?? "confirm"
-            };
-          }
-          return { speaker_name: null, decision: "unknown" };
-        }
-
-        const bound = state.bindings[clusterId] ?? null;
-        const meta = state.cluster_binding_meta[clusterId];
-        if (meta?.locked && bound) {
-          return { speaker_name: bound, decision: "auto" };
-        }
-        if (meta?.source === "manual_map" && bound) {
-          return { speaker_name: bound, decision: "auto" };
-        }
-        if (meta?.source === "enrollment_match" && bound) {
-          return { speaker_name: bound, decision: "auto" };
-        }
-        if (meta?.source === "name_extract" && bound) {
-          return { speaker_name: bound, decision: "confirm" };
-        }
-        if (bound) {
-          return { speaker_name: bound, decision: "auto" };
-        }
-        if (eventSpeakerName) {
-          return {
-            speaker_name: eventSpeakerName,
-            decision: eventDecision ?? "confirm"
-          };
-        }
-        return { speaker_name: null, decision: "unknown" };
       };
 
       const transcript = [...rawByStream.teacher, ...rawByStream.students]
@@ -4119,7 +4131,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
             (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
           const reconciled =
             item.stream_role === "students"
-              ? resolveStudentBinding(clusterId ?? null, event?.speaker_name ?? null, event?.decision ?? null)
+              ? this.resolveStudentBindingForFeedback(
+                  state,
+                  clusterId ?? null,
+                  event?.speaker_name ?? null,
+                  event?.decision ?? null,
+                  speakerMapByCluster
+                )
               : {
                   speaker_name: event?.speaker_name ?? null,
                   decision: event?.decision ?? null
@@ -4713,20 +4731,71 @@ export class MeetingSessionDO extends DurableObject<Env> {
         students: utterancesByStream.students.length
       };
       const normalizedState = normalizeSessionState(state);
-      const eventByUtterance = new Map(
+      const diarizationBackend = normalizedState.config?.diarization_backend === "edge" ? "edge" : "cloud";
+      const studentEventByUtterance = new Map(
         events
-          .filter((item) => item.utterance_id)
+          .filter((item) => item.stream_role === "students" && item.utterance_id)
           .map((item) => [String(item.utterance_id), item])
       );
+      const teacherEventByUtterance = new Map(
+        events
+          .filter((item) => item.stream_role === "teacher" && item.utterance_id)
+          .map((item) => [String(item.utterance_id), item])
+      );
+      const edgeTurns =
+        diarizationBackend === "edge"
+          ? [...speakerLogs.turns]
+              .filter((item) => item.stream_role === "students")
+              .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
+          : [];
+      const speakerMapByCluster = new Map(
+        speakerLogs.speaker_map.map((item) => [item.cluster_id, item])
+      );
+      const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
+        if (edgeTurns.length === 0) return null;
+        let bestCluster: string | null = null;
+        let bestOverlap = 0;
+        for (const turn of edgeTurns) {
+          const overlap = Math.min(endMs, turn.end_ms) - Math.max(startMs, turn.start_ms);
+          if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestCluster = turn.cluster_id;
+          }
+        }
+        return bestOverlap > 0 ? bestCluster : null;
+      };
       const metricsTranscript: TranscriptItem[] = [...utterancesByStream.teacher, ...utterancesByStream.students]
         .map((item) => {
-          const event = eventByUtterance.get(item.utterance_id);
+          const event =
+            item.stream_role === "teacher"
+              ? teacherEventByUtterance.get(item.utterance_id)
+              : studentEventByUtterance.get(item.utterance_id);
+          const inferredStudentsCluster =
+            item.stream_role === "students" && diarizationBackend === "edge"
+              ? inferStudentsClusterFromEdgeTurns(item.start_ms, item.end_ms)
+              : null;
+          const clusterId =
+            event?.cluster_id ??
+            (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
+          const reconciled =
+            item.stream_role === "students"
+              ? this.resolveStudentBindingForFeedback(
+                  normalizedState,
+                  clusterId ?? null,
+                  event?.speaker_name ?? null,
+                  event?.decision ?? null,
+                  speakerMapByCluster
+                )
+              : {
+                  speaker_name: event?.speaker_name ?? null,
+                  decision: event?.decision ?? null
+                };
           return {
             utterance_id: item.utterance_id,
             stream_role: item.stream_role,
-            cluster_id: event?.cluster_id ?? null,
-            speaker_name: event?.speaker_name ?? null,
-            decision: event?.decision ?? null,
+            cluster_id: clusterId ?? null,
+            speaker_name: reconciled.speaker_name,
+            decision: reconciled.decision,
             text: item.text,
             start_ms: item.start_ms,
             end_ms: item.end_ms,
