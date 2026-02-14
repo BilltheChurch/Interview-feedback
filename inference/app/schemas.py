@@ -187,6 +187,8 @@ class Memo(BaseModel):
     tags: list[str] = Field(default_factory=list)
     text: str = Field(min_length=1, max_length=3000)
     anchors: MemoAnchor | None = None
+    stage: str | None = None
+    stage_index: int | None = None
 
 
 class TranscriptUtterance(BaseModel):
@@ -332,6 +334,16 @@ class AnalysisReportRequest(BaseModel):
     locale: str = "zh-CN"
 
 
+class SynthesisContextMeta(BaseModel):
+    rubric_used: bool = False
+    free_notes_used: bool = False
+    historical_sessions_count: int = 0
+    name_bindings_count: int = 0
+    stages_count: int = 0
+    transcript_tokens_approx: int = 0
+    transcript_truncated: bool = False
+
+
 class ReportQualityMeta(BaseModel):
     generated_at: str
     build_ms: int = Field(default=0, ge=0)
@@ -339,6 +351,14 @@ class ReportQualityMeta(BaseModel):
     claim_count: int = Field(default=0, ge=0)
     invalid_claim_count: int = Field(default=0, ge=0)
     needs_evidence_count: int = Field(default=0, ge=0)
+    report_source: Literal[
+        "memo_first", "llm_enhanced", "llm_failed",
+        "llm_synthesized", "llm_synthesized_truncated", "memo_first_fallback"
+    ] | None = None
+    report_model: str | None = None
+    report_degraded: bool | None = None
+    report_error: str | None = None
+    synthesis_context: SynthesisContextMeta | None = None
 
 
 class AnalysisReportResponse(BaseModel):
@@ -346,3 +366,93 @@ class AnalysisReportResponse(BaseModel):
     overall: OverallFeedback
     per_person: list[PersonFeedbackItem] = Field(default_factory=list, min_length=1)
     quality: ReportQualityMeta | None = None
+
+
+class RegenerateClaimRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    person_key: str = Field(min_length=1, max_length=200)
+    display_name: str | None = None
+    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    claim_type: Literal["strengths", "risks", "actions"]
+    claim_id: str | None = None
+    claim_text: str | None = None
+    text_hint: str | None = None
+    allowed_evidence_ids: list[str] = Field(min_length=1)
+    evidence: list[EvidenceRef] = Field(min_length=1)
+    transcript: list[TranscriptUtterance] = Field(default_factory=list)
+    memos: list[Memo] = Field(default_factory=list)
+    events: list[AnalysisEvent] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+    locale: str = "zh-CN"
+
+    @field_validator("allowed_evidence_ids")
+    @classmethod
+    def validate_allowed_evidence_ids(cls, value: list[str]):
+        refs = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if not refs:
+            raise ValueError("allowed_evidence_ids must include at least one non-empty id")
+        return refs
+
+
+class RegenerateClaimResponse(BaseModel):
+    session_id: str
+    person_key: str
+    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    claim_type: Literal["strengths", "risks", "actions"]
+    claim: DimensionClaim
+
+
+class StageDescription(BaseModel):
+    stage_index: int
+    stage_name: str
+    description: str | None = None
+
+
+class RubricDimension(BaseModel):
+    name: str
+    description: str | None = None
+    weight: float = 1.0
+
+
+class RubricTemplate(BaseModel):
+    template_name: str
+    dimensions: list[RubricDimension]
+
+
+class SessionContext(BaseModel):
+    mode: Literal["1v1", "group"]
+    interviewer_name: str | None = None
+    position_title: str | None = None
+    company_name: str | None = None
+    stage_descriptions: list[StageDescription] = Field(default_factory=list)
+
+
+class MemoSpeakerBinding(BaseModel):
+    memo_id: str
+    extracted_names: list[str]
+    matched_speaker_keys: list[str]
+    confidence: float
+
+
+class HistoricalSummary(BaseModel):
+    session_id: str
+    date: str
+    summary: str
+    strengths: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class SynthesizeReportRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    transcript: list[TranscriptUtterance]
+    memos: list[Memo] = Field(default_factory=list)
+    free_form_notes: str | None = None
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+    events: list[AnalysisEvent] = Field(default_factory=list)
+    rubric: RubricTemplate | None = None
+    session_context: SessionContext | None = None
+    memo_speaker_bindings: list[MemoSpeakerBinding] = Field(default_factory=list)
+    historical: list[HistoricalSummary] = Field(default_factory=list)
+    stages: list[str] = Field(default_factory=list)
+    locale: str = "zh-CN"
