@@ -389,6 +389,79 @@ export function buildMultiEvidence(options: {
   return evidence;
 }
 
+export function addStageMetadata(
+  memos: MemoItem[],
+  stages: string[]
+): MemoItem[] {
+  if (stages.length === 0) return memos;
+
+  return memos.map((memo) => {
+    // If memo already has a valid stage_index, keep it
+    if (typeof memo.stage_index === "number" && memo.stage_index >= 0) {
+      // Validate/fill stage name if missing
+      if (!memo.stage && memo.stage_index < stages.length) {
+        return { ...memo, stage: stages[memo.stage_index] };
+      }
+      return memo;
+    }
+
+    // If memo has stage name but no index, derive index
+    if (memo.stage) {
+      const idx = stages.indexOf(memo.stage);
+      if (idx >= 0) {
+        return { ...memo, stage_index: idx };
+      }
+      return memo;
+    }
+
+    // No stage info at all — don't guess, leave empty
+    return memo;
+  });
+}
+
+export function enforceQualityGates(params: {
+  perPerson: PersonFeedbackItem[];
+  unknownRatio: number;
+}): {
+  passed: boolean;
+  failures: string[];
+  tentative: boolean;
+} {
+  const failures: string[] = [];
+
+  // Gate 1: Unknown speaker ratio must be <= 10%
+  if (params.unknownRatio > 0.10) {
+    failures.push(
+      `unknown_ratio ${(params.unknownRatio * 100).toFixed(1)}% > 10%`
+    );
+  }
+
+  // Gate 2: Every claim must have at least 1 evidence ref
+  for (const person of params.perPerson) {
+    for (const dimension of person.dimensions) {
+      const allClaims: DimensionClaim[] = [
+        ...dimension.strengths,
+        ...dimension.risks,
+        ...dimension.actions,
+      ];
+      for (const claim of allClaims) {
+        const refs = Array.isArray(claim.evidence_refs)
+          ? claim.evidence_refs.filter(Boolean)
+          : [];
+        if (refs.length < 1) {
+          failures.push(`claim ${claim.claim_id} has 0 evidence refs`);
+        }
+      }
+    }
+  }
+
+  return {
+    passed: failures.length === 0,
+    failures,
+    tentative: failures.length > 0,
+  };
+}
+
 function normalizeDimensionFromMemo(memo: MemoItem): DimensionFeedback["dimension"] {
   const tagText = memo.tags.join(" ").toLowerCase();
   const memoText = normalizeMemoText(memo.text).toLowerCase();
