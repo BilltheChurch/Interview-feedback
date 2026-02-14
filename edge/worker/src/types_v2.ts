@@ -16,6 +16,8 @@ export interface MemoItem {
   tags: string[];
   text: string;
   anchors?: MemoAnchor;
+  stage?: string;           // e.g., "Intro", "Q1: System Design"
+  stage_index?: number;     // 0, 1, 2, ...
 }
 
 export interface SpeakerTurn {
@@ -95,6 +97,8 @@ export interface EvidenceItem {
   };
   quote: string;
   confidence: number;
+  weak?: boolean;
+  weak_reason?: string | null;
 }
 
 export interface DimensionClaim {
@@ -129,6 +133,11 @@ export interface ReportQualityMeta {
   claim_count: number;
   invalid_claim_count: number;
   needs_evidence_count: number;
+  report_source?: "memo_first" | "llm_enhanced" | "llm_failed"
+    | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback";
+  report_model?: string | null;
+  report_degraded?: boolean;
+  report_error?: string | null;
 }
 
 export interface SpeakerStatItem {
@@ -190,7 +199,105 @@ export interface ResultV2 {
       observed_students_unknown: number;
       observed_echo_suppressed_chunks: number;
       observed_echo_recent_rate: number;
+      observed_echo_leak_rate?: number;
+      observed_suppression_false_positive_rate?: number;
     };
+    report_pipeline?: {
+      mode: "memo_first_with_llm_polish" | "llm_core_synthesis";
+      source: "memo_first" | "llm_enhanced" | "llm_failed"
+        | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback";
+      llm_attempted: boolean;
+      llm_success: boolean;
+      llm_elapsed_ms: number | null;
+      blocking_reason?: string | null;
+    };
+    quality_gate_failures?: string[];
     generated_at: string;
   };
+}
+
+export interface MemoSpeakerBinding {
+  memo_id: string;
+  extracted_names: string[];
+  matched_speaker_keys: string[];
+  confidence: number;
+}
+
+export interface SynthesisContextMeta {
+  rubric_used: boolean;
+  free_notes_used: boolean;
+  historical_sessions_count: number;
+  name_bindings_count: number;
+  stages_count: number;
+  transcript_tokens_approx: number;
+  transcript_truncated: boolean;
+}
+
+export interface RubricDimension {
+  name: string;
+  description?: string;
+  weight: number;
+}
+
+export interface RubricTemplate {
+  template_name: string;
+  dimensions: RubricDimension[];
+}
+
+export interface StageDescription {
+  stage_index: number;
+  stage_name: string;
+  description?: string;
+}
+
+export interface SessionContextMeta {
+  mode: "1v1" | "group";
+  interviewer_name?: string;
+  position_title?: string;
+  company_name?: string;
+  stage_descriptions: StageDescription[];
+}
+
+export interface HistoricalSummary {
+  session_id: string;
+  date: string;
+  summary: string;
+  strengths: string[];
+  risks: string[];
+}
+
+export interface SynthesizeRequestPayload {
+  session_id: string;
+  transcript: Array<{
+    utterance_id: string;
+    stream_role: "mixed" | "teacher" | "students";
+    speaker_name?: string | null;
+    cluster_id?: string | null;
+    decision?: "auto" | "confirm" | "unknown" | null;
+    text: string;
+    start_ms: number;
+    end_ms: number;
+    duration_ms: number;
+  }>;
+  memos: MemoItem[];
+  free_form_notes?: string | null;
+  evidence: EvidenceItem[];
+  stats: SpeakerStatItem[];
+  events: Array<{
+    event_id: string;
+    event_type: string;
+    actor?: string | null;
+    target?: string | null;
+    time_range_ms: number[];
+    utterance_ids: string[];
+    quote?: string | null;
+    confidence: number;
+    rationale?: string | null;
+  }>;
+  rubric?: RubricTemplate | null;
+  session_context?: SessionContextMeta | null;
+  memo_speaker_bindings: MemoSpeakerBinding[];
+  historical: HistoricalSummary[];
+  stages: string[];
+  locale: string;
 }

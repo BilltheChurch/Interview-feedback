@@ -165,6 +165,40 @@ function ensureClaimEvidence(
   return [];
 }
 
+function buildWeakEvidenceUtteranceSet(transcript: TranscriptItem[]): Set<string> {
+  const weak = new Set<string>();
+  const sorted = [...transcript].sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+  for (let i = 1; i < sorted.length; i += 1) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    if (prev.stream_role !== "students" || curr.stream_role !== "students") continue;
+    if (speakerKey(prev) === speakerKey(curr)) continue;
+    const overlapMs = Math.min(prev.end_ms, curr.end_ms) - Math.max(prev.start_ms, curr.start_ms);
+    if (overlapMs > 0) {
+      weak.add(prev.utterance_id);
+      weak.add(curr.utterance_id);
+    }
+  }
+  return weak;
+}
+
+function hasWeakEvidenceRefs(refs: string[], evidenceById: Map<string, EvidenceItem>): boolean {
+  for (const ref of refs) {
+    const evidence = evidenceById.get(ref);
+    if (evidence?.weak) return true;
+  }
+  return false;
+}
+
+function confidenceWithWeakEvidence(
+  base: number,
+  refs: string[],
+  evidenceById: Map<string, EvidenceItem>
+): number {
+  const downWeighted = hasWeakEvidenceRefs(refs, evidenceById) ? base - 0.18 : base;
+  return Math.min(0.95, Math.max(0.3, downWeighted));
+}
+
 function toClaimId(personKey: string, dimension: DimensionFeedback["dimension"], index: number): string {
   const normalized = personKey.replace(/[^A-Za-z0-9_-]/g, "_") || "unknown";
   return `c_${normalized}_${dimension}_${String(index).padStart(2, "0")}`;
@@ -177,6 +211,7 @@ export function buildEvidence(options: {
   const { memos, transcript } = options;
   const utteranceMap = new Map(transcript.map((item) => [item.utterance_id, item]));
   const sorted = [...transcript].sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+  const weakUtterances = buildWeakEvidenceUtteranceSet(transcript);
   const evidence: EvidenceItem[] = [];
   let seq = 1;
 
@@ -222,7 +257,9 @@ export function buildEvidence(options: {
         display_name: picked?.speaker_name ?? null,
       },
       quote: picked ? quoteFromUtterance(picked.text) : quoteFromUtterance(memo.text),
-      confidence: picked ? 0.8 : 0.52,
+      confidence: picked ? (weakUtterances.has(picked.utterance_id) ? 0.56 : 0.8) : 0.52,
+      weak: picked ? weakUtterances.has(picked.utterance_id) : false,
+      weak_reason: picked && weakUtterances.has(picked.utterance_id) ? "overlap_risk" : null,
     });
   }
 
@@ -243,7 +280,9 @@ export function buildEvidence(options: {
         display_name: item.speaker_name ?? key
       },
       quote: quoteFromUtterance(item.text),
-      confidence: 0.74
+      confidence: weakUtterances.has(item.utterance_id) ? 0.52 : 0.74,
+      weak: weakUtterances.has(item.utterance_id),
+      weak_reason: weakUtterances.has(item.utterance_id) ? "overlap_risk" : null
     });
     fallbackBySpeaker.add(key);
   }
@@ -343,7 +382,7 @@ export function buildMemoFirstReport(options: {
         claim_id: toClaimId(personKey, dimension, claimList.length + 1),
         text: normalizeMemoText(memo.text),
         evidence_refs: refs,
-        confidence: refs.length > 0 ? 0.86 : 0.42
+        confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.86, refs, evidenceById) : 0.42
       });
     }
 
@@ -357,7 +396,7 @@ export function buildMemoFirstReport(options: {
           claim_id: toClaimId(personKey, dimension, 1),
           text: template.strength,
           evidence_refs: refs,
-          confidence: refs.length > 0 ? 0.74 : 0.35
+          confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.74, refs, evidenceById) : 0.35
         });
       }
       if (target.risks.length === 0) {
@@ -366,7 +405,7 @@ export function buildMemoFirstReport(options: {
           claim_id: toClaimId(personKey, dimension, 2),
           text: template.risk,
           evidence_refs: refs,
-          confidence: refs.length > 0 ? 0.7 : 0.33
+          confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.7, refs, evidenceById) : 0.33
         });
       }
       if (target.actions.length === 0) {
@@ -375,7 +414,7 @@ export function buildMemoFirstReport(options: {
           claim_id: toClaimId(personKey, dimension, 3),
           text: template.action,
           evidence_refs: refs,
-          confidence: refs.length > 0 ? 0.72 : 0.34
+          confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.72, refs, evidenceById) : 0.34
         });
       }
     }
@@ -574,7 +613,19 @@ export function buildResultV2(params: {
     observed_students_unknown: number;
     observed_echo_suppressed_chunks: number;
     observed_echo_recent_rate: number;
+    observed_echo_leak_rate?: number;
+    observed_suppression_false_positive_rate?: number;
   };
+  reportPipeline?: {
+    mode: "memo_first_with_llm_polish" | "llm_core_synthesis";
+    source: "memo_first" | "llm_enhanced" | "llm_failed"
+      | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback";
+    llm_attempted: boolean;
+    llm_success: boolean;
+    llm_elapsed_ms: number | null;
+    blocking_reason?: string | null;
+  };
+  qualityGateFailures?: string[];
 }): ResultV2 {
   return {
     session: {
@@ -599,6 +650,8 @@ export function buildResultV2(params: {
       unknown_ratio: computeUnknownRatio(params.transcript),
       backend_timeline: params.backendTimeline ?? [],
       quality_gate_snapshot: params.qualityGateSnapshot,
+      report_pipeline: params.reportPipeline,
+      quality_gate_failures: params.qualityGateFailures ?? [],
       generated_at: params.finalizedAt,
     },
   };
