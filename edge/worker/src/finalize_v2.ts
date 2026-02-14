@@ -3,6 +3,7 @@ import type {
   DimensionFeedback,
   EvidenceItem,
   MemoItem,
+  MemoSpeakerBinding,
   PersonFeedbackItem,
   ReportQualityMeta,
   ResultV2,
@@ -129,6 +130,92 @@ function quoteFromUtterance(text: string, maxLen = 160): string {
 
 function normalizeMemoText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
+}
+
+// ── Common non-name words to filter out ──
+const NON_NAME_WORDS = new Set([
+  // English interview terms
+  "the", "and", "but", "for", "not", "all", "can", "has", "was", "are",
+  "let", "may", "yes", "our", "how", "why", "who", "get", "set",
+  "leadership", "collaboration", "logic", "structure", "initiative",
+  "interview", "question", "answer", "candidate", "team", "project",
+  "good", "great", "nice", "poor", "weak", "strong",
+  "summary", "observation", "evidence", "decision", "score",
+  // Chinese terms
+  "面试", "问题", "回答", "总结", "观察", "决策", "评分",
+]);
+
+export function extractMemoNames(
+  memos: MemoItem[],
+  knownSpeakers: string[]
+): MemoSpeakerBinding[] {
+  const bindings: MemoSpeakerBinding[] = [];
+
+  // Normalize known speakers for matching
+  const speakerLower = knownSpeakers.map((s) => s.toLowerCase().trim());
+
+  for (const memo of memos) {
+    const text = memo.text;
+    const extractedNames: string[] = [];
+
+    // English names: capitalized words 2-16 chars
+    const enMatches = text.matchAll(/\b([A-Z][a-z]{1,15})\b/g);
+    for (const match of enMatches) {
+      const name = match[1];
+      if (!NON_NAME_WORDS.has(name.toLowerCase())) {
+        extractedNames.push(name);
+      }
+    }
+
+    // Chinese names: 2-3 character sequences
+    const zhMatches = text.matchAll(/([\u4e00-\u9fff]{2,3})/g);
+    for (const match of zhMatches) {
+      const name = match[1];
+      if (!NON_NAME_WORDS.has(name)) {
+        extractedNames.push(name);
+      }
+    }
+
+    // Deduplicate
+    const unique = [...new Set(extractedNames)];
+    if (unique.length === 0) continue;
+
+    // Match against known speakers
+    const matchedKeys: string[] = [];
+    let bestConfidence = 0;
+
+    for (const extracted of unique) {
+      const extractedLower = extracted.toLowerCase();
+      for (let i = 0; i < knownSpeakers.length; i++) {
+        const speaker = knownSpeakers[i];
+        const sLower = speakerLower[i];
+
+        if (sLower === extractedLower) {
+          // Exact match
+          if (!matchedKeys.includes(speaker)) matchedKeys.push(speaker);
+          bestConfidence = Math.max(bestConfidence, 1.0);
+        } else if (sLower.includes(extractedLower) || extractedLower.includes(sLower)) {
+          // Substring match: "Alice" in "Alice Wang"
+          if (!matchedKeys.includes(speaker)) matchedKeys.push(speaker);
+          bestConfidence = Math.max(bestConfidence, 0.8);
+        }
+      }
+    }
+
+    // If no match found, keep names with low confidence
+    if (matchedKeys.length === 0) {
+      bestConfidence = 0.3;
+    }
+
+    bindings.push({
+      memo_id: memo.memo_id,
+      extracted_names: unique,
+      matched_speaker_keys: matchedKeys,
+      confidence: bestConfidence,
+    });
+  }
+
+  return bindings;
 }
 
 function normalizeDimensionFromMemo(memo: MemoItem): DimensionFeedback["dimension"] {
