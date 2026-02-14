@@ -4,7 +4,9 @@ export type InferenceEndpointKey =
   | "resolve"
   | "enroll"
   | "analysis_events"
-  | "analysis_report";
+  | "analysis_report"
+  | "analysis_regenerate_claim"
+  | "analysis_synthesize";
 
 type EndpointHealthState = "unknown" | "healthy" | "degraded" | "open_circuit";
 
@@ -130,7 +132,9 @@ function buildBackendState(role: InferenceBackendKey, baseUrl: string): BackendR
       resolve: defaultEndpointState(),
       enroll: defaultEndpointState(),
       analysis_events: defaultEndpointState(),
-      analysis_report: defaultEndpointState()
+      analysis_report: defaultEndpointState(),
+      analysis_regenerate_claim: defaultEndpointState(),
+      analysis_synthesize: defaultEndpointState()
     }
   };
 }
@@ -373,4 +377,3 @@ export class InferenceFailoverClient {
     });
   }
 }
-
