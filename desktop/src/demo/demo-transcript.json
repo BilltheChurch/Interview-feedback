@@ -1,0 +1,128 @@
+[
+  {
+    "utterance_id": "demo_u001",
+    "stream_role": "teacher",
+    "speaker_name": "Interviewer",
+    "text": "Welcome! Let's start with a brief introduction about yourself and your PM experience.",
+    "start_ms": 0,
+    "end_ms": 5000,
+    "duration_ms": 5000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u002",
+    "stream_role": "students",
+    "speaker_name": "Demo Candidate",
+    "cluster_id": "c_demo_1",
+    "text": "Thanks for having me. I've been a product manager for 4 years, most recently at a B2B SaaS company where I led a team of 8 engineers building the analytics platform. We grew from 500 to 5000 daily active users during my tenure.",
+    "start_ms": 5500,
+    "end_ms": 18000,
+    "duration_ms": 12500,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u003",
+    "stream_role": "teacher",
+    "speaker_name": "Interviewer",
+    "text": "Great background. For our first question: How would you prioritize features for a new product with limited engineering resources?",
+    "start_ms": 19000,
+    "end_ms": 26000,
+    "duration_ms": 7000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u004",
+    "stream_role": "students",
+    "speaker_name": "Demo Candidate",
+    "cluster_id": "c_demo_1",
+    "text": "I'd use a structured framework. First, I categorize features into must-haves, performance features, and delighters using the Kano model. Then I score each on impact versus effort. For a new product, I focus heavily on the must-haves that reduce churn risk.",
+    "start_ms": 27000,
+    "end_ms": 45000,
+    "duration_ms": 18000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u005",
+    "stream_role": "teacher",
+    "speaker_name": "Interviewer",
+    "text": "How do you handle disagreements with engineering about priority?",
+    "start_ms": 46000,
+    "end_ms": 50000,
+    "duration_ms": 4000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u006",
+    "stream_role": "students",
+    "speaker_name": "Demo Candidate",
+    "cluster_id": "c_demo_1",
+    "text": "I believe in data-driven discussions. I bring user research data, usage metrics, and competitive analysis to the table. If engineering has technical concerns about implementation complexity, I work with them to find a phased approach. Sometimes the best solution is a simpler MVP that validates the assumption first.",
+    "start_ms": 51000,
+    "end_ms": 72000,
+    "duration_ms": 21000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u007",
+    "stream_role": "teacher",
+    "speaker_name": "Interviewer",
+    "text": "Now let's move to the analytical question. Imagine your product's weekly active users dropped 15% over the past month. Walk me through how you'd investigate this.",
+    "start_ms": 73000,
+    "end_ms": 82000,
+    "duration_ms": 9000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u008",
+    "stream_role": "students",
+    "speaker_name": "Demo Candidate",
+    "cluster_id": "c_demo_1",
+    "text": "First, I'd segment the drop. Is it across all user cohorts or specific segments? I'd check: new user activation rate, existing user retention by cohort, and geographic breakdown. Then I'd look at external factors \u2014 any competitive launches, seasonal patterns, or platform changes. The most common root cause I've seen is a change in onboarding flow that increased friction for new users.",
+    "start_ms": 83000,
+    "end_ms": 108000,
+    "duration_ms": 25000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u009",
+    "stream_role": "teacher",
+    "speaker_name": "Interviewer",
+    "text": "What metric would you look at first?",
+    "start_ms": 109000,
+    "end_ms": 112000,
+    "duration_ms": 3000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u010",
+    "stream_role": "students",
+    "speaker_name": "Demo Candidate",
+    "cluster_id": "c_demo_1",
+    "text": "Day-1 retention for new users versus returning user frequency. If D1 retention dropped, the problem is likely acquisition quality or onboarding. If returning user frequency dropped, it's a feature engagement or value delivery issue. This helps narrow the investigation scope quickly.",
+    "start_ms": 113000,
+    "end_ms": 132000,
+    "duration_ms": 19000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u011",
+    "stream_role": "teacher",
+    "speaker_name": "Interviewer",
+    "text": "Excellent analysis. Do you have any questions for me about the role?",
+    "start_ms": 133000,
+    "end_ms": 137000,
+    "duration_ms": 4000,
+    "decision": "auto"
+  },
+  {
+    "utterance_id": "demo_u012",
+    "stream_role": "students",
+    "speaker_name": "Demo Candidate",
+    "cluster_id": "c_demo_1",
+    "text": "Yes, I'd love to understand how the PM team is structured here. How much autonomy do PMs have in setting the roadmap, and what's the typical product development cycle length?",
+    "start_ms": 138000,
+    "end_ms": 150000,
+    "duration_ms": 12000,
+    "decision": "auto"
+  }
+]

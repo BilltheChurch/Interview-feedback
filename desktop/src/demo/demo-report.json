@@ -1,0 +1,197 @@
+{
+  "session_id": "demo-session-001",
+  "overall": {
+    "summary_sections": [
+      {
+        "topic": "Interview Summary",
+        "bullets": [
+          "Candidate demonstrated strong analytical frameworks and structured thinking throughout the interview [e_000001].",
+          "Showed excellent ability to break down complex product problems into actionable investigation steps [e_000005].",
+          "Communication was clear and concise with good use of real-world examples [e_000002]."
+        ],
+        "evidence_ids": ["e_000001", "e_000002", "e_000005"]
+      }
+    ],
+    "team_dynamics": {
+      "highlights": ["Strong command of product frameworks (Kano model, impact/effort matrix)", "Data-driven decision making approach"],
+      "risks": ["Could explore more creative/unconventional solutions", "Limited discussion of cross-functional collaboration challenges"]
+    }
+  },
+  "per_person": [
+    {
+      "person_key": "Demo Candidate",
+      "display_name": "Demo Candidate",
+      "dimensions": [
+        {
+          "dimension": "leadership",
+          "strengths": [
+            {
+              "claim_id": "c_demo_leadership_01",
+              "text": "Demonstrated product leadership by describing how they grew DAU 10x and led an 8-person engineering team [e_000001].",
+              "evidence_refs": ["e_000001"],
+              "confidence": 0.88
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_demo_leadership_02",
+              "text": "Did not elaborate on how they handle pushback from senior stakeholders or navigate organizational politics [e_000003].",
+              "evidence_refs": ["e_000003"],
+              "confidence": 0.72
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_demo_leadership_03",
+              "text": "In follow-up interviews, probe for examples of leading through influence without direct authority.",
+              "evidence_refs": ["e_000001"],
+              "confidence": 0.75
+            }
+          ]
+        },
+        {
+          "dimension": "collaboration",
+          "strengths": [
+            {
+              "claim_id": "c_demo_collab_01",
+              "text": "Showed collaborative mindset by emphasizing data-driven discussions and phased approaches when working with engineering [e_000003].",
+              "evidence_refs": ["e_000003"],
+              "confidence": 0.85
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_demo_collab_02",
+              "text": "Examples were focused on PM-Engineering collaboration; did not discuss working with design, marketing, or sales [e_000003].",
+              "evidence_refs": ["e_000003"],
+              "confidence": 0.68
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_demo_collab_03",
+              "text": "Ask about cross-functional alignment in product launches and how they handle conflicting priorities across teams.",
+              "evidence_refs": ["e_000003"],
+              "confidence": 0.70
+            }
+          ]
+        },
+        {
+          "dimension": "logic",
+          "strengths": [
+            {
+              "claim_id": "c_demo_logic_01",
+              "text": "Excellent analytical framework for investigating metric drops \u2014 systematic segmentation approach with clear hypothesis testing [e_000005].",
+              "evidence_refs": ["e_000005", "e_000006"],
+              "confidence": 0.92
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_demo_logic_02",
+              "text": "Did not discuss statistical significance or how to validate hypotheses with A/B testing [e_000005].",
+              "evidence_refs": ["e_000005"],
+              "confidence": 0.65
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_demo_logic_03",
+              "text": "Probe deeper on experiment design and how they quantify the impact of product changes.",
+              "evidence_refs": ["e_000006"],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "structure",
+          "strengths": [
+            {
+              "claim_id": "c_demo_struct_01",
+              "text": "Highly structured responses \u2014 used frameworks (Kano model, impact/effort) to organize thinking before diving into details [e_000002].",
+              "evidence_refs": ["e_000002"],
+              "confidence": 0.90
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_demo_struct_02",
+              "text": "Answers sometimes ran long; could benefit from more concise initial framing before elaboration [e_000004].",
+              "evidence_refs": ["e_000004"],
+              "confidence": 0.60
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_demo_struct_03",
+              "text": "Practice the 'headline first' approach \u2014 state the conclusion, then provide supporting details.",
+              "evidence_refs": ["e_000002"],
+              "confidence": 0.70
+            }
+          ]
+        },
+        {
+          "dimension": "initiative",
+          "strengths": [
+            {
+              "claim_id": "c_demo_init_01",
+              "text": "Proactively asked insightful questions about team structure and PM autonomy, showing genuine interest [e_000007].",
+              "evidence_refs": ["e_000007"],
+              "confidence": 0.82
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_demo_init_02",
+              "text": "Could have been more proactive in proposing follow-up actions during the analytical question [e_000006].",
+              "evidence_refs": ["e_000006"],
+              "confidence": 0.62
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_demo_init_03",
+              "text": "In future interviews, end each answer with a proposed next step or action item.",
+              "evidence_refs": ["e_000007"],
+              "confidence": 0.68
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "strengths": [
+          "Strong analytical frameworks and structured problem-solving",
+          "Data-driven approach to product decisions",
+          "Clear communication with real-world examples"
+        ],
+        "risks": [
+          "Limited cross-functional collaboration examples",
+          "Could be more concise in initial responses",
+          "Missing discussion of experimentation methodology"
+        ],
+        "actions": [
+          "Probe leadership through influence in next round",
+          "Assess experiment design capabilities",
+          "Evaluate cross-functional collaboration depth"
+        ]
+      }
+    }
+  ],
+  "quality": {
+    "generated_at": "2026-02-14T10:00:00Z",
+    "build_ms": 3200,
+    "claim_count": 15,
+    "invalid_claim_count": 0,
+    "needs_evidence_count": 0,
+    "report_source": "llm_synthesized",
+    "synthesis_context": {
+      "rubric_used": true,
+      "free_notes_used": false,
+      "historical_sessions_count": 0,
+      "name_bindings_count": 1,
+      "stages_count": 4,
+      "transcript_tokens_approx": 380,
+      "transcript_truncated": false
+    }
+  }
+}

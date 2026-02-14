@@ -1,0 +1,24 @@
+{
+  "sessionId": "demo-session-001",
+  "sessionName": "Demo: Product Manager Interview",
+  "mode": "1v1",
+  "stages": ["Intro", "Q1: Product Strategy", "Q2: Analytical Thinking", "Wrap-up"],
+  "participants": ["Demo Candidate"],
+  "rubric": {
+    "template_name": "Product Manager",
+    "dimensions": [
+      { "name": "leadership", "description": "Ability to lead product direction and influence stakeholders", "weight": 1.2 },
+      { "name": "collaboration", "description": "Working with cross-functional teams", "weight": 1.0 },
+      { "name": "logic", "description": "Analytical reasoning and problem breakdown", "weight": 1.5 },
+      { "name": "structure", "description": "Organized thinking and communication", "weight": 1.0 },
+      { "name": "initiative", "description": "Proactively driving next steps", "weight": 0.8 }
+    ]
+  },
+  "interviewer": "You",
+  "stageDescriptions": [
+    { "stage_index": 0, "stage_name": "Intro", "description": "Self-introduction and background" },
+    { "stage_index": 1, "stage_name": "Q1: Product Strategy", "description": "Design a feature prioritization framework" },
+    { "stage_index": 2, "stage_name": "Q2: Analytical Thinking", "description": "Analyze a product metric decline" },
+    { "stage_index": 3, "stage_name": "Wrap-up", "description": "Questions and closing" }
+  ]
+}
