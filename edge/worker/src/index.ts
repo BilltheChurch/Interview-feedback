@@ -3,10 +3,17 @@ import {
   attachEvidenceToMemos,
   buildEvidence,
   buildMemoFirstReport,
+  buildMultiEvidence,
   buildReportExportMarkdown,
   buildReportExportText,
   buildResultV2,
+  buildSynthesizePayload,
+  collectEnrichedContext,
   computeSpeakerStats,
+  computeUnknownRatio,
+  enforceQualityGates,
+  extractMemoNames,
+  addStageMetadata,
   validatePersonFeedbackEvidence
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
@@ -22,12 +29,14 @@ import { analyzeEventsLocally } from "./local_events_analyzer";
 import type {
   FinalizeV2Status,
   MemoItem,
+  MemoSpeakerBinding,
   PersonFeedbackItem,
   ReportQualityMeta,
   ResultV2,
   SpeakerStatItem,
   SpeakerLogs,
-  SpeakerMapItem
+  SpeakerMapItem,
+  SynthesizeRequestPayload
 } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
@@ -221,6 +230,51 @@ interface FeedbackRegenerateClaimRequest {
   text_hint?: string;
 }
 
+interface FeedbackClaimEvidenceRequest {
+  person_key: string;
+  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+  claim_type: "strengths" | "risks" | "actions";
+  claim_id?: string;
+  evidence_refs: string[];
+}
+
+interface InferenceRegenerateClaimRequest {
+  session_id: string;
+  person_key: string;
+  display_name?: string | null;
+  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+  claim_type: "strengths" | "risks" | "actions";
+  claim_id?: string;
+  claim_text?: string;
+  text_hint?: string;
+  allowed_evidence_ids: string[];
+  evidence: Array<{
+    evidence_id: string;
+    time_range_ms: [number, number];
+    utterance_ids: string[];
+    speaker_key?: string | null;
+    quote: string;
+    confidence: number;
+  }>;
+  transcript: TranscriptItem[];
+  memos: MemoItem[];
+  stats: SpeakerStatItem[];
+  locale: string;
+}
+
+interface InferenceRegenerateClaimResponse {
+  session_id: string;
+  person_key: string;
+  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+  claim_type: "strengths" | "risks" | "actions";
+  claim: {
+    claim_id: string;
+    text: string;
+    evidence_refs: string[];
+    confidence: number;
+  };
+}
+
 interface FeedbackExportRequest {
   format?: "plain_text" | "markdown" | "docx";
   file_name?: string;
@@ -272,6 +326,8 @@ interface UtteranceMerged {
 
 interface FeedbackTimings {
   assemble_ms: number;
+  events_ms: number;
+  report_ms: number;
   validation_ms: number;
   persist_ms: number;
   total_ms: number;
@@ -287,6 +343,9 @@ interface FeedbackCache {
   report: ResultV2 | null;
   quality: ReportQualityMeta;
   timings: FeedbackTimings;
+  report_source: string;
+  blocking_reason: string | null;
+  quality_gate_passed: boolean;
 }
 
 interface QualityMetrics {
@@ -297,6 +356,16 @@ interface QualityMetrics {
   echo_suppression_recent_rate: number;
   echo_leak_rate: number;
   suppression_false_positive_rate: number;
+}
+
+interface HistoryIndexItem {
+  session_id: string;
+  finalized_at: string;
+  tentative: boolean;
+  unresolved_cluster_count: number;
+  ready: boolean;
+  needs_evidence_count: number;
+  report_source: string;
 }
 
 interface AsrState {
@@ -402,6 +471,8 @@ interface Env {
   INFERENCE_ENROLL_PATH?: string;
   INFERENCE_EVENTS_PATH?: string;
   INFERENCE_REPORT_PATH?: string;
+  INFERENCE_REGENERATE_CLAIM_PATH?: string;
+  INFERENCE_SYNTHESIZE_PATH?: string;
   INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
   ASR_ENABLED?: string;
@@ -441,7 +512,11 @@ function emptyReportQualityMeta(nowIso: string): ReportQualityMeta {
     validation_ms: 0,
     claim_count: 0,
     invalid_claim_count: 0,
-    needs_evidence_count: 0
+    needs_evidence_count: 0,
+    report_source: "memo_first",
+    report_model: null,
+    report_degraded: false,
+    report_error: null
   };
 }
 
@@ -457,17 +532,23 @@ function emptyFeedbackCache(sessionId: string, nowIso: string): FeedbackCache {
     quality: emptyReportQualityMeta(nowIso),
     timings: {
       assemble_ms: 0,
+      events_ms: 0,
+      report_ms: 0,
       validation_ms: 0,
       persist_ms: 0,
       total_ms: 0
-    }
+    },
+    report_source: "memo_first",
+    blocking_reason: "feedback_not_generated",
+    quality_gate_passed: false
   };
 }
 
 const SESSION_ROUTE_REGEX =
-  /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|export)$/;
+  /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|feedback-claim-evidence|export)$/;
 const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state)$/;
 const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
+const SESSION_HISTORY_ROUTE_REGEX = /^\/v1\/sessions\/history$/;
 const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
 const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
 
@@ -502,10 +583,15 @@ const INFERENCE_MAX_AUDIO_SECONDS = 30;
 const DASHSCOPE_DEFAULT_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const DASHSCOPE_DEFAULT_MODEL = "fun-asr-realtime-2025-11-07";
 const FEEDBACK_REFRESH_INTERVAL_MS = 10_000;
-const FEEDBACK_TOTAL_BUDGET_MS = 3_000;
-const FEEDBACK_ASSEMBLE_BUDGET_MS = 900;
+const FEEDBACK_TOTAL_BUDGET_MS = 8_000;
+const FEEDBACK_ASSEMBLE_BUDGET_MS = 1_200;
+const FEEDBACK_EVENTS_BUDGET_MS = 1_200;
+const FEEDBACK_REPORT_BUDGET_MS = 4_500;
 const FEEDBACK_VALIDATE_BUDGET_MS = 600;
-const FEEDBACK_PERSIST_FETCH_BUDGET_MS = 700;
+const FEEDBACK_PERSIST_FETCH_BUDGET_MS = 500;
+const HISTORY_PREFIX = "history/";
+const HISTORY_MAX_LIMIT = 50;
+const HISTORY_REVERSE_EPOCH_MAX = 9_999_999_999_999;
 
 function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(payload), {
@@ -554,6 +640,12 @@ function resultObjectKey(sessionId: string): string {
 
 function resultObjectKeyV2(sessionId: string): string {
   return `sessions/${safeObjectSegment(sessionId)}/result_v2.json`;
+}
+
+function historyObjectKey(sessionId: string, finalizedAtMs: number): string {
+  const reverse = Math.max(0, HISTORY_REVERSE_EPOCH_MAX - Math.max(0, finalizedAtMs));
+  const reversePart = String(reverse).padStart(13, "0");
+  return `${HISTORY_PREFIX}${reversePart}_${safeObjectSegment(sessionId)}.json`;
 }
 
 function chunkObjectKey(sessionId: string, streamRole: StreamRole, seq: number): string {
@@ -1516,6 +1608,38 @@ export default {
       return proxyToDO(request, env, sessionId, "finalize-status");
     }
 
+    if (SESSION_HISTORY_ROUTE_REGEX.test(path)) {
+      if (request.method !== "GET") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      const limitRaw = Number(url.searchParams.get("limit") ?? "20");
+      const cursorRaw = String(url.searchParams.get("cursor") ?? "").trim();
+      const limit = Math.max(1, Math.min(HISTORY_MAX_LIMIT, Number.isFinite(limitRaw) ? limitRaw : 20));
+      const listing = await env.RESULT_BUCKET.list({
+        prefix: HISTORY_PREFIX,
+        cursor: cursorRaw || undefined,
+        limit
+      });
+      const items: HistoryIndexItem[] = [];
+      for (const obj of listing.objects) {
+        const object = await env.RESULT_BUCKET.get(obj.key);
+        if (!object) continue;
+        try {
+          const parsed = JSON.parse(await object.text()) as HistoryIndexItem;
+          if (!parsed || typeof parsed !== "object") continue;
+          items.push(parsed);
+        } catch {
+          continue;
+        }
+      }
+      return jsonResponse({
+        items,
+        limit,
+        cursor: listing.truncated ? listing.cursor ?? null : null,
+        has_more: listing.truncated
+      });
+    }
+
     const match = path.match(SESSION_ROUTE_REGEX);
     if (!match) {
       return jsonResponse({ detail: "route not found" }, 404);
@@ -1576,6 +1700,9 @@ export default {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
     if (action === "feedback-regenerate-claim" && request.method !== "POST") {
+      return jsonResponse({ detail: "method not allowed" }, 405);
+    }
+    if (action === "feedback-claim-evidence" && request.method !== "POST") {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
     if (action === "export" && request.method !== "POST") {
@@ -1751,7 +1878,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async callInferenceWithFailover<T>(params: {
-    endpoint: "resolve" | "enroll" | "analysis_events" | "analysis_report";
+    endpoint: "resolve" | "enroll" | "analysis_events" | "analysis_report" | "analysis_regenerate_claim" | "analysis_synthesize";
     path: string;
     body: unknown;
     timeoutMs?: number;
@@ -2176,7 +2303,24 @@ export class MeetingSessionDO extends DurableObject<Env> {
   private async loadFeedbackCache(sessionId: string): Promise<FeedbackCache> {
     const existing = await this.ctx.storage.get<FeedbackCache>(STORAGE_KEY_FEEDBACK_CACHE);
     if (existing && existing.session_id === sessionId) {
-      return existing;
+      const normalized: FeedbackCache = {
+        ...existing,
+        timings: {
+          assemble_ms: Number(existing.timings?.assemble_ms ?? 0),
+          events_ms: Number(existing.timings?.events_ms ?? 0),
+          report_ms: Number(existing.timings?.report_ms ?? 0),
+          validation_ms: Number(existing.timings?.validation_ms ?? 0),
+          persist_ms: Number(existing.timings?.persist_ms ?? 0),
+          total_ms: Number(existing.timings?.total_ms ?? 0)
+        },
+        report_source: (existing.report_source ?? existing.quality?.report_source ?? "memo_first") as
+          | "memo_first"
+          | "llm_enhanced"
+          | "llm_failed",
+        blocking_reason: existing.blocking_reason ?? null,
+        quality_gate_passed: Boolean(existing.quality_gate_passed ?? false)
+      };
+      return normalized;
     }
     const created = emptyFeedbackCache(sessionId, this.currentIsoTs());
     await this.ctx.storage.put(STORAGE_KEY_FEEDBACK_CACHE, created);
@@ -2335,6 +2479,90 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return index;
   }
 
+  private findClaimInReport(
+    report: ResultV2,
+    params: {
+      personKey: string;
+      dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+      claimType: "strengths" | "risks" | "actions";
+      claimId?: string;
+    }
+  ): { person: PersonFeedbackItem; claim: PersonFeedbackItem["dimensions"][number]["strengths"][number] } | null {
+    const person = report.per_person.find((item) => item.person_key === params.personKey);
+    if (!person) return null;
+    const dimension = person.dimensions.find((item) => item.dimension === params.dimension);
+    if (!dimension) return null;
+    const claims = dimension[params.claimType];
+    const claim = params.claimId ? claims.find((item) => item.claim_id === params.claimId) : claims[0];
+    if (!claim) return null;
+    return { person, claim };
+  }
+
+  private downWeightClaimConfidenceByEvidence(
+    claim: PersonFeedbackItem["dimensions"][number]["strengths"][number],
+    evidenceById: Map<string, ResultV2["evidence"][number]>
+  ): void {
+    const hasWeakEvidence = claim.evidence_refs.some((ref) => Boolean(evidenceById.get(ref)?.weak));
+    const base = Number(claim.confidence || 0.72);
+    claim.confidence = hasWeakEvidence ? Math.max(0.35, Math.min(0.95, base - 0.18)) : Math.max(0.35, Math.min(0.95, base));
+  }
+
+  private validateClaimEvidenceRefs(
+    report: ResultV2
+  ): { valid: boolean; claimCount: number; invalidCount: number; needsEvidenceCount: number; failures: string[] } {
+    const evidenceById = new Map(report.evidence.map((item) => [item.evidence_id, item] as const));
+    let claimCount = 0;
+    let invalidCount = 0;
+    let needsEvidenceCount = 0;
+    const failures: string[] = [];
+    for (const person of report.per_person) {
+      for (const dimension of person.dimensions) {
+        const claims = [...dimension.strengths, ...dimension.risks, ...dimension.actions];
+        for (const claim of claims) {
+          claimCount += 1;
+          const refs = Array.isArray(claim.evidence_refs)
+            ? claim.evidence_refs.map((item) => String(item || "").trim()).filter(Boolean)
+            : [];
+          if (refs.length === 0) {
+            invalidCount += 1;
+            needsEvidenceCount += 1;
+            failures.push(`claim ${claim.claim_id} has empty evidence_refs`);
+            continue;
+          }
+          const missing = refs.filter((ref) => !evidenceById.has(ref));
+          if (missing.length > 0) {
+            invalidCount += 1;
+            failures.push(`claim ${claim.claim_id} references unknown evidence ids: ${missing.slice(0, 3).join(",")}`);
+            continue;
+          }
+          this.downWeightClaimConfidenceByEvidence(claim, evidenceById);
+        }
+      }
+    }
+    return {
+      valid: invalidCount === 0 && claimCount > 0,
+      claimCount,
+      invalidCount,
+      needsEvidenceCount,
+      failures
+    };
+  }
+
+  private evaluateFeedbackQualityGates(params: {
+    unknownRatio: number;
+    ingestP95Ms: number | null;
+    claimValidationFailures: string[];
+  }): { passed: boolean; failures: string[] } {
+    const failures = [...params.claimValidationFailures];
+    if (!Number.isFinite(params.unknownRatio) || params.unknownRatio > 0.10) {
+      failures.push(`students_unknown_ratio gate failed: observed=${params.unknownRatio.toFixed(4)} target<=0.10`);
+    }
+    if (params.ingestP95Ms === null || !Number.isFinite(params.ingestP95Ms) || params.ingestP95Ms > 3000) {
+      failures.push(`students_ingest_to_utterance_p95_ms gate failed: observed=${params.ingestP95Ms ?? "null"} target<=3000`);
+    }
+    return { passed: failures.length === 0, failures };
+  }
+
   private mergeStatsWithRoster(stats: SpeakerStatItem[], state: SessionState): SpeakerStatItem[] {
     const out: SpeakerStatItem[] = [...stats];
     const seen = new Set<string>();
@@ -2374,12 +2602,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
     const totalStart = Date.now();
     const assembleStart = Date.now();
-    const [stateRaw, events, rawByStream, memos, speakerLogsStored] = await Promise.all([
+    const [stateRaw, events, rawByStream, memos, speakerLogsStored, asrByStream] = await Promise.all([
       this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
       this.loadSpeakerEvents(),
       this.loadUtterancesRawByStream(),
       this.loadMemos(),
-      this.loadSpeakerLogs()
+      this.loadSpeakerLogs(),
+      this.loadAsrByStream()
     ]);
     const state = normalizeSessionState(stateRaw);
     const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
@@ -2395,8 +2624,81 @@ export class MeetingSessionDO extends DurableObject<Env> {
     });
     const assembleMs = Date.now() - assembleStart;
 
+    const eventsStart = Date.now();
+    const eventsPayload = {
+      session_id: sessionId,
+      transcript,
+      memos: memosWithEvidence,
+      stats,
+      locale: "zh-CN"
+    };
+    const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
+    const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
+    const eventsMs = Date.now() - eventsStart;
+
+    let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" = "memo_first";
+    let reportModel: string | null = null;
+    let reportError: string | null = null;
+    let reportBlockingReason: string | null = null;
+    let finalOverall = memoFirst.overall;
+    let finalPerPerson = memoFirst.per_person;
+    let reportTimeline: InferenceBackendTimelineItem[] = [];
+    const reportStart = Date.now();
+    try {
+      const reportResult = await this.invokeInferenceAnalysisReport({
+        session_id: sessionId,
+        transcript,
+        memos: memosWithEvidence,
+        stats,
+        evidence,
+        events: analysisEvents,
+        locale: "zh-CN"
+      });
+      reportTimeline = reportResult.timeline;
+      const payload = reportResult.data;
+      const candidatePerPerson = Array.isArray(payload?.per_person) ? (payload.per_person as PersonFeedbackItem[]) : [];
+      const candidateOverall = (payload?.overall ?? memoFirst.overall) as unknown;
+      const candidateQuality =
+        payload?.quality && typeof payload.quality === "object" ? (payload.quality as Partial<ReportQualityMeta>) : null;
+      if (candidatePerPerson.length > 0) {
+        const candidateValidation = this.validateClaimEvidenceRefs({
+          evidence,
+          per_person: candidatePerPerson
+        } as ResultV2);
+        if (candidateValidation.valid) {
+          finalPerPerson = candidatePerPerson;
+          finalOverall = candidateOverall;
+          reportSource = "llm_enhanced";
+          const source = String(candidateQuality?.report_source || "").trim();
+          if (source === "llm_failed") {
+            reportSource = "llm_failed";
+          }
+          if (source === "memo_first") {
+            reportSource = "memo_first";
+          }
+          reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
+          reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
+        } else {
+          reportSource = "llm_failed";
+          reportBlockingReason = `analysis/report invalid evidence refs: ${candidateValidation.failures[0] || "unknown"}`;
+        }
+      } else {
+        reportSource = "llm_failed";
+        reportBlockingReason = "analysis/report returned empty per_person";
+      }
+    } catch (error) {
+      reportSource = "llm_failed";
+      reportError = (error as Error).message;
+      reportBlockingReason = `analysis/report failed: ${(error as Error).message}`;
+    }
+    const reportMs = Date.now() - reportStart;
+
     const validateStart = Date.now();
-    const validation = validatePersonFeedbackEvidence(memoFirst.per_person);
+    const finalValidation = this.validateClaimEvidenceRefs({
+      evidence,
+      per_person: finalPerPerson
+    } as ResultV2);
+    const validation = validatePersonFeedbackEvidence(finalPerPerson);
     const validationMs = Date.now() - validateStart;
 
     const unresolvedClusterCount = state.clusters.filter((cluster) => {
@@ -2404,13 +2706,52 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const meta = state.cluster_binding_meta[cluster.cluster_id];
       return !bound || !meta || !meta.locked;
     }).length;
-    const tentative = unresolvedClusterCount > 0;
+    const qualityMetrics = this.buildQualityMetrics(transcript, state.capture_by_stream ?? defaultCaptureByStream());
+    const ingestP95Ms =
+      typeof asrByStream.students.ingest_to_utterance_p95_ms === "number"
+        ? asrByStream.students.ingest_to_utterance_p95_ms
+        : null;
+    const gateSeedFailures = [...finalValidation.failures];
+    if (reportSource !== "llm_enhanced") {
+      gateSeedFailures.push(reportBlockingReason || "llm enhanced report unavailable");
+    }
+    const gateEvaluation = this.evaluateFeedbackQualityGates({
+      unknownRatio: qualityMetrics.unknown_ratio,
+      ingestP95Ms,
+      claimValidationFailures: gateSeedFailures
+    });
+    const tentative = unresolvedClusterCount > 0 || !gateEvaluation.passed;
     const finalizedAt = this.currentIsoTs();
     const quality: ReportQualityMeta = {
       ...validation.quality,
       generated_at: finalizedAt,
-      build_ms: assembleMs,
-      validation_ms: validationMs
+      build_ms: assembleMs + eventsMs + reportMs,
+      validation_ms: validationMs,
+      claim_count: finalValidation.claimCount,
+      invalid_claim_count: finalValidation.invalidCount,
+      needs_evidence_count: finalValidation.needsEvidenceCount,
+      report_source: reportSource,
+      report_model: reportModel,
+      report_degraded: reportSource !== "llm_enhanced",
+      report_error: reportError
+    };
+
+    const backendTimeline: InferenceBackendTimelineItem[] = [
+      ...eventsResult.timeline,
+      ...reportTimeline
+    ];
+    const qualityGateSnapshot = {
+      finalize_success_target: 0.995,
+      students_unknown_ratio_target: 0.10,
+      sv_top1_target: 0.90,
+      echo_reduction_target: 0.8,
+      observed_unknown_ratio: qualityMetrics.unknown_ratio,
+      observed_students_turns: qualityMetrics.students_utterance_count,
+      observed_students_unknown: qualityMetrics.students_unknown_count,
+      observed_echo_suppressed_chunks: qualityMetrics.echo_suppressed_chunks,
+      observed_echo_recent_rate: qualityMetrics.echo_suppression_recent_rate,
+      observed_echo_leak_rate: qualityMetrics.echo_leak_rate,
+      observed_suppression_false_positive_rate: qualityMetrics.suppression_false_positive_rate
     };
 
     const result = buildResultV2({
@@ -2427,39 +2768,57 @@ export class MeetingSessionDO extends DurableObject<Env> {
       stats,
       memos,
       evidence,
-      overall: memoFirst.overall,
-      perPerson: memoFirst.per_person,
+      overall: finalOverall,
+      perPerson: finalPerPerson,
       quality,
       finalizeJobId: `feedback-open-${crypto.randomUUID()}`,
       modelVersions: {
         asr: DASHSCOPE_DEFAULT_MODEL,
         analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
         analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report",
-        summary_mode: "memo_first"
+        summary_mode: "memo_first_with_llm_polish"
       },
       thresholds: {
         feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
         feedback_assemble_budget_ms: FEEDBACK_ASSEMBLE_BUDGET_MS,
+        feedback_events_budget_ms: FEEDBACK_EVENTS_BUDGET_MS,
+        feedback_report_budget_ms: FEEDBACK_REPORT_BUDGET_MS,
         feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
         feedback_persist_fetch_budget_ms: FEEDBACK_PERSIST_FETCH_BUDGET_MS
-      }
+      },
+      backendTimeline,
+      qualityGateSnapshot,
+      reportPipeline: {
+        mode: "memo_first_with_llm_polish",
+        source: reportSource,
+        llm_attempted: true,
+        llm_success: reportSource === "llm_enhanced",
+        llm_elapsed_ms: reportMs,
+        blocking_reason: reportBlockingReason
+      },
+      qualityGateFailures: gateEvaluation.failures
     });
 
     const nextCache: FeedbackCache = {
       session_id: sessionId,
       updated_at: finalizedAt,
-      ready: validation.valid,
-      person_summary_cache: memoFirst.per_person,
-      overall_summary_cache: memoFirst.overall,
-      evidence_index_cache: this.buildEvidenceIndex(memoFirst.per_person),
+      ready: false,
+      person_summary_cache: finalPerPerson,
+      overall_summary_cache: finalOverall,
+      evidence_index_cache: this.buildEvidenceIndex(finalPerPerson),
       report: result,
       quality,
       timings: {
         assemble_ms: assembleMs,
+        events_ms: eventsMs,
+        report_ms: reportMs,
         validation_ms: validationMs,
         persist_ms: 0,
         total_ms: 0
-      }
+      },
+      report_source: reportSource,
+      blocking_reason: reportBlockingReason,
+      quality_gate_passed: false
     };
     const persistStart = Date.now();
     await this.storeFeedbackCache(nextCache);
@@ -2468,11 +2827,32 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const meetsBudget =
       totalMs <= FEEDBACK_TOTAL_BUDGET_MS &&
       assembleMs <= FEEDBACK_ASSEMBLE_BUDGET_MS &&
+      eventsMs <= FEEDBACK_EVENTS_BUDGET_MS &&
+      reportMs <= FEEDBACK_REPORT_BUDGET_MS &&
       validationMs <= FEEDBACK_VALIDATE_BUDGET_MS &&
       persistMs <= FEEDBACK_PERSIST_FETCH_BUDGET_MS;
+    const gatePassed = gateEvaluation.passed && meetsBudget;
+    const budgetReason = meetsBudget
+      ? null
+      : `feedback budgets exceeded (total=${totalMs} assemble=${assembleMs} events=${eventsMs} report=${reportMs} validate=${validationMs} persist=${persistMs})`;
     nextCache.timings.persist_ms = persistMs;
     nextCache.timings.total_ms = totalMs;
-    nextCache.ready = validation.valid && meetsBudget;
+    nextCache.ready = gatePassed;
+    nextCache.quality_gate_passed = gatePassed;
+    if (!meetsBudget && nextCache.report) {
+      const failures = Array.isArray(nextCache.report.trace.quality_gate_failures)
+        ? [...nextCache.report.trace.quality_gate_failures]
+        : [];
+      failures.push(
+        `feedback_budget gate failed: total=${totalMs} assemble=${assembleMs} events=${eventsMs} report=${reportMs} validate=${validationMs} persist=${persistMs}`
+      );
+      nextCache.report.trace.quality_gate_failures = failures;
+    }
+    if (!nextCache.ready && !nextCache.blocking_reason) {
+      nextCache.blocking_reason = gateEvaluation.failures[0] || budgetReason || "feedback quality gate failed";
+    } else if (budgetReason) {
+      nextCache.blocking_reason = budgetReason;
+    }
     await this.storeFeedbackCache(nextCache);
     return nextCache;
   }
@@ -3901,6 +4281,54 @@ export class MeetingSessionDO extends DurableObject<Env> {
     };
   }
 
+  private async invokeInferenceSynthesizeReport(payload: SynthesizeRequestPayload): Promise<{
+    data: Record<string, unknown>;
+    backend_used: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
+    const path = this.env.INFERENCE_SYNTHESIZE_PATH ?? "/analysis/synthesize";
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "45000");
+    const response = await this.callInferenceWithFailover<Record<string, unknown>>({
+      endpoint: "analysis_synthesize",
+      path,
+      timeoutMs,
+      body: payload
+    });
+    return {
+      data: response.data,
+      backend_used: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
+  }
+
+  private async invokeInferenceRegenerateClaim(payload: InferenceRegenerateClaimRequest): Promise<{
+    data: InferenceRegenerateClaimResponse;
+    backend_used: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
+    const path = this.env.INFERENCE_REGENERATE_CLAIM_PATH ?? "/analysis/regenerate-claim";
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
+    const response = await this.callInferenceWithFailover<InferenceRegenerateClaimResponse>({
+      endpoint: "analysis_regenerate_claim",
+      path,
+      timeoutMs,
+      body: payload
+    });
+    return {
+      data: response.data,
+      backend_used: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
+  }
+
   private deriveSpeakerLogsFromTranscript(
     nowIso: string,
     transcript: Array<{
@@ -4191,28 +4619,35 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
       const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
-      const evidence = buildEvidence({ memos, transcript });
-      const memosWithEvidence = attachEvidenceToMemos(memos, evidence);
+
+      // ── NEW PIPELINE: Extract names, build multi-evidence, stage metadata ──
+      const knownSpeakers = stats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
+      const memoBindings = extractMemoNames(memos, knownSpeakers);
+      const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
+      const enrichedMemos = addStageMetadata(memos, configStages);
+      const evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
+
+      // Keep legacy evidence + memo-first as fallback baseline
+      const legacyEvidence = buildEvidence({ memos, transcript });
+      const memosWithEvidence = attachEvidenceToMemos(memos, legacyEvidence);
       const memoFirstStart = Date.now();
       const memoFirstReport = buildMemoFirstReport({
         transcript,
         memos: memosWithEvidence,
-        evidence,
+        evidence: legacyEvidence,
         stats
       });
       const memoFirstBuildMs = Date.now() - memoFirstStart;
       const validationStart = Date.now();
-      const validation = validatePersonFeedbackEvidence(memoFirstReport.per_person);
+      const memoFirstStrictValidation = this.validateClaimEvidenceRefs({
+        evidence: legacyEvidence,
+        per_person: memoFirstReport.per_person
+      } as ResultV2);
+      const memoFirstValidation = validatePersonFeedbackEvidence(memoFirstReport.per_person);
       const validationMs = Date.now() - validationStart;
-      const quality: ReportQualityMeta = {
-        ...validation.quality,
-        generated_at: this.currentIsoTs(),
-        build_ms: memoFirstBuildMs,
-        validation_ms: validationMs
-      };
-      if (!validation.valid) {
+      if (!memoFirstValidation.valid || !memoFirstStrictValidation.valid) {
         throw new Error(
-          `report evidence validation failed: claim_count=${quality.claim_count} invalid_claim_count=${quality.invalid_claim_count}`
+          `report evidence validation failed: claim_count=${memoFirstStrictValidation.claimCount} invalid_claim_count=${memoFirstStrictValidation.invalidCount}`
         );
       }
 
@@ -4246,23 +4681,160 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
       await this.ensureFinalizeJobActive(jobId);
-      // Keep calling report endpoint to preserve pipeline compatibility and warm
-      // model-side analytics, but memo-first output remains authoritative.
-      this.ctx.waitUntil(
-        this.invokeInferenceAnalysisReport({
-          session_id: sessionId,
+      const reportStart = Date.now();
+      let finalOverall = memoFirstReport.overall;
+      let finalPerPerson = memoFirstReport.per_person;
+      let reportSource: "memo_first" | "llm_enhanced" | "llm_failed"
+        | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
+      let reportModel: string | null = null;
+      let reportError: string | null = null;
+      let reportBlockingReason: string | null = null;
+      let reportTimeline: InferenceBackendTimelineItem[] = [];
+      let llmAttempted = false;
+      let llmSuccess = false;
+      let llmElapsedMs: number | null = null;
+      let pipelineMode: "memo_first_with_llm_polish" | "llm_core_synthesis" = "memo_first_with_llm_polish";
+
+      // ── LLM-Core Synthesis Pipeline ──
+      try {
+        llmAttempted = true;
+        const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
+          sessionConfig: {
+            mode: (state.config as Record<string, unknown>)?.mode as "1v1" | "group" | undefined,
+            interviewer_name: (state.config as Record<string, unknown>)?.interviewer_name as string | undefined,
+            stages: configStages,
+          },
+        });
+
+        const synthPayload = buildSynthesizePayload({
+          sessionId,
           transcript,
-          memos: memosWithEvidence,
-          stats,
+          memos: enrichedMemos,
           evidence,
-          events: analysisEvents,
-          locale: "zh-CN"
-        }).catch((error) => {
-          console.error(`analysis/report warmup failed session=${sessionId}:`, error);
-          finalizeWarnings.push(`analysis/report warmup failed: ${(error as Error).message}`);
-          return null;
-        })
-      );
+          stats,
+          events: analysisEvents.map((evt: Record<string, unknown>) => ({
+            event_id: String(evt.event_id ?? ""),
+            event_type: String(evt.event_type ?? ""),
+            actor: evt.actor != null ? String(evt.actor) : null,
+            target: evt.target != null ? String(evt.target) : null,
+            time_range_ms: Array.isArray(evt.time_range_ms) ? (evt.time_range_ms as number[]) : [],
+            utterance_ids: Array.isArray(evt.utterance_ids) ? (evt.utterance_ids as string[]) : [],
+            quote: evt.quote != null ? String(evt.quote) : null,
+            confidence: typeof evt.confidence === "number" ? evt.confidence : 0.5,
+            rationale: evt.rationale != null ? String(evt.rationale) : null,
+          })),
+          bindings: memoBindings,
+          rubric,
+          sessionContext,
+          freeFormNotes,
+          historical: [],
+          stages: contextStages.length > 0 ? contextStages : configStages,
+          locale: "zh-CN",
+        });
+
+        const synthStart = Date.now();
+        const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
+        llmElapsedMs = Date.now() - synthStart;
+        reportTimeline = synthResult.timeline;
+
+        if (synthResult.warnings.length > 0) {
+          finalizeWarnings.push(...synthResult.warnings);
+        }
+        if (synthResult.degraded) {
+          finalizeDegraded = true;
+        }
+
+        const synthData = synthResult.data;
+        const candidatePerPerson = Array.isArray(synthData?.per_person) ? (synthData.per_person as PersonFeedbackItem[]) : [];
+        const candidateOverall = (synthData?.overall ?? memoFirstReport.overall) as unknown;
+        const candidateQuality =
+          synthData?.quality && typeof synthData.quality === "object" ? (synthData.quality as Partial<ReportQualityMeta>) : null;
+
+        if (candidatePerPerson.length > 0) {
+          const candidateValidation = this.validateClaimEvidenceRefs({
+            evidence,
+            per_person: candidatePerPerson
+          } as ResultV2);
+          if (candidateValidation.valid) {
+            finalPerPerson = candidatePerPerson;
+            finalOverall = candidateOverall;
+            llmSuccess = true;
+            pipelineMode = "llm_core_synthesis";
+            reportSource = (candidateQuality?.report_source as typeof reportSource) ?? "llm_synthesized";
+            reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
+            reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
+          } else {
+            reportSource = "memo_first_fallback";
+            reportBlockingReason = candidateValidation.failures[0] || "analysis/synthesize invalid evidence refs";
+          }
+        } else {
+          reportSource = "memo_first_fallback";
+          reportBlockingReason = "analysis/synthesize returned empty per_person";
+        }
+      } catch (synthError) {
+        // Synthesis failed — try legacy analysis/report as secondary fallback
+        try {
+          const reportResult = await this.invokeInferenceAnalysisReport({
+            session_id: sessionId,
+            transcript,
+            memos: memosWithEvidence,
+            stats,
+            evidence: legacyEvidence,
+            events: analysisEvents,
+            locale: "zh-CN"
+          });
+          reportTimeline = reportResult.timeline;
+          if (reportResult.warnings.length > 0) {
+            finalizeWarnings.push(...reportResult.warnings);
+          }
+          if (reportResult.degraded) {
+            finalizeDegraded = true;
+          }
+          const payload = reportResult.data;
+          const candidatePerPerson = Array.isArray(payload?.per_person) ? (payload.per_person as PersonFeedbackItem[]) : [];
+          const candidateOverall = (payload?.overall ?? memoFirstReport.overall) as unknown;
+          const candidateQuality =
+            payload?.quality && typeof payload.quality === "object" ? (payload.quality as Partial<ReportQualityMeta>) : null;
+          if (candidatePerPerson.length > 0) {
+            const candidateValidation = this.validateClaimEvidenceRefs({
+              evidence: legacyEvidence,
+              per_person: candidatePerPerson
+            } as ResultV2);
+            if (candidateValidation.valid) {
+              finalPerPerson = candidatePerPerson;
+              finalOverall = candidateOverall;
+              reportSource = "llm_enhanced";
+              if (candidateQuality?.report_source === "memo_first") {
+                reportSource = "memo_first";
+              }
+              if (candidateQuality?.report_source === "llm_failed") {
+                reportSource = "llm_failed";
+              }
+              reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
+              reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
+            } else {
+              reportSource = "memo_first_fallback";
+              reportBlockingReason = candidateValidation.failures[0] || "analysis/report invalid evidence refs";
+            }
+          } else {
+            reportSource = "memo_first_fallback";
+            reportBlockingReason = "analysis/report returned empty per_person";
+          }
+        } catch (reportError2) {
+          reportSource = "memo_first_fallback";
+          reportError = (synthError as Error).message;
+          reportBlockingReason = `analysis/synthesize failed: ${(synthError as Error).message}, analysis/report fallback also failed: ${(reportError2 as Error).message}`;
+          finalizeWarnings.push(reportBlockingReason);
+        }
+      }
+      const reportMs = Date.now() - reportStart;
+      backendTimeline.push(...reportTimeline);
+
+      // ── Quality gate enforcement (new) ──
+      const synthQualityGate = enforceQualityGates({
+        perPerson: finalPerPerson,
+        unknownRatio: computeUnknownRatio(transcript),
+      });
 
       await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
       await this.ensureFinalizeJobActive(jobId);
@@ -4275,21 +4847,54 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
       const captureByStream = state.capture_by_stream ?? defaultCaptureByStream();
       const qualityMetrics = this.buildQualityMetrics(transcript, captureByStream);
+      const ingestP95Ms =
+        typeof asrByStream.students.ingest_to_utterance_p95_ms === "number"
+          ? asrByStream.students.ingest_to_utterance_p95_ms
+          : null;
+      const finalStrictValidation = this.validateClaimEvidenceRefs({
+        evidence,
+        per_person: finalPerPerson
+      } as ResultV2);
+      const qualityGateEvaluation = this.evaluateFeedbackQualityGates({
+        unknownRatio: qualityMetrics.unknown_ratio,
+        ingestP95Ms,
+        claimValidationFailures: [
+          ...(finalStrictValidation.failures ?? []),
+          ...synthQualityGate.failures,
+          ...((reportSource as string) === "llm_enhanced" || (reportSource as string) === "llm_synthesized" || (reportSource as string) === "llm_synthesized_truncated" ? [] : [reportBlockingReason || "llm report unavailable"])
+        ]
+      });
+      const finalTentative = unresolvedClusterCount > 0 || !qualityGateEvaluation.passed;
+      const quality: ReportQualityMeta = {
+        ...memoFirstValidation.quality,
+        generated_at: finalizedAt,
+        build_ms: memoFirstBuildMs + reportMs,
+        validation_ms: validationMs,
+        claim_count: finalStrictValidation.claimCount,
+        invalid_claim_count: finalStrictValidation.invalidCount,
+        needs_evidence_count: finalStrictValidation.needsEvidenceCount,
+        report_source: reportSource,
+        report_model: reportModel,
+        report_degraded: (reportSource as string) !== "llm_enhanced" && (reportSource as string) !== "llm_synthesized",
+        report_error: reportError
+      };
       const qualityGateSnapshot = {
         finalize_success_target: 0.995,
         students_unknown_ratio_target: 0.1,
-        sv_top1_target: 0.95,
+        sv_top1_target: 0.9,
         echo_reduction_target: 0.8,
         observed_unknown_ratio: qualityMetrics.unknown_ratio,
         observed_students_turns: qualityMetrics.students_utterance_count,
         observed_students_unknown: qualityMetrics.students_unknown_count,
         observed_echo_suppressed_chunks: qualityMetrics.echo_suppressed_chunks,
-        observed_echo_recent_rate: qualityMetrics.echo_suppression_recent_rate
+        observed_echo_recent_rate: qualityMetrics.echo_suppression_recent_rate,
+        observed_echo_leak_rate: qualityMetrics.echo_leak_rate,
+        observed_suppression_false_positive_rate: qualityMetrics.suppression_false_positive_rate
       };
       const resultV2 = buildResultV2({
         sessionId,
         finalizedAt,
-        tentative,
+        tentative: finalTentative,
         unresolvedClusterCount,
         diarizationBackend,
         transcript,
@@ -4297,37 +4902,62 @@ export class MeetingSessionDO extends DurableObject<Env> {
         stats,
         memos,
         evidence,
-        overall: memoFirstReport.overall,
-        perPerson: memoFirstReport.per_person,
-        quality: {
-          ...quality,
-          generated_at: finalizedAt
-        },
+        overall: finalOverall,
+        perPerson: finalPerPerson,
+        quality,
         finalizeJobId: jobId,
         modelVersions: {
           asr: asrByStream.students.model,
           analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
           analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report",
-          summary_mode: "memo_first"
+          analysis_synthesize_path: this.env.INFERENCE_SYNTHESIZE_PATH ?? "/analysis/synthesize",
+          summary_mode: pipelineMode
         },
         thresholds: {
           sv_t_low: 0.45,
           sv_t_high: 0.70,
-          tentative,
+          tentative: finalTentative,
           unresolved_cluster_count: unresolvedClusterCount,
           diarization_backend: diarizationBackend,
           finalize_timeout_ms: timeoutMs,
           feedback_assemble_budget_ms: FEEDBACK_ASSEMBLE_BUDGET_MS,
+          feedback_events_budget_ms: FEEDBACK_EVENTS_BUDGET_MS,
+          feedback_report_budget_ms: FEEDBACK_REPORT_BUDGET_MS,
           feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
           feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
           ...thresholdMeta
         },
         backendTimeline,
-        qualityGateSnapshot
+        qualityGateSnapshot,
+        reportPipeline: {
+          mode: pipelineMode,
+          source: reportSource,
+          llm_attempted: llmAttempted,
+          llm_success: llmSuccess,
+          llm_elapsed_ms: llmElapsedMs ?? reportMs,
+          blocking_reason: reportBlockingReason
+        },
+        qualityGateFailures: qualityGateEvaluation.failures
       });
 
       const resultV2Key = resultObjectKeyV2(sessionId);
       await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
+        httpMetadata: { contentType: "application/json" }
+      });
+      const historyItem: HistoryIndexItem = {
+        session_id: sessionId,
+        finalized_at: finalizedAt,
+        tentative: Boolean(resultV2.session.tentative),
+        unresolved_cluster_count: Number(resultV2.session.unresolved_cluster_count || 0),
+        ready: Boolean(
+          (resultV2.quality.report_source === "llm_enhanced" || resultV2.quality.report_source === "llm_synthesized")
+          && resultV2.quality.needs_evidence_count === 0
+        ),
+        needs_evidence_count: Number(resultV2.quality.needs_evidence_count || 0),
+        report_source: resultV2.quality.report_source ?? "memo_first"
+      };
+      const historyKey = historyObjectKey(sessionId, Date.parse(finalizedAt));
+      await this.env.RESULT_BUCKET.put(historyKey, JSON.stringify(historyItem), {
         httpMetadata: { contentType: "application/json" }
       });
       await this.ctx.storage.put(STORAGE_KEY_RESULT_KEY_V2, resultV2Key);
@@ -4340,7 +4970,24 @@ export class MeetingSessionDO extends DurableObject<Env> {
       cache.overall_summary_cache = resultV2.overall;
       cache.evidence_index_cache = this.buildEvidenceIndex(resultV2.per_person);
       cache.quality = resultV2.quality;
-      cache.ready = resultV2.quality.needs_evidence_count === 0;
+      cache.timings = {
+        assemble_ms: memoFirstBuildMs,
+        events_ms: 0,
+        report_ms: reportMs,
+        validation_ms: validationMs,
+        persist_ms: 0,
+        total_ms: 0
+      };
+      cache.report_source = resultV2.quality.report_source ?? "memo_first";
+      cache.quality_gate_passed = (
+        cache.report_source === "llm_enhanced"
+        || cache.report_source === "llm_synthesized"
+        || cache.report_source === "llm_synthesized_truncated"
+      ) && resultV2.quality.needs_evidence_count === 0;
+      cache.blocking_reason = cache.quality_gate_passed
+        ? null
+        : (resultV2.trace.quality_gate_failures?.[0] ?? "feedback quality gate failed");
+      cache.ready = cache.quality_gate_passed;
       await this.storeFeedbackCache(cache);
 
       await this.updateFinalizeV2Status(jobId, {
@@ -4831,7 +5478,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
           ready: feedbackCache.ready,
           updated_at: feedbackCache.updated_at,
           quality: feedbackCache.quality,
-          timings: feedbackCache.timings
+          timings: feedbackCache.timings,
+          report_source: feedbackCache.report_source,
+          blocking_reason: feedbackCache.blocking_reason,
+          quality_gate_passed: feedbackCache.quality_gate_passed
         }
       });
     }
@@ -5052,7 +5702,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         cache_age_ms: cacheAgeMs,
         budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
         timings: cache.timings,
-        quality: cache.quality
+        quality: cache.quality,
+        report_source: cache.report_source,
+        blocking_reason: cache.blocking_reason,
+        quality_gate_passed: cache.quality_gate_passed
       });
     }
 
@@ -5067,14 +5720,20 @@ export class MeetingSessionDO extends DurableObject<Env> {
         return jsonResponse({ detail: "feedback report not ready" }, 503);
       }
       const withinBudget = elapsedMs <= FEEDBACK_TOTAL_BUDGET_MS;
+      const openBlockingReason =
+        cache.blocking_reason ??
+        (withinBudget ? null : `feedback-open exceeded budget: opened_in_ms=${elapsedMs} target<=${FEEDBACK_TOTAL_BUDGET_MS}`);
       return jsonResponse({
         session_id: sessionId,
-        ready: cache.ready && withinBudget,
+        ready: cache.ready && withinBudget && cache.report_source === "llm_enhanced",
         within_budget: withinBudget,
         opened_in_ms: elapsedMs,
         budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
         timings: cache.timings,
         quality: cache.quality,
+        report_source: cache.report_source,
+        blocking_reason: openBlockingReason,
+        quality_gate_passed: cache.quality_gate_passed,
         report: cache.report
       });
     }
@@ -5099,65 +5758,220 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
 
       const report = JSON.parse(JSON.stringify(cache.report)) as ResultV2;
-      const person = report.per_person.find((item) => item.person_key === personKey);
-      if (!person) {
+      const lookup = this.findClaimInReport(report, {
+        personKey,
+        dimension,
+        claimType,
+        claimId: payload.claim_id
+      });
+      if (!lookup) {
         return jsonResponse({ detail: `person_key not found: ${personKey}` }, 404);
       }
-      const targetDimension = person.dimensions.find((item) => item.dimension === dimension);
-      if (!targetDimension) {
-        return jsonResponse({ detail: `dimension not found: ${dimension}` }, 404);
-      }
-      const claims = targetDimension[claimType];
-      const fallbackRefs = cache.evidence_index_cache[`${person.person_key}:${dimension}`] ?? [];
-      let targetClaim = payload.claim_id
-        ? claims.find((item) => item.claim_id === payload.claim_id)
-        : claims[0];
-      if (!targetClaim) {
-        targetClaim = {
-          claim_id: `c_${person.person_key}_${dimension}_${claimType}_${Date.now()}`,
-          text: "",
-          evidence_refs: [],
-          confidence: 0.66
-        };
-        claims.push(targetClaim);
-      }
+      const targetClaim = lookup.claim;
       const hint = String(payload.text_hint || "").trim();
-      targetClaim.text = hint || `${targetClaim.text || "已根据老师最新 memo 重新整理该条结论。"}（updated）`;
-      if (!Array.isArray(targetClaim.evidence_refs) || targetClaim.evidence_refs.length === 0) {
-        targetClaim.evidence_refs = fallbackRefs.slice(0, 2);
+      const evidenceById = new Map(report.evidence.map((item) => [item.evidence_id, item] as const));
+      const indexRefs = cache.evidence_index_cache[`${personKey}:${dimension}`] ?? [];
+      const allowedEvidenceIds: string[] = [];
+      const seen = new Set<string>();
+      for (const ref of [...targetClaim.evidence_refs, ...indexRefs]) {
+        const id = String(ref || "").trim();
+        if (!id || !evidenceById.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        allowedEvidenceIds.push(id);
       }
-      if (!Array.isArray(targetClaim.evidence_refs) || targetClaim.evidence_refs.length === 0) {
+      if (allowedEvidenceIds.length === 0) {
         return jsonResponse(
           {
             detail: "claim regeneration requires evidence_refs; add evidence before regenerate",
-            person_key: person.person_key,
+            person_key: personKey,
             dimension
           },
           422
         );
       }
-      targetClaim.confidence = Math.min(0.95, Math.max(0.6, Number(targetClaim.confidence || 0.72)));
+      const inferenceReq: InferenceRegenerateClaimRequest = {
+        session_id: sessionId,
+        person_key: personKey,
+        display_name: lookup.person.display_name,
+        dimension,
+        claim_type: claimType,
+        claim_id: targetClaim.claim_id,
+        claim_text: targetClaim.text,
+        text_hint: hint || undefined,
+        allowed_evidence_ids: allowedEvidenceIds,
+        evidence: report.evidence.map((item) => ({
+          evidence_id: item.evidence_id,
+          time_range_ms: item.time_range_ms,
+          utterance_ids: item.utterance_ids,
+          speaker_key:
+            (item.speaker?.display_name as string | undefined) ??
+            (item.speaker?.person_id as string | undefined) ??
+            (item.speaker?.cluster_id as string | undefined) ??
+            null,
+          quote: item.quote,
+          confidence: item.confidence
+        })),
+        transcript: report.transcript,
+        memos: report.memos,
+        stats: report.stats,
+        locale: "zh-CN"
+      };
+      const regenResult = await this.invokeInferenceRegenerateClaim(inferenceReq);
+      const regeneratedClaim = regenResult.data?.claim;
+      if (!regeneratedClaim) {
+        return jsonResponse({ detail: "inference regenerate claim returned empty claim" }, 503);
+      }
+      const sanitizedRefs = Array.isArray(regeneratedClaim.evidence_refs)
+        ? regeneratedClaim.evidence_refs.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      if (sanitizedRefs.length === 0) {
+        return jsonResponse({ detail: "regenerated claim has empty evidence refs" }, 422);
+      }
+      const invalidRefs = sanitizedRefs.filter((ref) => !evidenceById.has(ref));
+      if (invalidRefs.length > 0) {
+        return jsonResponse({ detail: `regenerated claim references unknown evidence ids: ${invalidRefs.join(",")}` }, 422);
+      }
+      targetClaim.text = String(regeneratedClaim.text || "").trim() || targetClaim.text;
+      targetClaim.evidence_refs = sanitizedRefs.slice(0, 3);
+      targetClaim.confidence = Math.min(0.95, Math.max(0.35, Number(regeneratedClaim.confidence || targetClaim.confidence || 0.72)));
 
+      const oldNeedsEvidenceCount = Number(report.quality?.needs_evidence_count || 0);
+      const strictValidation = this.validateClaimEvidenceRefs(report);
       const validation = validatePersonFeedbackEvidence(report.per_person);
+      if (!strictValidation.valid) {
+        return jsonResponse({ detail: strictValidation.failures[0] || "claim validation failed" }, 422);
+      }
+      if (strictValidation.needsEvidenceCount > oldNeedsEvidenceCount) {
+        return jsonResponse(
+          {
+            detail: "regeneration cannot increase needs_evidence_count",
+            before: oldNeedsEvidenceCount,
+            after: strictValidation.needsEvidenceCount
+          },
+          422
+        );
+      }
       const nowIso = this.currentIsoTs();
       report.quality = {
+        ...report.quality,
         ...validation.quality,
         generated_at: nowIso,
-        validation_ms: validation.quality.validation_ms
+        claim_count: strictValidation.claimCount,
+        invalid_claim_count: strictValidation.invalidCount,
+        needs_evidence_count: strictValidation.needsEvidenceCount,
+        validation_ms: validation.quality.validation_ms,
+        report_source: "llm_enhanced"
+      };
+      report.trace = {
+        ...report.trace,
+        report_pipeline: {
+          mode: "memo_first_with_llm_polish",
+          source: "llm_enhanced",
+          llm_attempted: true,
+          llm_success: true,
+          llm_elapsed_ms: null,
+          blocking_reason: null
+        }
       };
       cache.updated_at = nowIso;
       cache.report = report;
       cache.person_summary_cache = report.per_person;
       cache.overall_summary_cache = report.overall;
       cache.quality = report.quality;
-      cache.ready = validation.valid;
+      cache.report_source = "llm_enhanced";
+      cache.blocking_reason = null;
+      cache.quality_gate_passed = cache.quality_gate_passed && strictValidation.valid;
+      cache.ready = cache.quality_gate_passed && strictValidation.valid;
       await this.storeFeedbackCache(cache);
 
       return jsonResponse({
         session_id: sessionId,
         ready: cache.ready,
         quality: cache.quality,
-        person
+        person: lookup.person
+      });
+    }
+
+    if (action === "feedback-claim-evidence" && request.method === "POST") {
+      let payload: FeedbackClaimEvidenceRequest;
+      try {
+        payload = await readJson<FeedbackClaimEvidenceRequest>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      const personKey = String(payload.person_key || "").trim();
+      const claimType = payload.claim_type;
+      const dimension = payload.dimension;
+      const evidenceRefs = Array.isArray(payload.evidence_refs)
+        ? payload.evidence_refs.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      if (!personKey || !claimType || !dimension) {
+        return badRequest("person_key, dimension and claim_type are required");
+      }
+      if (evidenceRefs.length === 0) {
+        return jsonResponse({ detail: "evidence_refs cannot be empty" }, 422);
+      }
+      const cache = await this.maybeRefreshFeedbackCache(sessionId, true);
+      if (!cache.report) {
+        return jsonResponse({ detail: "feedback report not ready" }, 503);
+      }
+      const report = JSON.parse(JSON.stringify(cache.report)) as ResultV2;
+      const lookup = this.findClaimInReport(report, {
+        personKey,
+        dimension,
+        claimType,
+        claimId: payload.claim_id
+      });
+      if (!lookup) {
+        return jsonResponse({ detail: "claim not found" }, 404);
+      }
+      const evidenceById = new Map(report.evidence.map((item) => [item.evidence_id, item] as const));
+      const unknownRefs = evidenceRefs.filter((ref) => !evidenceById.has(ref));
+      if (unknownRefs.length > 0) {
+        return jsonResponse({ detail: `unknown evidence ids: ${unknownRefs.slice(0, 5).join(",")}` }, 422);
+      }
+      const dedupedRefs: string[] = [];
+      const seen = new Set<string>();
+      for (const ref of evidenceRefs) {
+        if (seen.has(ref)) continue;
+        seen.add(ref);
+        dedupedRefs.push(ref);
+      }
+      lookup.claim.evidence_refs = dedupedRefs.slice(0, 5);
+      this.downWeightClaimConfidenceByEvidence(lookup.claim, evidenceById);
+
+      const strictValidation = this.validateClaimEvidenceRefs(report);
+      if (!strictValidation.valid) {
+        return jsonResponse({ detail: strictValidation.failures[0] || "claim validation failed" }, 422);
+      }
+      const validation = validatePersonFeedbackEvidence(report.per_person);
+      const nowIso = this.currentIsoTs();
+      report.quality = {
+        ...report.quality,
+        ...validation.quality,
+        generated_at: nowIso,
+        claim_count: strictValidation.claimCount,
+        invalid_claim_count: strictValidation.invalidCount,
+        needs_evidence_count: strictValidation.needsEvidenceCount
+      };
+      cache.updated_at = nowIso;
+      cache.report = report;
+      cache.person_summary_cache = report.per_person;
+      cache.overall_summary_cache = report.overall;
+      cache.evidence_index_cache = this.buildEvidenceIndex(report.per_person);
+      cache.quality = report.quality;
+      cache.blocking_reason = null;
+      cache.ready = cache.quality_gate_passed && strictValidation.valid && (
+        cache.report_source === "llm_enhanced"
+        || cache.report_source === "llm_synthesized"
+        || cache.report_source === "llm_synthesized_truncated"
+      );
+      await this.storeFeedbackCache(cache);
+      return jsonResponse({
+        session_id: sessionId,
+        ready: cache.ready,
+        quality: cache.quality,
+        claim: lookup.claim
       });
     }
 
