@@ -27,11 +27,14 @@ from app.schemas import (
     AnalysisEventsResponse,
     AnalysisReportRequest,
     AnalysisReportResponse,
+    RegenerateClaimRequest,
+    RegenerateClaimResponse,
     HealthResponse,
     ResolveRequest,
     ResolveResponse,
     ScoreRequest,
     ScoreResponse,
+    SynthesizeReportRequest,
 )
 from app.security import SlidingWindowRateLimiter, extract_client_ip, rate_limit_headers
 
@@ -199,6 +202,16 @@ async def analyze_events(req: AnalysisEventsRequest) -> AnalysisEventsResponse:
 @app.post("/analysis/report", response_model=AnalysisReportResponse)
 async def analyze_report(req: AnalysisReportRequest) -> AnalysisReportResponse:
     return runtime.report_generator.generate(req)
+
+
+@app.post("/analysis/regenerate-claim", response_model=RegenerateClaimResponse)
+async def regenerate_claim(req: RegenerateClaimRequest) -> RegenerateClaimResponse:
+    return runtime.report_generator.regenerate_claim(req)
+
+
+@app.post("/analysis/synthesize", response_model=AnalysisReportResponse)
+async def synthesize_report(req: SynthesizeReportRequest) -> AnalysisReportResponse:
+    return runtime.report_synthesizer.synthesize(req)
 
 
 @app.post("/sd/diarize", response_model=DiarizeResponse)

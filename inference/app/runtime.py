@@ -10,6 +10,7 @@ from app.services.events_analyzer import EventsAnalyzer
 from app.services.name_resolver import NameResolver
 from app.services.orchestrator import InferenceOrchestrator
 from app.services.report_generator import ReportGenerator
+from app.services.report_synthesizer import ReportSynthesizer
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
 from app.services.sv import ModelScopeSVBackend
 
@@ -21,6 +22,7 @@ class AppRuntime:
     sv_backend: ModelScopeSVBackend
     events_analyzer: EventsAnalyzer
     report_generator: ReportGenerator
+    report_synthesizer: ReportSynthesizer
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -66,4 +68,5 @@ def build_runtime(settings: Settings) -> AppRuntime:
         sv_backend=sv_backend,
         events_analyzer=EventsAnalyzer(),
         report_generator=ReportGenerator(llm=report_llm),
+        report_synthesizer=ReportSynthesizer(llm=report_llm),
     )
