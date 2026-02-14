@@ -218,6 +218,177 @@ export function extractMemoNames(
   return bindings;
 }
 
+function tokenize(text: string): string[] {
+  // Split English by whitespace, Chinese by character bigrams
+  const tokens: string[] = [];
+  const normalized = text.toLowerCase().trim();
+
+  // English tokens
+  const enTokens = normalized.match(/[a-z]{2,}/g);
+  if (enTokens) tokens.push(...enTokens);
+
+  // Chinese character bigrams
+  const zhChars = normalized.match(/[\u4e00-\u9fff]/g);
+  if (zhChars && zhChars.length >= 2) {
+    for (let i = 0; i < zhChars.length - 1; i++) {
+      tokens.push(zhChars[i] + zhChars[i + 1]);
+    }
+  }
+
+  return tokens;
+}
+
+function keywordOverlap(memoText: string, utteranceText: string): number {
+  const memoTokens = tokenize(memoText);
+  if (memoTokens.length === 0) return 0;
+  const uttTokens = new Set(tokenize(utteranceText));
+  let shared = 0;
+  for (const token of memoTokens) {
+    if (uttTokens.has(token)) shared++;
+  }
+  return shared / memoTokens.length;
+}
+
+function temporalProximityScore(memoMs: number, uttStartMs: number, uttEndMs: number): number {
+  const center = (uttStartMs + uttEndMs) / 2;
+  const distMs = Math.abs(memoMs - center);
+  // 0ms = 1.0, 15000ms = 0.0, linear decay
+  return Math.max(0, 1 - distMs / 15000);
+}
+
+export function buildMultiEvidence(options: {
+  memos: MemoItem[];
+  transcript: TranscriptItem[];
+  bindings: MemoSpeakerBinding[];
+}): EvidenceItem[] {
+  const { memos, transcript, bindings } = options;
+  const sorted = [...transcript].sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+  const weakUtterances = buildWeakEvidenceUtteranceSet(transcript);
+  const bindingByMemoId = new Map(bindings.map((b) => [b.memo_id, b]));
+
+  const evidence: EvidenceItem[] = [];
+  let seq = 1;
+
+  function nextEvidenceId(): string {
+    return `e_${String(seq++).padStart(6, "0")}`;
+  }
+
+  for (const memo of memos) {
+    const memoBinding = bindingByMemoId.get(memo.memo_id);
+    const boundSpeakers = new Set(memoBinding?.matched_speaker_keys ?? []);
+
+    // 1. Find candidates within ±15s of memo timestamp
+    const windowMs = 15_000;
+    const candidates = sorted.filter((u) => {
+      const center = (u.start_ms + u.end_ms) / 2;
+      return Math.abs(memo.created_at_ms - center) <= windowMs;
+    });
+
+    // 2. Score each candidate
+    const scored = candidates.map((u) => {
+      const kw = keywordOverlap(memo.text, u.text);
+      const tp = temporalProximityScore(memo.created_at_ms, u.start_ms, u.end_ms);
+      const sm = boundSpeakers.size > 0 && u.speaker_name
+        ? (boundSpeakers.has(u.speaker_name) ? 1.0 : 0.0)
+        : 0.5; // neutral if no binding
+      const stm = (memo.stage && u.speaker_name)
+        ? 0.5 // stage matching requires utterance stage info which we don't have yet
+        : 0.5;
+
+      const score = 0.4 * kw + 0.3 * tp + 0.2 * sm + 0.1 * stm;
+      return { utterance: u, score };
+    });
+
+    // 3. Sort by score descending, take top 5
+    scored.sort((a, b) => b.score - a.score);
+
+    // 4. Include explicitly anchored utterances first
+    const anchoredIds = new Set(memo.anchors?.utterance_ids ?? []);
+    const pickedIds = new Set<string>();
+    const pickedUtterances: TranscriptItem[] = [];
+
+    // Add anchored utterances first
+    for (const u of sorted) {
+      if (anchoredIds.has(u.utterance_id) && !pickedIds.has(u.utterance_id)) {
+        pickedUtterances.push(u);
+        pickedIds.add(u.utterance_id);
+      }
+    }
+
+    // Fill remaining from scored candidates (up to 5 total)
+    for (const { utterance } of scored) {
+      if (pickedUtterances.length >= 5) break;
+      if (pickedIds.has(utterance.utterance_id)) continue;
+      pickedUtterances.push(utterance);
+      pickedIds.add(utterance.utterance_id);
+    }
+
+    // 5. Create evidence items for each picked utterance
+    for (const u of pickedUtterances) {
+      const isWeak = weakUtterances.has(u.utterance_id);
+      evidence.push({
+        evidence_id: nextEvidenceId(),
+        type: "quote",
+        time_range_ms: [u.start_ms, u.end_ms],
+        utterance_ids: [u.utterance_id],
+        speaker: {
+          cluster_id: u.cluster_id ?? null,
+          person_id: u.speaker_name ?? null,
+          display_name: u.speaker_name ?? null,
+        },
+        quote: quoteFromUtterance(u.text),
+        confidence: isWeak ? 0.56 : 0.82,
+        weak: isWeak,
+        weak_reason: isWeak ? "overlap_risk" : null,
+      });
+    }
+
+    // If no utterances found, create evidence from memo text itself
+    if (pickedUtterances.length === 0) {
+      evidence.push({
+        evidence_id: nextEvidenceId(),
+        type: "quote",
+        time_range_ms: [memo.created_at_ms, memo.created_at_ms],
+        utterance_ids: [],
+        speaker: {
+          cluster_id: null,
+          person_id: null,
+          display_name: null,
+        },
+        quote: quoteFromUtterance(memo.text),
+        confidence: 0.42,
+        weak: false,
+        weak_reason: null,
+      });
+    }
+  }
+
+  // Add fallback evidence per speaker (same as original)
+  const fallbackBySpeaker = new Set<string>();
+  for (const item of sorted) {
+    const key = speakerKey(item);
+    if (fallbackBySpeaker.has(key)) continue;
+    evidence.push({
+      evidence_id: nextEvidenceId(),
+      type: "quote",
+      time_range_ms: [item.start_ms, item.end_ms],
+      utterance_ids: [item.utterance_id],
+      speaker: {
+        cluster_id: item.cluster_id ?? null,
+        person_id: item.speaker_name ?? key,
+        display_name: item.speaker_name ?? key,
+      },
+      quote: quoteFromUtterance(item.text),
+      confidence: weakUtterances.has(item.utterance_id) ? 0.52 : 0.74,
+      weak: weakUtterances.has(item.utterance_id),
+      weak_reason: weakUtterances.has(item.utterance_id) ? "overlap_risk" : null,
+    });
+    fallbackBySpeaker.add(key);
+  }
+
+  return evidence;
+}
+
 function normalizeDimensionFromMemo(memo: MemoItem): DimensionFeedback["dimension"] {
   const tagText = memo.tags.join(" ").toLowerCase();
   const memoText = normalizeMemoText(memo.text).toLowerCase();
