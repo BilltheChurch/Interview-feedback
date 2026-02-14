@@ -2,13 +2,17 @@ import type {
   DimensionClaim,
   DimensionFeedback,
   EvidenceItem,
+  HistoricalSummary,
   MemoItem,
   MemoSpeakerBinding,
   PersonFeedbackItem,
   ReportQualityMeta,
   ResultV2,
+  RubricTemplate,
+  SessionContextMeta,
   SpeakerLogs,
   SpeakerStatItem,
+  SynthesizeRequestPayload,
 } from "./types_v2";
 
 export interface TranscriptItem {
@@ -907,6 +911,104 @@ export function computeUnknownRatio(transcript: TranscriptItem[]): number {
   if (students.length === 0) return 0;
   const unknownCount = students.filter((item) => !item.speaker_name || item.speaker_name === "unknown").length;
   return unknownCount / students.length;
+}
+
+export function collectEnrichedContext(params: {
+  sessionConfig: {
+    mode?: "1v1" | "group";
+    interviewer_name?: string;
+    position_title?: string;
+    company_name?: string;
+    stages?: string[];
+    stage_descriptions?: Array<{ stage_index: number; stage_name: string; description?: string }>;
+    rubric?: { template_name: string; dimensions: Array<{ name: string; description?: string; weight: number }> };
+    free_form_notes?: string;
+  };
+}): {
+  rubric: RubricTemplate | null;
+  sessionContext: SessionContextMeta | null;
+  freeFormNotes: string | null;
+  stages: string[];
+} {
+  const config = params.sessionConfig;
+
+  const rubric = config.rubric
+    ? {
+        template_name: config.rubric.template_name,
+        dimensions: config.rubric.dimensions.map((d) => ({
+          name: d.name,
+          description: d.description,
+          weight: d.weight,
+        })),
+      }
+    : null;
+
+  const sessionContext = {
+    mode: config.mode ?? ("1v1" as const),
+    interviewer_name: config.interviewer_name,
+    position_title: config.position_title,
+    company_name: config.company_name,
+    stage_descriptions: config.stage_descriptions ?? [],
+  };
+
+  return {
+    rubric,
+    sessionContext,
+    freeFormNotes: config.free_form_notes ?? null,
+    stages: config.stages ?? [],
+  };
+}
+
+export function buildSynthesizePayload(params: {
+  sessionId: string;
+  transcript: TranscriptItem[];
+  memos: MemoItem[];
+  evidence: EvidenceItem[];
+  stats: SpeakerStatItem[];
+  events: Array<{
+    event_id: string;
+    event_type: string;
+    actor?: string | null;
+    target?: string | null;
+    time_range_ms: number[];
+    utterance_ids: string[];
+    quote?: string | null;
+    confidence: number;
+    rationale?: string | null;
+  }>;
+  bindings: MemoSpeakerBinding[];
+  rubric: RubricTemplate | null;
+  sessionContext: SessionContextMeta | null;
+  freeFormNotes: string | null;
+  historical: HistoricalSummary[];
+  stages: string[];
+  locale: string;
+}): SynthesizeRequestPayload {
+  return {
+    session_id: params.sessionId,
+    transcript: params.transcript.map((t) => ({
+      utterance_id: t.utterance_id,
+      stream_role: t.stream_role,
+      speaker_name: t.speaker_name ?? null,
+      cluster_id: t.cluster_id ?? null,
+      decision: t.decision ?? null,
+      text: t.text,
+      start_ms: t.start_ms,
+      end_ms: t.end_ms,
+      duration_ms: t.duration_ms,
+    })),
+    memos: params.memos,
+    free_form_notes: params.freeFormNotes,
+    evidence: params.evidence,
+    stats: params.stats,
+    events: params.events,
+    rubric: params.rubric,
+    session_context: params.sessionContext,
+    memo_speaker_bindings: params.bindings,
+    historical: params.historical,
+    stages: params.stages,
+    locale: params.locale,
+  };
 }
 
 export function buildResultV2(params: {
