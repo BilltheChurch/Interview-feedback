@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   getFeedbackReady: (payload) => ipcRenderer.invoke('session:getFeedbackReady', payload),
   openFeedback: (payload) => ipcRenderer.invoke('session:openFeedback', payload),
   regenerateFeedbackClaim: (payload) => ipcRenderer.invoke('session:regenerateFeedbackClaim', payload),
+  updateFeedbackClaimEvidence: (payload) => ipcRenderer.invoke('session:updateFeedbackClaimEvidence', payload),
+  listSessionHistory: (payload) => ipcRenderer.invoke('session:listHistory', payload),
   exportFeedback: (payload) => ipcRenderer.invoke('session:exportFeedback', payload),
   diarizationStart: (payload) => ipcRenderer.invoke('diarization:start', payload),
   diarizationStop: () => ipcRenderer.invoke('diarization:stop'),

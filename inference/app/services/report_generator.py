@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from app.exceptions import ValidationError
 from app.schemas import (
     AnalysisEvent,
     AnalysisReportRequest,
@@ -14,6 +16,8 @@ from app.schemas import (
     OverallFeedback,
     PersonFeedbackItem,
     PersonSummary,
+    RegenerateClaimRequest,
+    RegenerateClaimResponse,
     ReportQualityMeta,
     SpeakerStat,
     SummarySection,
@@ -186,7 +190,7 @@ class ReportGenerator:
     ) -> DimensionClaim:
         cleaned_refs = [ref for ref in refs if ref]
         if not cleaned_refs:
-            raise ValueError(
+            raise ValidationError(
                 f"claim missing evidence refs: person={person_key} dimension={dimension} type={claim_type}"
             )
         return DimensionClaim(
@@ -195,6 +199,164 @@ class ReportGenerator:
             evidence_refs=cleaned_refs,
             confidence=0.8 if claim_type == "strengths" else 0.72,
         )
+
+    @staticmethod
+    def _safe_text_for_prompt(value: str) -> str:
+        text = ReportGenerator._normalize_text(value)
+        return text[:800]
+
+    def _polish_report_with_llm(
+        self,
+        *,
+        session_id: str,
+        locale: str,
+        per_person: list[PersonFeedbackItem],
+        overall: OverallFeedback,
+        evidence: list[EvidenceRef],
+    ) -> tuple[list[PersonFeedbackItem], OverallFeedback, bool]:
+        evidence_by_id = {item.evidence_id: item for item in evidence}
+        claim_rows: list[dict[str, object]] = []
+        claim_index: dict[tuple[str, str, str, str], DimensionClaim] = {}
+        for person in per_person:
+            for dimension in person.dimensions:
+                for claim_type in ("strengths", "risks", "actions"):
+                    for claim in getattr(dimension, claim_type):
+                        claim_rows.append(
+                            {
+                                "person_key": person.person_key,
+                                "dimension": dimension.dimension,
+                                "claim_type": claim_type,
+                                "claim_id": claim.claim_id,
+                                "text": claim.text,
+                                "evidence_refs": claim.evidence_refs,
+                            }
+                        )
+                        claim_index[(person.person_key, dimension.dimension, claim_type, claim.claim_id)] = claim
+
+        evidence_pack = [
+            {
+                "evidence_id": item.evidence_id,
+                "speaker_key": item.speaker_key,
+                "time_range_ms": item.time_range_ms,
+                "quote": self._safe_text_for_prompt(item.quote),
+            }
+            for item in evidence
+        ]
+        system_prompt = (
+            "You rewrite interview feedback claims with better clarity while keeping facts unchanged. "
+            "Return strict JSON only. Never invent evidence ids. "
+            "Only use evidence ids from allowed lists per claim. "
+            "Use concise professional Chinese unless locale asks otherwise."
+        )
+        user_prompt = json.dumps(
+            {
+                "task": "polish_report_claims",
+                "session_id": session_id,
+                "locale": locale,
+                "claims": claim_rows,
+                "evidence_pack": evidence_pack,
+                "overall": {
+                    "summary_sections": [section.model_dump() for section in overall.summary_sections],
+                    "team_dynamics": overall.team_dynamics.model_dump(),
+                },
+                "output_contract": {
+                    "claim_text_updates": [
+                        {
+                            "person_key": "string",
+                            "dimension": "leadership|collaboration|logic|structure|initiative",
+                            "claim_type": "strengths|risks|actions",
+                            "claim_id": "string",
+                            "text": "string",
+                            "evidence_refs": ["must be subset of existing claim refs or any evidence ids in evidence_pack"],
+                        }
+                    ],
+                    "overall": {
+                        "summary_sections": [{"topic": "string", "bullets": ["string"], "evidence_ids": ["string"]}],
+                        "team_dynamics": {"highlights": ["string"], "risks": ["string"]},
+                    },
+                },
+            },
+            ensure_ascii=False,
+        )
+        parsed = self.llm.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
+        updates = parsed.get("claim_text_updates")
+        if not isinstance(updates, list):
+            raise ValidationError("llm report polish response missing claim_text_updates")
+
+        changed = False
+        for row in updates:
+            if not isinstance(row, dict):
+                continue
+            person_key = str(row.get("person_key", "")).strip()
+            dimension = str(row.get("dimension", "")).strip()
+            claim_type = str(row.get("claim_type", "")).strip()
+            claim_id = str(row.get("claim_id", "")).strip()
+            if not person_key or not dimension or not claim_type or not claim_id:
+                continue
+            target = claim_index.get((person_key, dimension, claim_type, claim_id))
+            if not target:
+                continue
+            new_text = self._normalize_text(str(row.get("text", "")))
+            if new_text:
+                target.text = new_text
+                changed = True
+            refs_value = row.get("evidence_refs")
+            if isinstance(refs_value, list):
+                cleaned_refs: list[str] = []
+                for item in refs_value:
+                    ref = str(item or "").strip()
+                    if not ref or ref not in evidence_by_id:
+                        continue
+                    cleaned_refs.append(ref)
+                deduped_refs: list[str] = []
+                seen = set()
+                for ref in cleaned_refs:
+                    if ref in seen:
+                        continue
+                    seen.add(ref)
+                    deduped_refs.append(ref)
+                if deduped_refs:
+                    target.evidence_refs = deduped_refs[:3]
+                    changed = True
+
+        overall_row = parsed.get("overall")
+        if isinstance(overall_row, dict):
+            sections: list[SummarySection] = []
+            for item in overall_row.get("summary_sections", []):
+                if not isinstance(item, dict):
+                    continue
+                topic = self._normalize_text(str(item.get("topic", "")))
+                if not topic:
+                    continue
+                bullets = [self._normalize_text(str(b)) for b in item.get("bullets", []) if self._normalize_text(str(b))]
+                evidence_ids = []
+                for evidence_id in item.get("evidence_ids", []):
+                    ref = str(evidence_id or "").strip()
+                    if ref and ref in evidence_by_id:
+                        evidence_ids.append(ref)
+                sections.append(SummarySection(topic=topic, bullets=bullets[:6], evidence_ids=evidence_ids[:6]))
+            if sections:
+                overall.summary_sections = sections[:6]
+                changed = True
+            team = overall_row.get("team_dynamics")
+            if isinstance(team, dict):
+                highlights = [
+                    self._normalize_text(str(item))
+                    for item in team.get("highlights", [])
+                    if self._normalize_text(str(item))
+                ]
+                risks = [
+                    self._normalize_text(str(item))
+                    for item in team.get("risks", [])
+                    if self._normalize_text(str(item))
+                ]
+                if highlights or risks:
+                    overall.team_dynamics = TeamDynamics(highlights=highlights[:6], risks=risks[:6])
+                    changed = True
+
+        if not changed:
+            raise ValidationError("llm report polish returned no usable updates")
+        return per_person, overall, True
 
     def _fallback_refs_for_person(
         self,
@@ -398,6 +560,23 @@ class ReportGenerator:
             per_person=per_person,
         )
 
+        report_source: str = "memo_first"
+        report_error: str | None = None
+        report_degraded = False
+        try:
+            per_person, overall, _ = self._polish_report_with_llm(
+                session_id=req.session_id,
+                locale=req.locale,
+                per_person=per_person,
+                overall=overall,
+                evidence=req.evidence,
+            )
+            report_source = "llm_enhanced"
+        except Exception as exc:
+            report_source = "llm_failed"
+            report_error = self._normalize_text(str(exc))[:300]
+            report_degraded = True
+
         claim_count = 0
         invalid_claim_count = 0
         needs_evidence_count = 0
@@ -411,6 +590,9 @@ class ReportGenerator:
 
         finished_at = datetime.now(timezone.utc)
         build_ms = int((finished_at - started_at).total_seconds() * 1000)
+        model_name = getattr(self.llm, "model_name", None)
+        if model_name is not None:
+            model_name = str(model_name).strip() or None
         quality = ReportQualityMeta(
             generated_at=self._now_iso(),
             build_ms=max(0, build_ms),
@@ -418,6 +600,10 @@ class ReportGenerator:
             claim_count=claim_count,
             invalid_claim_count=invalid_claim_count,
             needs_evidence_count=needs_evidence_count,
+            report_source=report_source,  # type: ignore[arg-type]
+            report_model=model_name,
+            report_degraded=report_degraded,
+            report_error=report_error,
         )
 
         return AnalysisReportResponse(
@@ -425,4 +611,86 @@ class ReportGenerator:
             overall=overall,
             per_person=per_person,
             quality=quality,
+        )
+
+    def regenerate_claim(self, req: RegenerateClaimRequest) -> RegenerateClaimResponse:
+        allowed_refs = []
+        allowed_set = set()
+        for item in req.allowed_evidence_ids:
+            ref = str(item or "").strip()
+            if not ref or ref in allowed_set:
+                continue
+            allowed_set.add(ref)
+            allowed_refs.append(ref)
+        if not allowed_refs:
+            raise ValidationError("allowed_evidence_ids is empty")
+
+        evidence_by_id = self._evidence_by_id(req.evidence)
+        missing = [ref for ref in allowed_refs if ref not in evidence_by_id]
+        if missing:
+            raise ValidationError(f"allowed evidence ids not found in evidence payload: {missing[:5]}")
+
+        evidence_pack = [
+            {
+                "evidence_id": ref,
+                "speaker_key": evidence_by_id[ref].speaker_key,
+                "time_range_ms": evidence_by_id[ref].time_range_ms,
+                "quote": self._safe_text_for_prompt(evidence_by_id[ref].quote),
+            }
+            for ref in allowed_refs
+        ]
+        system_prompt = (
+            "You regenerate one interview feedback claim. "
+            "Return strict JSON only with keys: text, evidence_refs. "
+            "evidence_refs must be a non-empty subset of allowed evidence ids. "
+            "Do not invent facts."
+        )
+        user_prompt = json.dumps(
+            {
+                "task": "regenerate_claim",
+                "session_id": req.session_id,
+                "locale": req.locale,
+                "person_key": req.person_key,
+                "display_name": req.display_name,
+                "dimension": req.dimension,
+                "claim_type": req.claim_type,
+                "claim_id": req.claim_id,
+                "claim_text": req.claim_text,
+                "text_hint": req.text_hint,
+                "allowed_evidence_ids": allowed_refs,
+                "evidence_pack": evidence_pack,
+            },
+            ensure_ascii=False,
+        )
+        parsed = self.llm.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
+        text = self._normalize_text(str(parsed.get("text", "")))
+        if not text:
+            raise ValidationError("llm regenerate claim returned empty text")
+        refs_value = parsed.get("evidence_refs")
+        if not isinstance(refs_value, list):
+            raise ValidationError("llm regenerate claim missing evidence_refs")
+        refs: list[str] = []
+        seen = set()
+        for item in refs_value:
+            ref = str(item or "").strip()
+            if not ref or ref not in allowed_set or ref in seen:
+                continue
+            seen.add(ref)
+            refs.append(ref)
+        if not refs:
+            raise ValidationError("llm regenerate claim returned no valid evidence refs")
+
+        claim_id = req.claim_id or self._claim_id(req.person_key, req.dimension, req.claim_type, 1)
+        claim = DimensionClaim(
+            claim_id=claim_id,
+            text=text,
+            evidence_refs=refs[:3],
+            confidence=0.8 if req.claim_type == "strengths" else 0.72,
+        )
+        return RegenerateClaimResponse(
+            session_id=req.session_id,
+            person_key=req.person_key,
+            dimension=req.dimension,
+            claim_type=req.claim_type,
+            claim=claim,
         )

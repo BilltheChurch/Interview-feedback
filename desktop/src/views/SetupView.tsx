@@ -1,0 +1,819 @@
+import { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { motion, AnimatePresence } from 'motion/react';
+import {
+  User,
+  Users,
+  Plus,
+  Trash2,
+  Link as LinkIcon,
+  ArrowLeft,
+  ClipboardPaste,
+  Layout,
+  ChevronUp,
+  ChevronDown,
+  ClipboardList,
+  Pencil,
+} from 'lucide-react';
+import { Card } from '../components/ui/Card';
+import { Button } from '../components/ui/Button';
+import { TextField } from '../components/ui/TextField';
+import { TextArea } from '../components/ui/TextArea';
+import { Chip } from '../components/ui/Chip';
+import { ShimmerButton } from '../components/magicui/shimmer-button';
+import { RubricTemplateModal, type CustomTemplate } from '../components/RubricTemplateModal';
+
+/* ─── Motion Variants ────────────────────────── */
+
+const sectionVariant = {
+  hidden: { opacity: 0, y: 16 },
+  visible: (i: number) => ({
+    opacity: 1,
+    y: 0,
+    transition: { delay: i * 0.08, duration: 0.4, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] },
+  }),
+};
+
+/* ─── Types ─────────────────────────────────── */
+
+type SessionMode = '1v1' | 'group';
+
+type Participant = {
+  id: string;
+  name: string;
+};
+
+/* ─── Built-in templates ─────────────────────── */
+
+type BuiltInTemplate = {
+  value: string;
+  label: string;
+  dimensions: { name: string; weight: number; description: string }[];
+};
+
+const BUILTIN_TEMPLATES: BuiltInTemplate[] = [
+  {
+    value: 'general',
+    label: 'General Interview',
+    dimensions: [
+      { name: 'Communication', weight: 3, description: 'Clarity and articulation' },
+      { name: 'Problem Solving', weight: 3, description: 'Analytical thinking' },
+      { name: 'Cultural Fit', weight: 2, description: 'Alignment with team values' },
+    ],
+  },
+  {
+    value: 'technical',
+    label: 'Technical Assessment',
+    dimensions: [
+      { name: 'Technical Skills', weight: 5, description: 'Core competency' },
+      { name: 'Problem Solving', weight: 4, description: 'Algorithmic thinking' },
+      { name: 'System Design', weight: 3, description: 'Architecture awareness' },
+      { name: 'Communication', weight: 2, description: 'Explaining thought process' },
+    ],
+  },
+  {
+    value: 'behavioral',
+    label: 'Behavioral Interview',
+    dimensions: [
+      { name: 'Communication', weight: 4, description: 'STAR method usage' },
+      { name: 'Leadership', weight: 3, description: 'Initiative and ownership' },
+      { name: 'Teamwork', weight: 3, description: 'Collaboration examples' },
+      { name: 'Adaptability', weight: 2, description: 'Handling change' },
+    ],
+  },
+  {
+    value: 'panel',
+    label: 'Panel Discussion',
+    dimensions: [
+      { name: 'Presentation', weight: 4, description: 'Poise and confidence' },
+      { name: 'Technical Depth', weight: 3, description: 'Subject matter expertise' },
+      { name: 'Q&A Handling', weight: 3, description: 'Responding to diverse questions' },
+    ],
+  },
+];
+
+const STORAGE_KEY = 'ifb_rubric_templates';
+
+let participantIdCounter = 0;
+
+/* ─── ModeSelector ──────────────────────────── */
+
+function ModeSelector({
+  mode,
+  onModeChange,
+}: {
+  mode: SessionMode;
+  onModeChange: (m: SessionMode) => void;
+}) {
+  const options: { value: SessionMode; icon: typeof User; title: string; desc: string }[] = [
+    { value: '1v1', icon: User, title: '1 v 1', desc: 'Single candidate interview' },
+    { value: 'group', icon: Users, title: 'Group', desc: 'Multiple participants' },
+  ];
+
+  return (
+    <div>
+      <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
+        Interview Mode
+      </h3>
+      <div className="grid grid-cols-2 gap-3">
+        {options.map(({ value, icon: Icon, title, desc }) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onModeChange(value)}
+            className={`
+              flex flex-col items-center gap-2 p-4 rounded-[--radius-card] border-2 transition-all cursor-pointer
+              ${
+                mode === value
+                  ? 'border-accent bg-accent-soft'
+                  : 'border-border bg-surface hover:border-ink-tertiary'
+              }
+            `}
+          >
+            <Icon className={`w-6 h-6 ${mode === value ? 'text-accent' : 'text-ink-secondary'}`} />
+            <span className={`text-sm font-medium ${mode === value ? 'text-accent' : 'text-ink'}`}>
+              {title}
+            </span>
+            <span className="text-xs text-ink-tertiary text-center">{desc}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─── ParticipantEditor ─────────────────────── */
+
+function ParticipantEditor({
+  participants,
+  onAdd,
+  onRemove,
+  onImport,
+}: {
+  participants: Participant[];
+  onAdd: (name: string) => void;
+  onRemove: (id: string) => void;
+  onImport: (text: string) => void;
+}) {
+  const [newName, setNewName] = useState('');
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState('');
+
+  const handleAdd = () => {
+    const trimmed = newName.trim();
+    if (trimmed) {
+      onAdd(trimmed);
+      setNewName('');
+    }
+  };
+
+  const handleImport = () => {
+    if (importText.trim()) {
+      onImport(importText);
+      setImportText('');
+      setShowImport(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider">
+          Participants
+        </h3>
+        <button
+          onClick={() => setShowImport(!showImport)}
+          className="text-xs text-accent font-medium hover:underline flex items-center gap-1 cursor-pointer"
+        >
+          <ClipboardPaste className="w-3 h-3" />
+          Paste list
+        </button>
+      </div>
+
+      {showImport && (
+        <div className="mb-3">
+          <TextArea
+            label="Paste names (one per line)"
+            placeholder="John Doe&#10;Jane Smith&#10;Bob Williams"
+            value={importText}
+            onChange={(e) => setImportText(e.target.value)}
+            rows={3}
+          />
+          <div className="flex gap-2 mt-2">
+            <Button size="sm" onClick={handleImport}>Import</Button>
+            <Button variant="ghost" size="sm" onClick={() => setShowImport(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
+      {/* Add single */}
+      <div className="flex gap-2 mb-3">
+        <TextField
+          placeholder="Participant name"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+          className="flex-1"
+        />
+        <Button variant="secondary" size="sm" onClick={handleAdd}>
+          <Plus className="w-3.5 h-3.5" />
+        </Button>
+      </div>
+
+      {/* List */}
+      {participants.length > 0 && (
+        <ul className="space-y-1.5">
+          <AnimatePresence>
+            {participants.map((p) => (
+              <motion.li
+                key={p.id}
+                initial={{ opacity: 0, x: -16 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 16, height: 0 }}
+                transition={{ duration: 0.25 }}
+                layout
+                className="flex items-center justify-between px-3 py-2 rounded-[--radius-button] border border-border bg-surface"
+              >
+                <span className="text-sm text-ink">{p.name}</span>
+                <button
+                  onClick={() => onRemove(p.id)}
+                  className="text-ink-tertiary hover:text-error cursor-pointer transition-colors"
+                  aria-label={`Remove ${p.name}`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </motion.li>
+            ))}
+          </AnimatePresence>
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* ─── FlowEditor ───────────────────────────── */
+
+function FlowEditor({
+  stages,
+  onStagesChange,
+}: {
+  stages: string[];
+  onStagesChange: (stages: string[]) => void;
+}) {
+  const [newStage, setNewStage] = useState('');
+
+  const presets: { label: string; stages: string[] }[] = [
+    { label: '1v1 Interview', stages: ['Intro', 'Q1', 'Q2', 'Q3', 'Wrap-up'] },
+    { label: 'Group (2 Questions)', stages: ['Intro', 'Q1', 'Q2', 'Wrap-up'] },
+    { label: 'Group (3 Questions)', stages: ['Intro', 'Q1', 'Q2', 'Q3', 'Wrap-up'] },
+    { label: 'Panel Discussion', stages: ['Opening', 'Discussion', 'Q&A', 'Closing'] },
+  ];
+
+  const addStage = () => {
+    const trimmed = newStage.trim();
+    if (trimmed) {
+      onStagesChange([...stages, trimmed]);
+      setNewStage('');
+    }
+  };
+
+  const removeStage = (index: number) => {
+    onStagesChange(stages.filter((_, i) => i !== index));
+  };
+
+  const moveStage = (index: number, direction: -1 | 1) => {
+    const newStages = [...stages];
+    const target = index + direction;
+    if (target < 0 || target >= newStages.length) return;
+    [newStages[index], newStages[target]] = [newStages[target], newStages[index]];
+    onStagesChange(newStages);
+  };
+
+  return (
+    <div>
+      <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
+        Interview Flow
+      </h3>
+
+      {/* Preset buttons */}
+      <div className="flex flex-wrap gap-2 mb-3">
+        {presets.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            onClick={() => onStagesChange(preset.stages)}
+            className="text-xs px-2.5 py-1 rounded-[--radius-chip] border border-border text-ink-secondary hover:border-accent hover:text-accent transition-colors cursor-pointer"
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Current stages list */}
+      <div className="space-y-1.5 mb-3">
+        <AnimatePresence>
+          {stages.map((stage, i) => (
+            <motion.div
+              key={`${stage}-${i}`}
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={{ duration: 0.2 }}
+              layout
+              className="flex items-center gap-2 px-3 py-1.5 rounded-[--radius-button] border border-border bg-surface"
+            >
+              <span className="text-xs text-ink-tertiary tabular-nums w-5">{i + 1}.</span>
+              <span className="text-sm text-ink flex-1">{stage}</span>
+              <button onClick={() => moveStage(i, -1)} disabled={i === 0} className="text-ink-tertiary hover:text-ink disabled:opacity-30 cursor-pointer" aria-label="Move up">
+                <ChevronUp className="w-3.5 h-3.5" />
+              </button>
+              <button onClick={() => moveStage(i, 1)} disabled={i === stages.length - 1} className="text-ink-tertiary hover:text-ink disabled:opacity-30 cursor-pointer" aria-label="Move down">
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+              <button onClick={() => removeStage(i)} className="text-ink-tertiary hover:text-error cursor-pointer" aria-label={`Remove ${stage}`}>
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {/* Add custom stage */}
+      <div className="flex gap-2">
+        <TextField
+          placeholder="Custom stage name"
+          value={newStage}
+          onChange={(e) => setNewStage(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && addStage()}
+          className="flex-1"
+        />
+        <Button variant="secondary" size="sm" onClick={addStage}>
+          <Plus className="w-3.5 h-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── MeetingConnector ──────────────────────── */
+
+function MeetingConnector({
+  mode,
+  teamsUrl,
+  onTeamsUrlChange,
+}: {
+  mode: SessionMode;
+  teamsUrl: string;
+  onTeamsUrlChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
+        Meeting Link
+      </h3>
+      {mode === '1v1' ? (
+        <TextField
+          label="Teams join URL"
+          placeholder="Paste Teams meeting link..."
+          value={teamsUrl}
+          onChange={(e) => onTeamsUrlChange(e.target.value)}
+        />
+      ) : (
+        <div className="space-y-2">
+          <TextField
+            label="Teams meeting URL (optional)"
+            placeholder="Paste link or create new below"
+            value={teamsUrl}
+            onChange={(e) => onTeamsUrlChange(e.target.value)}
+          />
+          <Button variant="secondary" size="sm">
+            <LinkIcon className="w-3.5 h-3.5" />
+            Create Meeting via Graph
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── SetupSummary ──────────────────────────── */
+
+function SetupSummary({
+  mode,
+  sessionName,
+  templateLabel,
+  participants,
+  teamsUrl,
+  stages,
+}: {
+  mode: SessionMode;
+  sessionName: string;
+  templateLabel: string;
+  participants: Participant[];
+  teamsUrl: string;
+  stages: string[];
+}) {
+  return (
+    <div className="border border-border rounded-[--radius-card] bg-surface-hover p-4">
+      <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
+        Review
+      </h3>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div>
+          <span className="text-ink-tertiary text-xs">Mode</span>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <Chip variant="accent">{mode === '1v1' ? '1 v 1' : 'Group'}</Chip>
+          </div>
+        </div>
+        <div>
+          <span className="text-ink-tertiary text-xs">Session</span>
+          <p className="text-ink mt-0.5">{sessionName || '(untitled)'}</p>
+        </div>
+        <div>
+          <span className="text-ink-tertiary text-xs">Template</span>
+          <p className="text-ink mt-0.5">{templateLabel}</p>
+        </div>
+        <div>
+          <span className="text-ink-tertiary text-xs">Participants</span>
+          <p className="text-ink mt-0.5">{participants.length} people</p>
+        </div>
+        <div>
+          <span className="text-ink-tertiary text-xs">Flow</span>
+          <p className="text-ink mt-0.5">{stages.length} stages</p>
+        </div>
+        {teamsUrl && (
+          <div className="col-span-2">
+            <span className="text-ink-tertiary text-xs">Teams URL</span>
+            <p className="text-ink mt-0.5 text-xs truncate">{teamsUrl}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── SetupView (main export) ───────────────── */
+
+export function SetupView() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const locationState = location.state as { mode?: SessionMode; sessionName?: string; stages?: string[] } | null;
+  const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
+  const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
+  const [template, setTemplate] = useState('general');
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [teamsUrl, setTeamsUrl] = useState('');
+  const [stages, setStages] = useState<string[]>(
+    locationState?.stages || ['Intro', 'Q1', 'Q2', 'Wrap-up']
+  );
+
+  // Custom template state
+  const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [editingTemplate, setEditingTemplate] = useState<CustomTemplate | null>(null);
+
+  // Load custom templates from localStorage on mount
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        setCustomTemplates(JSON.parse(stored));
+      }
+    } catch {
+      // ignore corrupt data
+    }
+  }, []);
+
+  // Persist custom templates to localStorage
+  const saveCustomTemplates = (templates: CustomTemplate[]) => {
+    setCustomTemplates(templates);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(templates));
+  };
+
+  const handleSaveTemplate = (tpl: CustomTemplate) => {
+    const existing = customTemplates.findIndex((t) => t.id === tpl.id);
+    let updated: CustomTemplate[];
+    if (existing >= 0) {
+      updated = customTemplates.map((t) => (t.id === tpl.id ? tpl : t));
+    } else {
+      updated = [...customTemplates, tpl];
+    }
+    saveCustomTemplates(updated);
+    setTemplate(tpl.id);
+    setTemplateModalOpen(false);
+    setEditingTemplate(null);
+  };
+
+  const handleEditTemplate = (templateId: string) => {
+    // Check if it's a custom template
+    const custom = customTemplates.find((t) => t.id === templateId);
+    if (custom) {
+      setEditingTemplate(custom);
+    } else {
+      // Built-in template: pre-fill modal but save as new custom
+      const builtin = BUILTIN_TEMPLATES.find((t) => t.value === templateId);
+      if (builtin) {
+        setEditingTemplate({
+          id: `custom_${Date.now()}`,
+          name: `${builtin.label} (Custom)`,
+          description: '',
+          dimensions: builtin.dimensions.map((d) => ({ ...d })),
+        });
+      }
+    }
+    setTemplateModalOpen(true);
+  };
+
+  const handleCreateTemplate = () => {
+    setEditingTemplate(null);
+    setTemplateModalOpen(true);
+  };
+
+  // Helper to resolve template display name
+  const getTemplateLabel = (): string => {
+    const builtin = BUILTIN_TEMPLATES.find((t) => t.value === template);
+    if (builtin) return builtin.label;
+    const custom = customTemplates.find((t) => t.id === template);
+    if (custom) return custom.name;
+    return template;
+  };
+
+  // Helper to get dimension count for a template
+  const getDimensionCount = (templateId: string): number => {
+    const builtin = BUILTIN_TEMPLATES.find((t) => t.value === templateId);
+    if (builtin) return builtin.dimensions.length;
+    const custom = customTemplates.find((t) => t.id === templateId);
+    if (custom) return custom.dimensions.length;
+    return 0;
+  };
+
+  const addParticipant = (name: string) => {
+    setParticipants((prev) => [...prev, { id: String(++participantIdCounter), name }]);
+  };
+
+  const removeParticipant = (id: string) => {
+    setParticipants((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  const importParticipants = (text: string) => {
+    const names = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const newOnes = names.map((name) => ({ id: String(++participantIdCounter), name }));
+    setParticipants((prev) => [...prev, ...newOnes]);
+  };
+
+  const handleStart = () => {
+    const sessionId = `sess_${Date.now()}`;
+    // Save to localStorage for History
+    const sessionRecord = {
+      id: sessionId,
+      name: sessionName || 'Untitled Session',
+      date: new Date().toISOString().slice(0, 10),
+      mode,
+      participantCount: participants.length,
+      participants: participants.map(p => p.name),
+      template,
+      status: 'in_progress',
+    };
+    const existing = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
+    existing.unshift(sessionRecord);
+    localStorage.setItem('ifb_sessions', JSON.stringify(existing));
+
+    navigate('/session', {
+      state: {
+        sessionId,
+        sessionName: sessionName || 'Untitled Session',
+        mode,
+        participants: participants.map(p => p.name),
+        template,
+        teamsUrl,
+        stages,
+      },
+    });
+  };
+
+  return (
+    <div className="h-full overflow-auto">
+      <div className="max-w-2xl mx-auto px-6 py-6">
+        {/* Header */}
+        <div className="flex items-center gap-3 mb-6">
+          <button
+            onClick={() => navigate('/')}
+            className="text-ink-tertiary hover:text-ink transition-colors cursor-pointer"
+            aria-label="Back to home"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <h1 className="text-xl font-semibold text-ink">Session Setup</h1>
+            <p className="text-sm text-ink-secondary">Configure your interview session</p>
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          {/* Mode selector */}
+          <motion.div variants={sectionVariant} custom={0} initial="hidden" animate="visible">
+            <Card className="p-5">
+              <ModeSelector mode={mode} onModeChange={setMode} />
+            </Card>
+          </motion.div>
+
+          {/* Session details */}
+          <motion.div variants={sectionVariant} custom={1} initial="hidden" animate="visible">
+            <Card className="p-5 space-y-4">
+              <TextField
+                label="Session name"
+                placeholder={mode === '1v1' ? 'e.g. John Doe Interview' : 'e.g. Panel Round 2'}
+                value={sessionName}
+                onChange={(e) => setSessionName(e.target.value)}
+              />
+            </Card>
+          </motion.div>
+
+          {/* Rubric template selector */}
+          <motion.div variants={sectionVariant} custom={2} initial="hidden" animate="visible">
+            <Card className="p-5">
+              <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
+                Rubric Template
+              </h3>
+              <div className="grid grid-cols-2 gap-3">
+                {/* Built-in templates */}
+                {BUILTIN_TEMPLATES.map((t) => (
+                  <motion.div
+                    key={t.value}
+                    layout
+                    whileHover={{ y: -2 }}
+                    whileTap={{ scale: 0.98 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                  >
+                    <Card
+                      hoverable
+                      className={`
+                        p-3 relative cursor-pointer transition-all
+                        ${template === t.value ? 'border-accent border-2' : ''}
+                      `}
+                      onClick={() => setTemplate(t.value)}
+                    >
+                      <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-ink-tertiary" />
+                      <div className="pr-6">
+                        <p className={`text-sm font-medium ${template === t.value ? 'text-accent' : 'text-ink'}`}>
+                          {t.label}
+                        </p>
+                        <p className="text-xs text-ink-tertiary mt-1">
+                          {t.dimensions.length} dimensions
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEditTemplate(t.value);
+                        }}
+                        className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                        aria-label={`Edit ${t.label}`}
+                      >
+                        <Pencil className="w-3 h-3" />
+                        Edit
+                      </button>
+                    </Card>
+                  </motion.div>
+                ))}
+
+                {/* Custom templates */}
+                {customTemplates.map((t) => (
+                  <motion.div
+                    key={t.id}
+                    layout
+                    whileHover={{ y: -2 }}
+                    whileTap={{ scale: 0.98 }}
+                    transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                  >
+                    <Card
+                      hoverable
+                      className={`
+                        p-3 relative cursor-pointer transition-all
+                        ${template === t.id ? 'border-accent border-2' : ''}
+                      `}
+                      onClick={() => setTemplate(t.id)}
+                    >
+                      <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-accent" />
+                      <div className="pr-6">
+                        <p className={`text-sm font-medium ${template === t.id ? 'text-accent' : 'text-ink'}`}>
+                          {t.name}
+                        </p>
+                        <p className="text-xs text-ink-tertiary mt-1">
+                          {t.dimensions.length} dimensions
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEditTemplate(t.id);
+                        }}
+                        className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                        aria-label={`Edit ${t.name}`}
+                      >
+                        <Pencil className="w-3 h-3" />
+                        Edit
+                      </button>
+                    </Card>
+                  </motion.div>
+                ))}
+
+                {/* Create custom template button */}
+                <motion.div
+                  whileHover={{ y: -2 }}
+                  whileTap={{ scale: 0.98 }}
+                  transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                >
+                  <button
+                    type="button"
+                    onClick={handleCreateTemplate}
+                    className="
+                      w-full flex flex-col items-center justify-center gap-2 p-3
+                      border-dashed border-2 border-border rounded-[--radius-card]
+                      text-ink-secondary hover:border-accent hover:text-accent
+                      transition-all cursor-pointer min-h-[88px]
+                    "
+                  >
+                    <Plus className="w-5 h-5" />
+                    <span className="text-xs font-medium">Create Custom Template</span>
+                  </button>
+                </motion.div>
+              </div>
+            </Card>
+          </motion.div>
+
+          {/* Participants */}
+          <motion.div variants={sectionVariant} custom={3} initial="hidden" animate="visible">
+            <Card className="p-5">
+              <ParticipantEditor
+                participants={participants}
+                onAdd={addParticipant}
+                onRemove={removeParticipant}
+                onImport={importParticipants}
+              />
+            </Card>
+          </motion.div>
+
+          {/* Meeting connector */}
+          <motion.div variants={sectionVariant} custom={4} initial="hidden" animate="visible">
+            <Card className="p-5">
+              <MeetingConnector
+                mode={mode}
+                teamsUrl={teamsUrl}
+                onTeamsUrlChange={setTeamsUrl}
+              />
+            </Card>
+          </motion.div>
+
+          {/* Interview flow */}
+          <motion.div variants={sectionVariant} custom={5} initial="hidden" animate="visible">
+            <Card className="p-5">
+              <FlowEditor stages={stages} onStagesChange={setStages} />
+            </Card>
+          </motion.div>
+
+          {/* Summary */}
+          <motion.div variants={sectionVariant} custom={6} initial="hidden" animate="visible">
+            <SetupSummary
+              mode={mode}
+              sessionName={sessionName}
+              templateLabel={getTemplateLabel()}
+              participants={participants}
+              teamsUrl={teamsUrl}
+              stages={stages}
+            />
+          </motion.div>
+
+          {/* Actions */}
+          <motion.div variants={sectionVariant} custom={7} initial="hidden" animate="visible">
+            <div className="flex justify-end gap-3 pb-4">
+              <Button variant="ghost" onClick={() => navigate('/')}>
+                Cancel
+              </Button>
+              <ShimmerButton onClick={handleStart} className="w-auto">
+                <Layout className="w-4 h-4" />
+                Join & Start Session
+              </ShimmerButton>
+            </div>
+          </motion.div>
+        </div>
+      </div>
+
+      {/* Rubric Template Modal */}
+      <RubricTemplateModal
+        open={templateModalOpen}
+        onClose={() => {
+          setTemplateModalOpen(false);
+          setEditingTemplate(null);
+        }}
+        onSave={handleSaveTemplate}
+        editTemplate={editingTemplate}
+      />
+    </div>
+  );
+}

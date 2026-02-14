@@ -24,6 +24,7 @@
     "INFERENCE_ENROLL_PATH": "/speaker/enroll",
     "INFERENCE_EVENTS_PATH": "/analysis/events",
     "INFERENCE_REPORT_PATH": "/analysis/report",
+    "INFERENCE_REGENERATE_CLAIM_PATH": "/analysis/regenerate-claim",
     "INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS": "6",
     "ASR_ENABLED": "true",
     "ASR_MODEL": "fun-asr-realtime-2025-11-07",
@@ -39,7 +40,8 @@
     "FINALIZE_V2_ENABLED": "true",
     "FINALIZE_TIMEOUT_MS": "180000",
     "FINALIZE_WATCHDOG_MS": "300000",
-    "DIARIZATION_BACKEND_DEFAULT": "cloud"
+    "DIARIZATION_BACKEND_DEFAULT": "cloud",
+    "AUDIO_RETENTION_HOURS": "72"
   },
 
   "durable_objects": {

@@ -1,0 +1,60 @@
+appId: com.interviewfeedback.desktop
+productName: Interview Feedback
+copyright: Copyright © 2026 Interview Feedback Team
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - main.js
+  - preload.js
+  - "lib/**/*"
+  - "dist/**/*"
+  - "package.json"
+  - "!src/**/*"
+  - "!e2e/**/*"
+  - "!**/*.test.*"
+  - "!**/*.spec.*"
+  - "!vitest*"
+  - "!playwright*"
+  - "!tsconfig*"
+  - "!vite.config*"
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - universal
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+asar: true
+
+protocols:
+  - name: Interview Feedback
+    schemes:
+      - interviewfeedback
+
+extraResources:
+  - from: node_modules/ffmpeg-static
+    to: ffmpeg-static
+    filter:
+      - "**/*"
+  - from: node_modules/ffprobe-static
+    to: ffprobe-static
+    filter:
+      - "**/*"

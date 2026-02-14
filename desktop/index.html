@@ -87,6 +87,17 @@
             <div id="dashboard-meeting-list" class="meeting-list">
               <p class="muted">No meetings yet. Add one manually or sync from Graph.</p>
             </div>
+
+            <div class="panel-header top-gap">
+              <h2>Session History</h2>
+              <span class="muted small">R2 indexed finalized sessions</span>
+            </div>
+            <div class="actions wrap">
+              <button id="btn-history-refresh" type="button">Refresh History</button>
+            </div>
+            <div id="history-list" class="meeting-list">
+              <p class="muted">No history loaded.</p>
+            </div>
           </article>
 
           <article class="panel">
@@ -210,7 +221,7 @@
                 <button id="btn-feedback-export-md" type="button">Export Markdown</button>
                 <button id="btn-feedback-export-docx" type="button">Export DOCX</button>
                 <button id="btn-feedback-ready" type="button">Check Feedback Ready</button>
-                <button id="btn-open-feedback" type="button">Open Feedback (<=3s)</button>
+                <button id="btn-open-feedback" type="button">Open Feedback (<=8s)</button>
               </div>
               <pre id="finalize-v2-status" class="status-box">Idle.</pre>
               <ul id="finalize-stage-list" class="stage-list" aria-label="Finalize Progress">
@@ -243,7 +254,7 @@
                 </div>
                 <div class="flow-card">
                   <strong>Feedback SLA</strong>
-                  <div id="flow-feedback-sla" class="muted">Target: <= 3s full report</div>
+                  <div id="flow-feedback-sla" class="muted">Target: <= 8s full report</div>
                 </div>
               </div>
             </section>
@@ -395,8 +406,13 @@
               <button id="btn-evidence-modal-close" type="button">Close</button>
             </div>
             <pre id="evidence-modal-content" class="status-box">No evidence selected.</pre>
+            <label class="field compact">
+              <span>Evidence Refs (comma separated)</span>
+              <input id="claim-evidence-refs" type="text" placeholder="e_000001,e_000003" />
+            </label>
             <div class="actions wrap">
               <button id="btn-regenerate-claim" type="button">Regenerate Claim</button>
+              <button id="btn-apply-claim-evidence" type="button">Apply Evidence Refs</button>
             </div>
           </article>
         </section>

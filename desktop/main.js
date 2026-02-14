@@ -257,7 +257,19 @@ function createWindow() {
     }
   });
 
-  createdWindow.loadFile(path.join(__dirname, 'index.html'));
+  // Load React app (Vite dev server or production build)
+  const isDev = !app.isPackaged;
+  if (isDev && process.env.VITE_DEV_SERVER_URL) {
+    createdWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  } else {
+    const distIndex = path.join(__dirname, 'dist', 'index.html');
+    if (fs.existsSync(distIndex)) {
+      createdWindow.loadFile(distIndex);
+    } else {
+      // Fallback to legacy UI
+      createdWindow.loadFile(path.join(__dirname, 'index.html'));
+    }
+  }
   createdWindow.setVisibleOnAllWorkspaces(false, { visibleOnFullScreen: false });
   createdWindow.webContents.once("did-finish-load", () => {
     if (pendingDeepLinkPayload) {
@@ -517,6 +529,57 @@ function registerIpcHandlers() {
       throw new Error(
         `feedback-regenerate-claim failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`
       );
+    }
+    return response.data;
+  });
+
+  ipcMain.handle('session:updateFeedbackClaimEvidence', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('session feedback-claim-evidence payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/feedback-claim-evidence`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload.body || {})
+      }
+    );
+    if (!response.ok) {
+      throw new Error(
+        `feedback-claim-evidence failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`
+      );
+    }
+    return response.data;
+  });
+
+  ipcMain.handle('session:listHistory', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('session history payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    if (!baseUrl) {
+      throw new Error('baseUrl is required');
+    }
+    const limit = Number(payload.limit || 20);
+    const cursor = String(payload.cursor || '').trim();
+    const params = new URLSearchParams();
+    if (Number.isFinite(limit) && limit > 0) {
+      params.set('limit', String(Math.floor(limit)));
+    }
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/history${params.toString() ? `?${params.toString()}` : ''}`
+    );
+    if (!response.ok) {
+      throw new Error(`session history failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
     }
     return response.data;
   });

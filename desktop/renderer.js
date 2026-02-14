@@ -133,6 +133,8 @@ const dashboardMeetingUrlEl = document.querySelector("#dashboard-meeting-url");
 const dashboardMeetingParticipantsEl = document.querySelector("#dashboard-meeting-participants");
 const btnDashboardAddMeeting = document.querySelector("#btn-dashboard-add-meeting");
 const dashboardMeetingListEl = document.querySelector("#dashboard-meeting-list");
+const btnHistoryRefresh = document.querySelector("#btn-history-refresh");
+const historyListEl = document.querySelector("#history-list");
 const graphClientIdEl = document.querySelector("#graph-client-id");
 const graphTenantIdEl = document.querySelector("#graph-tenant-id");
 const btnGraphSaveConfig = document.querySelector("#btn-graph-save-config");
@@ -153,6 +155,8 @@ const evidenceModalContentEl = document.querySelector("#evidence-modal-content")
 const evidenceModalCloseEl = document.querySelector("#evidence-modal-close");
 const btnEvidenceModalClose = document.querySelector("#btn-evidence-modal-close");
 const btnRegenerateClaim = document.querySelector("#btn-regenerate-claim");
+const btnApplyClaimEvidence = document.querySelector("#btn-apply-claim-evidence");
+const claimEvidenceRefsEl = document.querySelector("#claim-evidence-refs");
 
 const transcriptFormatter = window.IFTranscriptFormatter || {};
 const liveMetricsEngine = window.IFLiveMetrics || {};
@@ -245,6 +249,8 @@ let currentReviewTab = "overall";
 let latestLiveSnapshot = null;
 let latestFeedbackReport = null;
 let selectedClaimContext = null;
+let historyCursor = null;
+let historyItemsCache = [];
 const logBuffer = [];
 let appMode = "dashboard";
 let dashboardMeetings = [];
@@ -662,6 +668,78 @@ function renderMeetingList() {
     })
     .join("");
   dashboardMeetingListEl.innerHTML = html;
+}
+
+function renderHistoryList(items = [], hasMore = false, cursor = null) {
+  if (!historyListEl) return;
+  historyCursor = cursor || null;
+  if (!Array.isArray(items) || items.length === 0) {
+    historyListEl.innerHTML = `<p class="muted">No history records found.</p>`;
+    return;
+  }
+  const normalizedItems = [...items].sort((left, right) => {
+    const leftTs = Date.parse(String(left?.finalized_at || ""));
+    const rightTs = Date.parse(String(right?.finalized_at || ""));
+    if (Number.isFinite(leftTs) && Number.isFinite(rightTs) && leftTs !== rightTs) {
+      return rightTs - leftTs;
+    }
+    return String(left?.session_id || "").localeCompare(String(right?.session_id || ""));
+  });
+  const html = normalizedItems
+    .map((item) => {
+      const sessionId = String(item?.session_id || "").trim();
+      const finalizedAt = String(item?.finalized_at || "").trim();
+      const source = String(item?.report_source || "memo_first");
+      const ready = Boolean(item?.ready);
+      const unresolved = Number(item?.unresolved_cluster_count || 0);
+      const needsEvidence = Number(item?.needs_evidence_count || 0);
+      const tentative = Boolean(item?.tentative);
+      const finalizedText = finalizedAt ? new Date(finalizedAt).toLocaleString() : "-";
+      return `
+        <article class="meeting-item">
+          <div class="meeting-item-head">
+            <strong>${escapeHtml(sessionId || "unknown-session")}</strong>
+            <span class="muted small">${escapeHtml(source)}</span>
+          </div>
+          <div class="muted small">finalized=${escapeHtml(finalizedText)}</div>
+          <div class="muted small">ready=${escapeHtml(String(ready))}, tentative=${escapeHtml(String(tentative))}, unresolved=${escapeHtml(String(unresolved))}, needs_evidence=${escapeHtml(String(needsEvidence))}</div>
+          <div class="actions wrap">
+            <button type="button" data-history-action="open" data-session-id="${escapeHtml(sessionId)}">Open Report</button>
+            <button type="button" data-history-action="copy-session" data-session-id="${escapeHtml(sessionId)}">Use Session ID</button>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+  historyListEl.innerHTML = `${html}${hasMore ? `<div class="actions wrap"><button type="button" data-history-action="more">Load More</button></div>` : ""}`;
+}
+
+async function refreshSessionHistory(options = {}) {
+  const payload = await desktopAPI.listSessionHistory({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    limit: options.limit || 20,
+    cursor: options.cursor || ""
+  });
+  const incoming = Array.isArray(payload?.items) ? payload.items : [];
+  if (options.append) {
+    const byId = new Map(
+      historyItemsCache.map((item) => [
+        `${String(item?.session_id || "")}:${String(item?.finalized_at || "")}`,
+        item
+      ])
+    );
+    for (const item of incoming) {
+      const key = `${String(item?.session_id || "")}:${String(item?.finalized_at || "")}`;
+      if (!key) continue;
+      byId.set(key, item);
+    }
+    historyItemsCache = Array.from(byId.values());
+  } else {
+    historyItemsCache = incoming;
+  }
+  renderHistoryList(historyItemsCache, Boolean(payload?.has_more), payload?.cursor || null);
+  setResultPayload(payload);
+  return payload;
 }
 
 function applyMeetingToSession(meeting) {
@@ -1133,6 +1211,13 @@ function openEvidenceModal(payload) {
   if (btnRegenerateClaim) {
     btnRegenerateClaim.disabled = !selectedClaimContext;
   }
+  if (btnApplyClaimEvidence) {
+    btnApplyClaimEvidence.disabled = !selectedClaimContext;
+  }
+  if (claimEvidenceRefsEl) {
+    const refs = Array.isArray(payload?.claim?.evidence_refs) ? payload.claim.evidence_refs : [];
+    claimEvidenceRefsEl.value = refs.join(",");
+  }
   if (evidenceModalContentEl) {
     const lines = [];
     const evidence = payload?.evidence || null;
@@ -1181,6 +1266,12 @@ function closeEvidenceModal() {
   if (btnRegenerateClaim) {
     btnRegenerateClaim.disabled = true;
   }
+  if (btnApplyClaimEvidence) {
+    btnApplyClaimEvidence.disabled = true;
+  }
+  if (claimEvidenceRefsEl) {
+    claimEvidenceRefsEl.value = "";
+  }
   if (evidenceModalEl) {
     evidenceModalEl.classList.add("hidden");
     evidenceModalEl.setAttribute("aria-hidden", "true");
@@ -1208,7 +1299,8 @@ function findClaimFromReport(report, personKey, dimension, claimType, claimId) {
     text: claim.text,
     claim_type: claimType,
     person_key: person.person_key,
-    dimension: dim.dimension
+    dimension: dim.dimension,
+    evidence_refs: Array.isArray(claim.evidence_refs) ? claim.evidence_refs : []
   };
 }
 
@@ -1249,6 +1341,34 @@ function handleEvidenceChipClick(buttonEl) {
     claim,
     context
   });
+}
+
+async function applySelectedClaimEvidenceRefs() {
+  if (!selectedClaimContext) {
+    throw new Error("no claim selected");
+  }
+  const raw = String(claimEvidenceRefsEl?.value || "").trim();
+  const refs = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!refs.length) {
+    throw new Error("evidence refs cannot be empty");
+  }
+  const payload = await desktopAPI.updateFeedbackClaimEvidence({
+    baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+    sessionId: meetingIdValue(),
+    body: {
+      person_key: selectedClaimContext.person_key,
+      dimension: selectedClaimContext.dimension,
+      claim_type: selectedClaimContext.claim_type,
+      claim_id: selectedClaimContext.claim_id,
+      evidence_refs: refs
+    }
+  });
+  await openFeedbackReport();
+  logLine(`Claim evidence updated: person=${selectedClaimContext.person_key} dimension=${selectedClaimContext.dimension}`);
+  return payload;
 }
 
 function chipHtml({
@@ -1334,6 +1454,16 @@ function renderReportV2(payload) {
       .join("");
     const quality = payload?.quality || report?.quality || {};
     const timings = payload?.timings || {};
+    const trace = report?.trace || {};
+    const qualityGateFailures = Array.isArray(trace?.quality_gate_failures) ? trace.quality_gate_failures : [];
+    const qualitySnapshot = trace?.quality_gate_snapshot || {};
+    const reportSource = payload?.report_source || quality?.report_source || "memo_first";
+    const blockingReason = payload?.blocking_reason || quality?.report_error || null;
+    const echoRecentRate = Number(qualitySnapshot?.observed_echo_recent_rate ?? 0);
+    const echoLeakRate = Number(qualitySnapshot?.observed_echo_leak_rate ?? 0);
+    const suppressionFpRate = Number(qualitySnapshot?.observed_suppression_false_positive_rate ?? 0);
+    const unknownRatio = Number(qualitySnapshot?.observed_unknown_ratio ?? 0);
+    const echoQualityWarn = echoLeakRate > 0.2 || suppressionFpRate > 0.15;
     reviewOverallEl.innerHTML = `
       <div class="review-section">
         <div class="review-card">
@@ -1345,7 +1475,20 @@ function renderReportV2(payload) {
           <div class="muted small">quality.claims=${escapeHtml(String(quality?.claim_count ?? 0))} needs_evidence=${escapeHtml(
       String(quality?.needs_evidence_count ?? 0)
     )}</div>
-          <div class="muted small">timings(total=${escapeHtml(String(timings?.total_ms ?? 0))}ms)</div>
+          <div class="muted small">report_source=${escapeHtml(String(reportSource))}</div>
+          <div class="muted small">timings(total=${escapeHtml(String(timings?.total_ms ?? 0))}ms, events=${escapeHtml(String(timings?.events_ms ?? 0))}ms, report=${escapeHtml(String(timings?.report_ms ?? 0))}ms)</div>
+          <div class="muted small">quality.unknown_ratio=${escapeHtml((unknownRatio * 100).toFixed(2))}% | echo_recent_rate=${escapeHtml((echoRecentRate * 100).toFixed(2))}% | echo_leak_rate=${escapeHtml((echoLeakRate * 100).toFixed(2))}% | suppression_fp=${escapeHtml((suppressionFpRate * 100).toFixed(2))}%</div>
+          ${
+            echoQualityWarn
+              ? `<div class="muted small">串音指标异常：建议人工复核，不建议直接使用强归因结论。</div>`
+              : ""
+          }
+          ${blockingReason ? `<div class="muted small">blocking_reason=${escapeHtml(String(blockingReason))}</div>` : ""}
+          ${
+            qualityGateFailures.length
+              ? `<div class="muted small">quality_gate_failures=${escapeHtml(qualityGateFailures.slice(0, 3).join(" | "))}</div>`
+              : ""
+          }
         </div>
         ${sectionHtml || "<div class='review-card'>No overall summary sections.</div>"}
       </div>
@@ -1402,11 +1545,13 @@ function renderReportV2(payload) {
             : "--:--";
         const quote = item?.quote ? escapeHtml(String(item.quote)) : "";
         const speakerLabel = item?.speaker?.display_name || item?.speaker?.cluster_id || "unknown";
+        const weakBadge = item?.weak ? `<span class="muted small">weak evidence (${escapeHtml(String(item?.weak_reason || "overlap_risk"))})</span>` : "";
         const chip = chipHtml({ evidenceId: String(item?.evidence_id || "evidence") });
         return `
           <article class="review-card">
             <div><strong>${escapeHtml(item?.evidence_id || "evidence")}</strong> @ ${range}</div>
             <div class="muted small">${escapeHtml(speakerLabel)}</div>
+            ${weakBadge}
             <div>${quote || "<span class='muted'>No quote.</span>"}</div>
             <div class="claim-chip-group">${chip}</div>
           </article>
@@ -1585,8 +1730,13 @@ async function checkFeedbackReady() {
   });
   const totalMs = Number(payload?.timings?.total_ms || 0);
   const ready = Boolean(payload?.ready);
-  const statusText = `Ready=${ready} total=${totalMs}ms / target<=3000ms`;
-  setFeedbackSlaText(statusText, !ready || totalMs > 3000);
+  const source = String(payload?.report_source || payload?.quality?.report_source || "memo_first");
+  const blockingReason = String(payload?.blocking_reason || "").trim();
+  const statusText = `Ready=${ready} source=${source} total=${totalMs}ms / target<=8000ms`;
+  setFeedbackSlaText(statusText, !ready || totalMs > 8000);
+  if (blockingReason) {
+    logLine(`feedback-ready blocking_reason=${blockingReason}`);
+  }
   setResultPayload(payload);
   logLine(`feedback-ready checked: ready=${ready} total_ms=${totalMs}`);
   return payload;
@@ -1602,10 +1752,15 @@ async function openFeedbackReport() {
   const serverMs = Number(payload?.opened_in_ms || 0);
   const elapsedMs = serverMs > 0 ? serverMs : Date.now() - openedAt;
   const ready = Boolean(payload?.ready);
+  const source = String(payload?.report_source || payload?.quality?.report_source || "memo_first");
+  const blockingReason = String(payload?.blocking_reason || "").trim();
   setFeedbackSlaText(
-    `Opened in ${elapsedMs}ms / target<=3000ms / ready=${ready}`,
-    elapsedMs > 3000 || !ready
+    `Opened in ${elapsedMs}ms / target<=8000ms / ready=${ready} / source=${source}`,
+    elapsedMs > 8000 || !ready
   );
+  if (blockingReason) {
+    logLine(`Open feedback blocking_reason=${blockingReason}`);
+  }
   const report = reportFromPayload(payload);
   if (!report) {
     throw new Error("feedback-open returned no report payload");
@@ -3647,6 +3802,65 @@ function bindEvents() {
     });
   }
 
+  if (btnHistoryRefresh) {
+    btnHistoryRefresh.addEventListener("click", async () => {
+      try {
+        await refreshSessionHistory({ limit: 20 });
+        logLine("Session history refreshed.");
+      } catch (error) {
+        logLine(`Refresh session history failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+
+  if (historyListEl) {
+    historyListEl.addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const buttonEl = target.closest("[data-history-action]");
+      if (!buttonEl) return;
+      const action = String(buttonEl.dataset.historyAction || "").trim();
+      if (action === "more") {
+        try {
+          await refreshSessionHistory({ limit: 20, cursor: historyCursor || "", append: true });
+        } catch (error) {
+          logLine(`Load more history failed: ${error.message}`);
+          setResultPayload({ error: error.message });
+        }
+        return;
+      }
+      const sessionId = String(buttonEl.dataset.sessionId || "").trim();
+      if (!sessionId) return;
+      if (action === "copy-session") {
+        if (meetingIdEl) {
+          meetingIdEl.value = sessionId;
+        }
+        logLine(`Session ID set from history: ${sessionId}`);
+        return;
+      }
+      if (action === "open") {
+        try {
+          if (meetingIdEl) {
+            meetingIdEl.value = sessionId;
+          }
+          const resultV2 = await desktopAPI.getResultV2({
+            baseUrl: normalizeHttpBaseUrl(apiBaseUrlEl.value),
+            sessionId
+          });
+          renderReportV2(resultV2);
+          openReviewPanel("overall");
+          setResultPayload(resultV2);
+          setAppMode("session");
+          logLine(`History report opened: ${sessionId}`);
+        } catch (error) {
+          logLine(`Open history report failed: ${error.message}`);
+          setResultPayload({ error: error.message });
+        }
+      }
+    });
+  }
+
   if (btnDashboardEnterSession) {
     btnDashboardEnterSession.addEventListener("click", async () => {
       try {
@@ -3839,6 +4053,17 @@ function bindEvents() {
         closeEvidenceModal();
       } catch (error) {
         logLine(`Regenerate claim failed: ${error.message}`);
+        setResultPayload({ error: error.message });
+      }
+    });
+  }
+  if (btnApplyClaimEvidence) {
+    btnApplyClaimEvidence.addEventListener("click", async () => {
+      try {
+        await applySelectedClaimEvidenceRefs();
+        closeEvidenceModal();
+      } catch (error) {
+        logLine(`Apply claim evidence failed: ${error.message}`);
         setResultPayload({ error: error.message });
       }
     });
@@ -4150,6 +4375,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (btnRegenerateClaim) {
       btnRegenerateClaim.disabled = true;
     }
+    if (btnApplyClaimEvidence) {
+      btnApplyClaimEvidence.disabled = true;
+    }
     if (graphClientIdEl?.value) {
       await desktopAPI.calendarSetConfig({
         clientId: String(graphClientIdEl.value || "").trim(),
@@ -4170,6 +4398,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     });
     await refreshMemos().catch(() => {
       // ignore startup memo fetch failures
+    });
+    await refreshSessionHistory({ limit: 20 }).catch((error) => {
+      logLine(`Initial history load failed: ${error.message}`);
     });
     await refreshSidecarStatus();
   } catch (error) {
