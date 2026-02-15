@@ -41,7 +41,9 @@
     "FINALIZE_TIMEOUT_MS": "180000",
     "FINALIZE_WATCHDOG_MS": "300000",
     "DIARIZATION_BACKEND_DEFAULT": "cloud",
-    "AUDIO_RETENTION_HOURS": "72"
+    "AUDIO_RETENTION_HOURS": "72",
+    "WORKER_API_KEY": "",
+    "DEFAULT_LOCALE": "zh-CN"
   },
 
   "durable_objects": {

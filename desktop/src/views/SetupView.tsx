@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
+import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
 import {
   User,
   Users,
@@ -14,6 +15,7 @@ import {
   ChevronDown,
   ClipboardList,
   Pencil,
+  Check,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -457,6 +459,7 @@ function SetupSummary({
 export function SetupView() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { start: startSession } = useSessionOrchestrator();
   const locationState = location.state as { mode?: SessionMode; sessionName?: string; stages?: string[] } | null;
   const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
   const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
@@ -564,12 +567,14 @@ export function SetupView() {
     setParticipants((prev) => [...prev, ...newOnes]);
   };
 
-  const handleStart = () => {
+  const handleStart = useCallback(async () => {
     const sessionId = `sess_${Date.now()}`;
+    const displayName = sessionName || 'Untitled Session';
+
     // Save to localStorage for History
     const sessionRecord = {
       id: sessionId,
-      name: sessionName || 'Untitled Session',
+      name: displayName,
       date: new Date().toISOString().slice(0, 10),
       mode,
       participantCount: participants.length,
@@ -581,10 +586,23 @@ export function SetupView() {
     existing.unshift(sessionRecord);
     localStorage.setItem('ifb_sessions', JSON.stringify(existing));
 
+    // Orchestrator handles: audio init, WS connect, timer start, store update
+    await startSession({
+      sessionId,
+      sessionName: displayName,
+      mode,
+      participants: participants.map(p => ({ name: p.name })),
+      stages,
+      baseApiUrl: '', // Will be configured from environment
+      interviewerName: '',
+      teamsJoinUrl: teamsUrl,
+      templateId: template,
+    });
+
     navigate('/session', {
       state: {
         sessionId,
-        sessionName: sessionName || 'Untitled Session',
+        sessionName: displayName,
         mode,
         participants: participants.map(p => p.name),
         template,
@@ -592,215 +610,276 @@ export function SetupView() {
         stages,
       },
     });
-  };
+  }, [sessionName, mode, participants, template, stages, teamsUrl, startSession, navigate]);
+
+  // Wizard step state
+  const [step, setStep] = useState(0);
+  const stepLabels = ['Basics', 'Template & Flow', 'Review'];
+
+  const canAdvance = step === 0
+    ? true // No required fields on step 1 (session name defaults to "Untitled")
+    : step === 1
+    ? stages.length > 0
+    : true;
 
   return (
-    <div className="h-full overflow-auto">
-      <div className="max-w-2xl mx-auto px-6 py-6">
+    <div className="h-full flex flex-col overflow-hidden">
+      <div className="max-w-2xl mx-auto px-6 py-6 flex-1 flex flex-col overflow-auto">
         {/* Header */}
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-center gap-3 mb-5">
           <button
-            onClick={() => navigate('/')}
+            onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
             className="text-ink-tertiary hover:text-ink transition-colors cursor-pointer"
-            aria-label="Back to home"
+            aria-label={step > 0 ? 'Previous step' : 'Back to home'}
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <div>
+          <div className="flex-1">
             <h1 className="text-xl font-semibold text-ink">Session Setup</h1>
-            <p className="text-sm text-ink-secondary">Configure your interview session</p>
+            <p className="text-sm text-ink-secondary">Step {step + 1} of {stepLabels.length}</p>
           </div>
         </div>
 
-        <div className="space-y-6">
-          {/* Mode selector */}
-          <motion.div variants={sectionVariant} custom={0} initial="hidden" animate="visible">
-            <Card className="p-5">
-              <ModeSelector mode={mode} onModeChange={setMode} />
-            </Card>
-          </motion.div>
-
-          {/* Session details */}
-          <motion.div variants={sectionVariant} custom={1} initial="hidden" animate="visible">
-            <Card className="p-5 space-y-4">
-              <TextField
-                label="Session name"
-                placeholder={mode === '1v1' ? 'e.g. John Doe Interview' : 'e.g. Panel Round 2'}
-                value={sessionName}
-                onChange={(e) => setSessionName(e.target.value)}
-              />
-            </Card>
-          </motion.div>
-
-          {/* Rubric template selector */}
-          <motion.div variants={sectionVariant} custom={2} initial="hidden" animate="visible">
-            <Card className="p-5">
-              <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
-                Rubric Template
-              </h3>
-              <div className="grid grid-cols-2 gap-3">
-                {/* Built-in templates */}
-                {BUILTIN_TEMPLATES.map((t) => (
-                  <motion.div
-                    key={t.value}
-                    layout
-                    whileHover={{ y: -2 }}
-                    whileTap={{ scale: 0.98 }}
-                    transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                  >
-                    <Card
-                      hoverable
-                      className={`
-                        p-3 relative cursor-pointer transition-all
-                        ${template === t.value ? 'border-accent border-2' : ''}
-                      `}
-                      onClick={() => setTemplate(t.value)}
-                    >
-                      <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-ink-tertiary" />
-                      <div className="pr-6">
-                        <p className={`text-sm font-medium ${template === t.value ? 'text-accent' : 'text-ink'}`}>
-                          {t.label}
-                        </p>
-                        <p className="text-xs text-ink-tertiary mt-1">
-                          {t.dimensions.length} dimensions
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEditTemplate(t.value);
-                        }}
-                        className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
-                        aria-label={`Edit ${t.label}`}
-                      >
-                        <Pencil className="w-3 h-3" />
-                        Edit
-                      </button>
-                    </Card>
-                  </motion.div>
-                ))}
-
-                {/* Custom templates */}
-                {customTemplates.map((t) => (
-                  <motion.div
-                    key={t.id}
-                    layout
-                    whileHover={{ y: -2 }}
-                    whileTap={{ scale: 0.98 }}
-                    transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                  >
-                    <Card
-                      hoverable
-                      className={`
-                        p-3 relative cursor-pointer transition-all
-                        ${template === t.id ? 'border-accent border-2' : ''}
-                      `}
-                      onClick={() => setTemplate(t.id)}
-                    >
-                      <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-accent" />
-                      <div className="pr-6">
-                        <p className={`text-sm font-medium ${template === t.id ? 'text-accent' : 'text-ink'}`}>
-                          {t.name}
-                        </p>
-                        <p className="text-xs text-ink-tertiary mt-1">
-                          {t.dimensions.length} dimensions
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleEditTemplate(t.id);
-                        }}
-                        className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
-                        aria-label={`Edit ${t.name}`}
-                      >
-                        <Pencil className="w-3 h-3" />
-                        Edit
-                      </button>
-                    </Card>
-                  </motion.div>
-                ))}
-
-                {/* Create custom template button */}
-                <motion.div
-                  whileHover={{ y: -2 }}
-                  whileTap={{ scale: 0.98 }}
-                  transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                >
-                  <button
-                    type="button"
-                    onClick={handleCreateTemplate}
-                    className="
-                      w-full flex flex-col items-center justify-center gap-2 p-3
-                      border-dashed border-2 border-border rounded-[--radius-card]
-                      text-ink-secondary hover:border-accent hover:text-accent
-                      transition-all cursor-pointer min-h-[88px]
-                    "
-                  >
-                    <Plus className="w-5 h-5" />
-                    <span className="text-xs font-medium">Create Custom Template</span>
-                  </button>
-                </motion.div>
-              </div>
-            </Card>
-          </motion.div>
-
-          {/* Participants */}
-          <motion.div variants={sectionVariant} custom={3} initial="hidden" animate="visible">
-            <Card className="p-5">
-              <ParticipantEditor
-                participants={participants}
-                onAdd={addParticipant}
-                onRemove={removeParticipant}
-                onImport={importParticipants}
-              />
-            </Card>
-          </motion.div>
-
-          {/* Meeting connector */}
-          <motion.div variants={sectionVariant} custom={4} initial="hidden" animate="visible">
-            <Card className="p-5">
-              <MeetingConnector
-                mode={mode}
-                teamsUrl={teamsUrl}
-                onTeamsUrlChange={setTeamsUrl}
-              />
-            </Card>
-          </motion.div>
-
-          {/* Interview flow */}
-          <motion.div variants={sectionVariant} custom={5} initial="hidden" animate="visible">
-            <Card className="p-5">
-              <FlowEditor stages={stages} onStagesChange={setStages} />
-            </Card>
-          </motion.div>
-
-          {/* Summary */}
-          <motion.div variants={sectionVariant} custom={6} initial="hidden" animate="visible">
-            <SetupSummary
-              mode={mode}
-              sessionName={sessionName}
-              templateLabel={getTemplateLabel()}
-              participants={participants}
-              teamsUrl={teamsUrl}
-              stages={stages}
-            />
-          </motion.div>
-
-          {/* Actions */}
-          <motion.div variants={sectionVariant} custom={7} initial="hidden" animate="visible">
-            <div className="flex justify-end gap-3 pb-4">
-              <Button variant="ghost" onClick={() => navigate('/')}>
-                Cancel
-              </Button>
-              <ShimmerButton onClick={handleStart} className="w-auto">
-                <Layout className="w-4 h-4" />
-                Join & Start Session
-              </ShimmerButton>
+        {/* Step Indicator */}
+        <div className="flex items-center gap-2 mb-6">
+          {stepLabels.map((label, i) => (
+            <div key={label} className="flex items-center gap-2 flex-1">
+              <button
+                onClick={() => i < step && setStep(i)}
+                className={`flex items-center gap-2 ${i <= step ? 'cursor-pointer' : 'cursor-default'}`}
+                disabled={i > step}
+              >
+                <div className={`
+                  w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-colors
+                  ${i < step ? 'bg-accent text-white' : i === step ? 'bg-accent text-white' : 'bg-border text-ink-tertiary'}
+                `}>
+                  {i < step ? <Check className="w-3.5 h-3.5" /> : i + 1}
+                </div>
+                <span className={`text-sm font-medium hidden sm:inline ${i <= step ? 'text-ink' : 'text-ink-tertiary'}`}>
+                  {label}
+                </span>
+              </button>
+              {i < stepLabels.length - 1 && (
+                <div className={`flex-1 h-0.5 rounded-full ${i < step ? 'bg-accent' : 'bg-border'}`} />
+              )}
             </div>
-          </motion.div>
+          ))}
+        </div>
+
+        {/* Step Content */}
+        <div className="flex-1">
+          <AnimatePresence mode="wait">
+            {step === 0 && (
+              <motion.div
+                key="step-0"
+                initial={{ opacity: 0, x: 40 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -40 }}
+                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                className="space-y-4"
+              >
+                <Card className="p-5">
+                  <ModeSelector mode={mode} onModeChange={setMode} />
+                </Card>
+
+                <Card className="p-5 space-y-4">
+                  <TextField
+                    label="Session name"
+                    placeholder={mode === '1v1' ? 'e.g. John Doe Interview' : 'e.g. Panel Round 2'}
+                    value={sessionName}
+                    onChange={(e) => setSessionName(e.target.value)}
+                  />
+                </Card>
+
+                <Card className="p-5">
+                  <ParticipantEditor
+                    participants={participants}
+                    onAdd={addParticipant}
+                    onRemove={removeParticipant}
+                    onImport={importParticipants}
+                  />
+                </Card>
+
+                <Card className="p-5">
+                  <MeetingConnector
+                    mode={mode}
+                    teamsUrl={teamsUrl}
+                    onTeamsUrlChange={setTeamsUrl}
+                  />
+                </Card>
+              </motion.div>
+            )}
+
+            {step === 1 && (
+              <motion.div
+                key="step-1"
+                initial={{ opacity: 0, x: 40 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -40 }}
+                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                className="space-y-4"
+              >
+                <Card className="p-5">
+                  <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
+                    Rubric Template
+                  </h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    {BUILTIN_TEMPLATES.map((t) => (
+                      <motion.div
+                        key={t.value}
+                        layout
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.98 }}
+                        transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                      >
+                        <Card
+                          hoverable
+                          className={`
+                            p-3 relative cursor-pointer transition-all
+                            ${template === t.value ? 'border-accent border-2' : ''}
+                          `}
+                          onClick={() => setTemplate(t.value)}
+                        >
+                          <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-ink-tertiary" />
+                          <div className="pr-6">
+                            <p className={`text-sm font-medium ${template === t.value ? 'text-accent' : 'text-ink'}`}>
+                              {t.label}
+                            </p>
+                            <p className="text-xs text-ink-tertiary mt-1">
+                              {t.dimensions.length} dimensions
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEditTemplate(t.value);
+                            }}
+                            className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                            aria-label={`Edit ${t.label}`}
+                          >
+                            <Pencil className="w-3 h-3" />
+                            Edit
+                          </button>
+                        </Card>
+                      </motion.div>
+                    ))}
+
+                    {customTemplates.map((t) => (
+                      <motion.div
+                        key={t.id}
+                        layout
+                        whileHover={{ y: -2 }}
+                        whileTap={{ scale: 0.98 }}
+                        transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                      >
+                        <Card
+                          hoverable
+                          className={`
+                            p-3 relative cursor-pointer transition-all
+                            ${template === t.id ? 'border-accent border-2' : ''}
+                          `}
+                          onClick={() => setTemplate(t.id)}
+                        >
+                          <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-accent" />
+                          <div className="pr-6">
+                            <p className={`text-sm font-medium ${template === t.id ? 'text-accent' : 'text-ink'}`}>
+                              {t.name}
+                            </p>
+                            <p className="text-xs text-ink-tertiary mt-1">
+                              {t.dimensions.length} dimensions
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEditTemplate(t.id);
+                            }}
+                            className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                            aria-label={`Edit ${t.name}`}
+                          >
+                            <Pencil className="w-3 h-3" />
+                            Edit
+                          </button>
+                        </Card>
+                      </motion.div>
+                    ))}
+
+                    <motion.div
+                      whileHover={{ y: -2 }}
+                      whileTap={{ scale: 0.98 }}
+                      transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                    >
+                      <button
+                        type="button"
+                        onClick={handleCreateTemplate}
+                        className="
+                          w-full flex flex-col items-center justify-center gap-2 p-3
+                          border-dashed border-2 border-border rounded-[--radius-card]
+                          text-ink-secondary hover:border-accent hover:text-accent
+                          transition-all cursor-pointer min-h-[88px]
+                        "
+                      >
+                        <Plus className="w-5 h-5" />
+                        <span className="text-xs font-medium">Create Custom Template</span>
+                      </button>
+                    </motion.div>
+                  </div>
+                </Card>
+
+                <Card className="p-5">
+                  <FlowEditor stages={stages} onStagesChange={setStages} />
+                </Card>
+              </motion.div>
+            )}
+
+            {step === 2 && (
+              <motion.div
+                key="step-2"
+                initial={{ opacity: 0, x: 40 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -40 }}
+                transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                className="space-y-4"
+              >
+                <SetupSummary
+                  mode={mode}
+                  sessionName={sessionName}
+                  templateLabel={getTemplateLabel()}
+                  participants={participants}
+                  teamsUrl={teamsUrl}
+                  stages={stages}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+
+      {/* Sticky bottom navigation */}
+      <div className="border-t border-border bg-surface px-6 py-3">
+        <div className="max-w-2xl mx-auto flex items-center justify-between">
+          <Button
+            variant="ghost"
+            onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
+          >
+            {step > 0 ? 'Back' : 'Cancel'}
+          </Button>
+
+          {step < stepLabels.length - 1 ? (
+            <Button
+              onClick={() => setStep(step + 1)}
+              disabled={!canAdvance}
+            >
+              Continue
+            </Button>
+          ) : (
+            <ShimmerButton onClick={handleStart} className="w-auto">
+              <Layout className="w-4 h-4" />
+              Join & Start Session
+            </ShimmerButton>
+          )}
         </div>
       </div>
 

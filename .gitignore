@@ -15,6 +15,7 @@ artifacts/
 
 # Secrets / local config
 inference/.env
+desktop/.env
 cloudflare/tunnel/config.yml
 cloudflare/tunnel/*.log
 cloudflare/tunnel/*.pid
@@ -24,6 +25,11 @@ cloudflare/tunnel/*.pid
 
 # OS
 .DS_Store
+
+# Desktop build output and caches
+desktop/dist/
+desktop/src/node_modules/
+desktop/test-results/
 
 # Desktop sidecar artifacts
 desktop/bin/

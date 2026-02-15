@@ -34,6 +34,15 @@ interface DesktopAPI {
   calendarGetUpcomingMeetings(payload?: { days?: number }): Promise<unknown>;
   calendarCreateOnlineMeeting(payload: { subject: string; startAt: string; endAt: string; participants?: unknown[] }): Promise<unknown>;
   calendarDisconnectMicrosoft(): Promise<unknown>;
+  authGetState(): Promise<{
+    microsoft: { connected: boolean; account: { username?: string; home_account_id?: string; tenant_id?: string } | null };
+    google: { connected: boolean; account: { email?: string } | null };
+  }>;
+  authSignOut(): Promise<{ ok: boolean; errors: string[] }>;
+  googleConnect(): Promise<{ connected: boolean; account: { email?: string } }>;
+  googleDisconnect(): Promise<{ connected: boolean }>;
+  googleGetStatus(): Promise<{ configured: boolean; connected: boolean; account: { email?: string } | null }>;
+  googleGetUpcomingMeetings(payload?: { days?: number }): Promise<unknown>;
   openPrivacySettings(payload?: { target?: string }): Promise<unknown>;
   openExternalUrl(payload: { url: string }): Promise<unknown>;
   clearPreferredCaptureSource(): Promise<unknown>;

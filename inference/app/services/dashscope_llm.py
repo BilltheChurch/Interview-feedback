@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 
 import httpx
 
 from app.exceptions import ValidationError
+
+logger = logging.getLogger(__name__)
+
+# Module-level shared client for connection pooling across requests.
+# This avoids creating a new TCP connection + TLS handshake per LLM call.
+_shared_client: httpx.Client | None = None
+
+
+def _get_shared_client(timeout: float) -> httpx.Client:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.Client(timeout=timeout)
+    return _shared_client
 
 
 @dataclass(slots=True)
@@ -35,8 +49,8 @@ class DashScopeLLM:
         }
 
         timeout_seconds = max(self.timeout_ms, 1000) / 1000
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(self.base_url, headers=self._headers(), json=payload)
+        client = _get_shared_client(timeout_seconds)
+        response = client.post(self.base_url, headers=self._headers(), json=payload)
 
         if response.status_code >= 400:
             raise ValidationError(

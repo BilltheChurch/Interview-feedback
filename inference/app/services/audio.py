@@ -84,7 +84,10 @@ def normalize_audio_payload(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=30,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise AudioDecodeError("ffmpeg processing timed out after 30s") from exc
     except FileNotFoundError as exc:
         raise AudioDecodeError("ffmpeg is not installed in runtime environment") from exc
 

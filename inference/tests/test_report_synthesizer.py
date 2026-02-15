@@ -283,3 +283,152 @@ def test_synthesize_fallback_on_llm_failure() -> None:
     assert result.quality is not None
     assert result.quality.report_source == "memo_first_fallback"
     assert len(result.per_person) >= 1
+
+
+# ── New tests for P0/P1 fixes ──────────────────────────────────────────────
+
+
+def test_multi_person_fallback_retains_all_speakers() -> None:
+    """Double-fallback (both LLM and ReportGenerator fail) must include ALL
+    speakers from req.stats, not just the first one."""
+
+    class AlwaysFailingLLM:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            raise RuntimeError("boom")
+
+    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+    req = _build_test_request()
+    # Ensure we have 2 speakers in stats
+    assert len(req.stats) == 2
+
+    result = synthesizer.synthesize(req)
+    speaker_keys = {p.person_key for p in result.per_person}
+    # Must include both speakers, not just the first
+    assert "Alice" in speaker_keys
+    assert "Interviewer" in speaker_keys
+    assert len(result.per_person) >= 2
+
+
+def test_no_evidence_ref_is_none_in_any_output() -> None:
+    """No claim in any code path should contain evidence_refs=['none']."""
+
+    class AlwaysFailingLLM:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            raise RuntimeError("boom")
+
+    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+    req = _build_test_request()
+    # Clear all evidence to trigger the edge case
+    req.evidence = []
+    result = synthesizer.synthesize(req)
+
+    for person in result.per_person:
+        for dim in person.dimensions:
+            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
+                assert "none" not in claim.evidence_refs, (
+                    f"Found 'none' in evidence_refs for claim {claim.claim_id}"
+                )
+
+
+def test_no_pending_assessment_dummy_text() -> None:
+    """No claim text should contain placeholder dummy text like
+    'Pending assessment.' or 'Assessment pending.'"""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    for person in result.per_person:
+        for dim in person.dimensions:
+            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
+                assert "Pending assessment" not in claim.text, (
+                    f"Dummy text found in claim {claim.claim_id}: {claim.text}"
+                )
+                assert "Assessment pending" not in claim.text, (
+                    f"Dummy text found in claim {claim.claim_id}: {claim.text}"
+                )
+
+
+def test_no_pending_assessment_in_fallback() -> None:
+    """Even in the double-fallback path, no 'Pending assessment.' or
+    'Assessment pending.' should appear."""
+
+    class AlwaysFailingLLM:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            raise RuntimeError("boom")
+
+    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    for person in result.per_person:
+        for dim in person.dimensions:
+            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
+                assert "Pending assessment" not in claim.text
+                assert "Assessment pending" not in claim.text
+
+
+def test_chinese_token_counting() -> None:
+    """CJK-aware token estimation: 100 Chinese chars should produce ~150
+    tokens, not 1 (which is what text.split() would yield for a single
+    unspaced Chinese string)."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    chinese_text = "这" * 100
+    estimate = synthesizer._estimate_tokens(chinese_text)
+    # 100 chars * 1.5 = 150
+    assert estimate == 150, f"Expected 150, got {estimate}"
+
+    # Verify English still works reasonably
+    english_text = "hello world " * 50  # 100 words
+    estimate_en = synthesizer._estimate_tokens(english_text)
+    assert estimate_en >= 100, f"English estimate too low: {estimate_en}"
+
+    # Empty text should return 0
+    assert synthesizer._estimate_tokens("") == 0
+
+
+def test_fallback_locale_aware_zh() -> None:
+    """When LLM fails and the request has no evidence (forcing double-fallback),
+    fallback text should be in Chinese when locale is zh-CN."""
+    from unittest.mock import patch
+
+    class AlwaysFailingLLM:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            raise RuntimeError("boom")
+
+    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+    req = _build_test_request()
+    req.locale = "zh-CN"
+    # Force double-fallback by making ReportGenerator also fail
+    with patch("app.services.report_generator.ReportGenerator.generate", side_effect=RuntimeError("double boom")):
+        result = synthesizer.synthesize(req)
+
+    for person in result.per_person:
+        for dim in person.dimensions:
+            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
+                assert "暂无法评估" in claim.text or "维度数据不足" in claim.text, (
+                    f"Expected Chinese fallback text, got: {claim.text}"
+                )
+
+
+def test_fallback_locale_aware_en() -> None:
+    """When LLM fails and the request has no evidence (forcing double-fallback),
+    fallback text should be in English when locale is en."""
+    from unittest.mock import patch
+
+    class AlwaysFailingLLM:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            raise RuntimeError("boom")
+
+    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+    req = _build_test_request()
+    req.locale = "en"
+    # Force double-fallback by making ReportGenerator also fail
+    with patch("app.services.report_generator.ReportGenerator.generate", side_effect=RuntimeError("double boom")):
+        result = synthesizer.synthesize(req)
+
+    for person in result.per_person:
+        for dim in person.dimensions:
+            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
+                assert "Insufficient data" in claim.text, (
+                    f"Expected English fallback text, got: {claim.text}"
+                )

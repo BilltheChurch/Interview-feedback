@@ -1,15 +1,15 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Mic,
-  Wifi,
   Calendar,
   FileText,
   Volume2,
-  Play,
-  Square,
   Check,
   AlertCircle,
   Settings,
+  LogOut,
+  Loader2,
+  UserCircle,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -17,11 +17,27 @@ import { TextField } from '../components/ui/TextField';
 import { Select } from '../components/ui/Select';
 import { StatusDot } from '../components/ui/StatusDot';
 import { Chip } from '../components/ui/Chip';
+import { useAudioCapture } from '../hooks/useAudioCapture';
 
-/* ─── AudioSetup ────────────────────────────── */
+/* --- AudioSetup ---------------------------------------- */
 
 function AudioSetup() {
-  const [testing, setTesting] = useState(false);
+  const { initMic, initSystem, startCapture, stopCapture, levels, isCapturing, micReady, systemReady, error } = useAudioCapture();
+
+  // Auto-init mic + start capturing when component mounts (like Zoom/Teams)
+  useEffect(() => {
+    let cancelled = false;
+    const setup = async () => {
+      await initMic();
+      if (!cancelled) startCapture();
+    };
+    setup();
+    return () => {
+      cancelled = true;
+      stopCapture();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <Card className="p-5">
@@ -31,68 +47,65 @@ function AudioSetup() {
       </div>
 
       <div className="space-y-4">
-        <Select
-          label="Microphone"
-          options={[
-            { value: 'default', label: 'Default — Built-in Microphone' },
-            { value: 'external', label: 'External USB Microphone' },
-          ]}
-          value="default"
-          onChange={() => {}}
-        />
+        {/* Device status indicators */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-1.5">
+            <Mic className="w-3.5 h-3.5 text-ink-tertiary" />
+            <span className="text-xs text-ink-secondary">Microphone</span>
+            {micReady
+              ? <Check className="w-3.5 h-3.5 text-success" />
+              : <StatusDot status="reconnecting" />
+            }
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Volume2 className="w-3.5 h-3.5 text-ink-tertiary" />
+            <span className="text-xs text-ink-secondary">System Audio</span>
+            {systemReady
+              ? <Check className="w-3.5 h-3.5 text-success" />
+              : <span className="text-xs text-ink-tertiary">Session only</span>
+            }
+          </div>
+        </div>
 
-        <Select
-          label="System audio capture"
-          options={[
-            { value: 'screen', label: 'Screen Audio (ScreenCaptureKit)' },
-          ]}
-          value="screen"
-          onChange={() => {}}
-        />
+        {error && (
+          <div className="flex items-center gap-2 text-error text-xs">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
 
-        {/* Self-check */}
+        {/* Live audio levels -- always visible when capturing */}
         <div className="border border-border rounded-[--radius-card] p-4 bg-surface-hover">
-          <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
-            Audio Self-Check
-          </h3>
-          <div className="flex items-center gap-3 mb-3">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider">
+              Audio Monitor
+            </h3>
             <div className="flex items-center gap-1.5">
-              <StatusDot status={testing ? 'recording' : 'idle'} />
-              <span className="text-xs text-ink-secondary">
-                {testing ? 'Listening...' : 'Ready'}
+              <StatusDot status={isCapturing ? 'recording' : 'idle'} />
+              <span className="text-xs text-ink-tertiary">
+                {isCapturing ? 'Live' : 'Starting...'}
               </span>
             </div>
           </div>
-          <div className="flex items-center gap-4 mb-3">
-            {/* Visual level bar placeholder */}
-            <div className="flex-1">
-              <div className="h-3 rounded-full bg-border overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-accent transition-all duration-150"
-                  style={{ width: testing ? '45%' : '0%' }}
-                />
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-tertiary w-10">Mic</span>
+              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden">
+                <div className="h-full rounded-full bg-accent transition-all duration-100" style={{ width: `${levels.mic}%` }} />
               </div>
             </div>
-            <Volume2 className="w-4 h-4 text-ink-tertiary" />
-          </div>
-          <div className="flex gap-2">
-            <Button
-              variant={testing ? 'danger' : 'primary'}
-              size="sm"
-              onClick={() => setTesting(!testing)}
-            >
-              {testing ? (
-                <>
-                  <Square className="w-3.5 h-3.5" />
-                  Stop Test
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5" />
-                  Test Audio
-                </>
-              )}
-            </Button>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-tertiary w-10">System</span>
+              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden">
+                <div className="h-full rounded-full bg-blue-500 transition-all duration-100" style={{ width: `${levels.system}%` }} />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-ink-tertiary w-10">Mixed</span>
+              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden">
+                <div className="h-full rounded-full bg-purple-500 transition-all duration-100" style={{ width: `${levels.mixed}%` }} />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -100,71 +113,172 @@ function AudioSetup() {
   );
 }
 
-/* ─── GraphConfig ───────────────────────────── */
+/* --- AccountSection ------------------------------------ */
 
-function GraphConfig() {
-  const [clientId, setClientId] = useState('');
-  const [connected, setConnected] = useState(false);
+type AccountInfo = {
+  microsoft: { connected: boolean; account: { username?: string; home_account_id?: string; tenant_id?: string } | null };
+  google: { connected: boolean; account: { email?: string } | null };
+};
+
+function AccountSection() {
+  const [state, setState] = useState<AccountInfo | null>(null);
+  const [loading, setLoading] = useState<'microsoft' | 'google' | null>(null);
+
+  const refreshState = async () => {
+    try {
+      const result = await window.desktopAPI.authGetState();
+      setState(result);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    refreshState();
+  }, []);
+
+  const handleMicrosoftConnect = async () => {
+    setLoading('microsoft');
+    try {
+      await window.desktopAPI.calendarConnectMicrosoft();
+      await refreshState();
+    } catch {
+      // ignore
+    }
+    setLoading(null);
+  };
+
+  const handleMicrosoftDisconnect = async () => {
+    setLoading('microsoft');
+    try {
+      await window.desktopAPI.calendarDisconnectMicrosoft();
+      await refreshState();
+    } catch {
+      // ignore
+    }
+    setLoading(null);
+  };
+
+  const handleGoogleConnect = async () => {
+    setLoading('google');
+    try {
+      await window.desktopAPI.googleConnect();
+      await refreshState();
+    } catch {
+      // ignore
+    }
+    setLoading(null);
+  };
+
+  const handleGoogleDisconnect = async () => {
+    setLoading('google');
+    try {
+      await window.desktopAPI.googleDisconnect();
+      await refreshState();
+    } catch {
+      // ignore
+    }
+    setLoading(null);
+  };
+
+  const ms = state?.microsoft;
+  const g = state?.google;
 
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-4">
-        <Calendar className="w-5 h-5 text-accent" />
-        <h2 className="text-base font-semibold text-ink">Microsoft Graph</h2>
-        {connected && <Chip variant="success">Connected</Chip>}
+        <UserCircle className="w-5 h-5 text-accent" />
+        <h2 className="text-base font-semibold text-ink">Account</h2>
       </div>
 
-      <div className="space-y-4">
-        <TextField
-          label="Azure App (Client) ID"
-          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-          value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
-        />
-
-        <TextField
-          label="Tenant ID"
-          placeholder="common (or your tenant ID)"
-          value="common"
-          onChange={() => {}}
-        />
-
-        {connected ? (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm text-success">
-              <Check className="w-4 h-4" />
-              Calendar connected
+      <div className="space-y-3">
+        {/* Microsoft account row */}
+        <div className="flex items-center justify-between py-2 border-b border-border">
+          <div className="flex items-center gap-3">
+            <svg className="w-5 h-5 shrink-0" viewBox="0 0 21 21" fill="none">
+              <rect x="1" y="1" width="9" height="9" fill="#F25022" />
+              <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+              <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
+              <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+            </svg>
+            <div>
+              <p className="text-sm text-ink font-medium">Microsoft</p>
+              {ms?.connected && ms.account?.username ? (
+                <p className="text-xs text-ink-tertiary">{ms.account.username}</p>
+              ) : (
+                <p className="text-xs text-ink-tertiary">Not connected</p>
+              )}
             </div>
+          </div>
+          {ms?.connected ? (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setConnected(false)}
+              onClick={handleMicrosoftDisconnect}
+              disabled={loading === 'microsoft'}
             >
+              {loading === 'microsoft' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
               Disconnect
             </Button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            <p className="text-xs text-ink-tertiary">
-              Sign in with your Microsoft account to sync calendar meetings and create Teams meetings directly from the app.
-            </p>
+          ) : (
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => setConnected(true)}
-              disabled={!clientId.trim()}
+              onClick={handleMicrosoftConnect}
+              disabled={loading === 'microsoft'}
             >
-              <Wifi className="w-3.5 h-3.5" />
-              Connect Microsoft Account
+              {loading === 'microsoft' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              Connect
             </Button>
+          )}
+        </div>
+
+        {/* Google account row */}
+        <div className="flex items-center justify-between py-2">
+          <div className="flex items-center gap-3">
+            <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+            </svg>
+            <div>
+              <p className="text-sm text-ink font-medium">Google</p>
+              {g?.connected && g.account?.email ? (
+                <p className="text-xs text-ink-tertiary">{g.account.email}</p>
+              ) : (
+                <p className="text-xs text-ink-tertiary">Not connected</p>
+              )}
+            </div>
           </div>
-        )}
+          {g?.connected ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleGoogleDisconnect}
+              disabled={loading === 'google'}
+            >
+              {loading === 'google' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
+              Disconnect
+            </Button>
+          ) : (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleGoogleConnect}
+              disabled={loading === 'google'}
+            >
+              {loading === 'google' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              Connect
+            </Button>
+          )}
+        </div>
       </div>
     </Card>
   );
 }
 
-/* ─── TemplateManager ───────────────────────── */
+/* --- TemplateManager ----------------------------------- */
 
 function TemplateManager() {
   const templates = [
@@ -207,7 +321,7 @@ function TemplateManager() {
   );
 }
 
-/* ─── Preferences ───────────────────────────── */
+/* --- Preferences --------------------------------------- */
 
 function Preferences() {
   const [density, setDensity] = useState('comfort');
@@ -261,7 +375,7 @@ function Preferences() {
   );
 }
 
-/* ─── SettingsView (main export) ─────────────── */
+/* --- SettingsView (main export) ------------------------ */
 
 export function SettingsView() {
   return (
@@ -274,8 +388,8 @@ export function SettingsView() {
         </div>
 
         <div className="space-y-4">
+          <AccountSection />
           <AudioSetup />
-          <GraphConfig />
           <TemplateManager />
           <Preferences />
         </div>

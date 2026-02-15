@@ -276,16 +276,13 @@ class EvidenceRef(BaseModel):
 class DimensionClaim(BaseModel):
     claim_id: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=3000)
-    evidence_refs: list[str] = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0, le=1)
 
     @field_validator("evidence_refs")
     @classmethod
     def validate_evidence_refs(cls, value: list[str]):
-        refs = [item.strip() for item in value if isinstance(item, str) and item.strip()]
-        if not refs:
-            raise ValueError("each claim must include at least one evidence ref")
-        return refs
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 class DimensionFeedback(BaseModel):

@@ -13,6 +13,7 @@ const { createDiarizationSidecar } = require('./lib/diarizationSidecar');
 const { createPyannoteWindowBuilder } = require('./lib/pyannoteWindowBuilder');
 const { TeamsWindowTracker } = require('./lib/teamsWindowTracker');
 const { GraphCalendarClient } = require('./lib/graphCalendar');
+const { GoogleCalendarClient } = require('./lib/googleCalendar');
 
 const APP_TITLE = 'Interview Feedback Desktop (Phase 2.3)';
 const CUSTOM_PROTOCOL = 'interviewfeedback';
@@ -42,6 +43,7 @@ const sidecar = createDiarizationSidecar({
 });
 const windowBuilders = new Map();
 let graphCalendar = null;
+let googleCalendar = null;
 const teamsWindowTracker = new TeamsWindowTracker({
   getOverlayWindow: () => mainWindow,
   screen,
@@ -253,7 +255,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      autoplayPolicy: 'no-user-gesture-required'
     }
   });
 
@@ -787,6 +790,68 @@ function registerIpcHandlers() {
     return graphCalendar.disconnect();
   });
 
+  ipcMain.handle('auth:getState', async () => {
+    const result = { microsoft: { connected: false, account: null }, google: { connected: false, account: null } };
+    if (graphCalendar) {
+      try {
+        const msStatus = await graphCalendar.getStatus();
+        result.microsoft = { connected: msStatus.connected, account: msStatus.account };
+      } catch (error) {
+        logDesktop('[auth:getState] microsoft check failed', { error: error?.message || String(error) });
+      }
+    }
+    if (googleCalendar) {
+      try {
+        const gStatus = await googleCalendar.getStatus();
+        result.google = { connected: gStatus.connected, account: gStatus.account };
+      } catch (error) {
+        logDesktop('[auth:getState] google check failed', { error: error?.message || String(error) });
+      }
+    }
+    return result;
+  });
+
+  ipcMain.handle('auth:signOut', async () => {
+    const errors = [];
+    if (graphCalendar) {
+      try { await graphCalendar.disconnect(); } catch (e) { errors.push(e?.message || String(e)); }
+    }
+    if (googleCalendar) {
+      try { await googleCalendar.disconnect(); } catch (e) { errors.push(e?.message || String(e)); }
+    }
+    return { ok: errors.length === 0, errors };
+  });
+
+  ipcMain.handle('google:connect', async () => {
+    if (!googleCalendar) {
+      throw new Error('google calendar is not initialized');
+    }
+    return googleCalendar.connect();
+  });
+
+  ipcMain.handle('google:disconnect', async () => {
+    if (!googleCalendar) {
+      throw new Error('google calendar is not initialized');
+    }
+    return googleCalendar.disconnect();
+  });
+
+  ipcMain.handle('google:getStatus', async () => {
+    if (!googleCalendar) {
+      throw new Error('google calendar is not initialized');
+    }
+    return googleCalendar.getStatus();
+  });
+
+  ipcMain.handle('google:getUpcomingMeetings', async (_event, payload) => {
+    if (!googleCalendar) {
+      throw new Error('google calendar is not initialized');
+    }
+    return googleCalendar.getUpcomingMeetings({
+      days: Number(payload?.days || 3)
+    });
+  });
+
   ipcMain.handle('system:openPrivacySettings', async (_event, payload) => {
     const target = String(payload?.target || 'accessibility').trim().toLowerCase();
     const urls = {
@@ -826,6 +891,15 @@ app.whenReady().then(() => {
     cachePath: path.join(app.getPath('userData'), 'graph', 'token-cache.json'),
     clientId: process.env.MS_GRAPH_CLIENT_ID || '',
     tenantId: process.env.MS_GRAPH_TENANT_ID || 'common',
+    openBrowser: async (url) => { await shell.openExternal(url); },
+    log: (message, details) => logDesktop(message, details)
+  });
+
+  googleCalendar = new GoogleCalendarClient({
+    cachePath: path.join(app.getPath('userData'), 'google', 'token-cache.json'),
+    clientId: process.env.GOOGLE_CALENDAR_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET || '',
+    openBrowser: async (url) => { await shell.openExternal(url); },
     log: (message, details) => logDesktop(message, details)
   });
 
@@ -852,19 +926,13 @@ app.whenReady().then(() => {
         });
 
         if (!sources || sources.length === 0) {
-          callback({
-            video: null,
-            audio: null
-          });
+          logDesktop('setDisplayMediaRequestHandler: no sources available (check Screen Recording permission in System Settings)');
           return;
         }
 
         const chosen = pickDisplaySource(sources);
         if (!chosen) {
-          callback({
-            video: null,
-            audio: null
-          });
+          logDesktop('setDisplayMediaRequestHandler: no source selected');
           return;
         }
 
@@ -876,10 +944,7 @@ app.whenReady().then(() => {
         });
       } catch (error) {
         logDesktop('setDisplayMediaRequestHandler failed', { error: error?.message || String(error) });
-        callback({
-          video: null,
-          audio: null
-        });
+        // Don't call callback — let the getDisplayMedia promise reject naturally
       }
     },
     {

@@ -55,7 +55,7 @@ class ReportSynthesizer:
 
             # 4. Parse and validate LLM output
             valid_evidence_ids = {e.evidence_id for e in req.evidence}
-            overall, per_person = self._parse_llm_output(parsed, valid_evidence_ids)
+            overall, per_person = self._parse_llm_output(parsed, valid_evidence_ids, locale=req.locale)
 
             # 5. Build quality meta
             elapsed_ms = int((time.time() - started_at) * 1000)
@@ -77,7 +77,7 @@ class ReportSynthesizer:
                 name_bindings_count=len(req.memo_speaker_bindings),
                 stages_count=len(req.stages),
                 transcript_tokens_approx=sum(
-                    len(u.text.split()) for u in truncated_transcript
+                    self._estimate_tokens(u.text) for u in truncated_transcript
                 ),
                 transcript_truncated=was_truncated,
             )
@@ -244,11 +244,29 @@ class ReportSynthesizer:
 
         return json.dumps(prompt_data, ensure_ascii=False)
 
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """CJK-aware token estimation.
+
+        Chinese text averages ~1.5 tokens per character (most tokenizers split
+        hanzi into 1-2 tokens). English text averages ~1.3 tokens per
+        whitespace-delimited word.
+        """
+        if not text:
+            return 0
+        cjk_chars = sum(
+            1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf'
+        )
+        if cjk_chars > len(text) * 0.3:
+            return int(len(text) * 1.5)  # Chinese: ~1.5 tokens per char
+        else:
+            return int(len(text.split()) * 1.3)  # English: ~1.3 tokens per word
+
     def _truncate_transcript(
         self, transcript: list[TranscriptUtterance], max_tokens: int = 6000
     ) -> tuple[list[TranscriptUtterance], bool]:
-        """Truncate if total word count exceeds max_tokens."""
-        total_tokens = sum(len(u.text.split()) for u in transcript)
+        """Truncate if total token count exceeds max_tokens."""
+        total_tokens = sum(self._estimate_tokens(u.text) for u in transcript)
         if total_tokens <= max_tokens:
             return list(transcript), False
 
@@ -264,13 +282,13 @@ class ReportSynthesizer:
 
         # Add the last N utterances to fill remaining budget
         result = [u for u in sorted_utt if u.utterance_id in must_keep_ids]
-        current_tokens = sum(len(u.text.split()) for u in result)
+        current_tokens = sum(self._estimate_tokens(u.text) for u in result)
 
         # Fill from the end (most recent = most relevant)
         for u in reversed(sorted_utt):
             if u.utterance_id in must_keep_ids:
                 continue
-            word_count = len(u.text.split())
+            word_count = self._estimate_tokens(u.text)
             if current_tokens + word_count > max_tokens:
                 continue
             result.append(u)
@@ -279,8 +297,14 @@ class ReportSynthesizer:
         result.sort(key=lambda u: u.start_ms)
         return result, True
 
+    @staticmethod
+    def _insufficient_data_text(dim_name: str, locale: str) -> str:
+        if locale.startswith("zh"):
+            return f"{dim_name} 维度数据不足，暂无法评估。"
+        return f"Insufficient data for {dim_name} assessment — awaiting more evidence."
+
     def _parse_llm_output(
-        self, parsed: dict, valid_evidence_ids: set[str]
+        self, parsed: dict, valid_evidence_ids: set[str], locale: str = "zh-CN"
     ) -> tuple[OverallFeedback, list[PersonFeedbackItem]]:
         """Parse and validate LLM JSON output into Pydantic models."""
         # Parse overall
@@ -362,17 +386,18 @@ class ReportSynthesizer:
                 risks_list = parse_claims(dim_raw.get("risks", []))
                 actions = parse_claims(dim_raw.get("actions", []))
 
+                insufficient_text = self._insufficient_data_text(dim_name, locale)
                 dimensions.append(
                     DimensionFeedback(
                         dimension=dim_name,
                         strengths=strengths if strengths else [
-                            DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_s1", text="Pending assessment.", evidence_refs=list(valid_evidence_ids)[:1], confidence=0.3)
+                            DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_s1", text=insufficient_text, evidence_refs=list(valid_evidence_ids)[:1], confidence=0.3)
                         ],
                         risks=risks_list if risks_list else [
-                            DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_r1", text="Pending assessment.", evidence_refs=list(valid_evidence_ids)[:1], confidence=0.3)
+                            DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_r1", text=insufficient_text, evidence_refs=list(valid_evidence_ids)[:1], confidence=0.3)
                         ],
                         actions=actions if actions else [
-                            DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_a1", text="Pending assessment.", evidence_refs=list(valid_evidence_ids)[:1], confidence=0.3)
+                            DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_a1", text=insufficient_text, evidence_refs=list(valid_evidence_ids)[:1], confidence=0.3)
                         ],
                     )
                 )
@@ -382,12 +407,13 @@ class ReportSynthesizer:
             for dim_name in DIMENSIONS:
                 if dim_name not in present_dims:
                     fallback_ref = list(valid_evidence_ids)[:1]
+                    insufficient_text = self._insufficient_data_text(dim_name, locale)
                     dimensions.append(
                         DimensionFeedback(
                             dimension=dim_name,
-                            strengths=[DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_s1", text="Pending assessment.", evidence_refs=fallback_ref, confidence=0.3)],
-                            risks=[DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_r1", text="Pending assessment.", evidence_refs=fallback_ref, confidence=0.3)],
-                            actions=[DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_a1", text="Pending assessment.", evidence_refs=fallback_ref, confidence=0.3)],
+                            strengths=[DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_s1", text=insufficient_text, evidence_refs=fallback_ref, confidence=0.3)],
+                            risks=[DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_r1", text=insufficient_text, evidence_refs=fallback_ref, confidence=0.3)],
+                            actions=[DimensionClaim(claim_id=f"c_{person_key}_{dim_name}_a1", text=insufficient_text, evidence_refs=fallback_ref, confidence=0.3)],
                         )
                     )
 
@@ -444,7 +470,11 @@ class ReportSynthesizer:
             result = fallback_gen.generate(fallback_req)
         except Exception:
             # Even fallback failed — build minimal valid response
-            valid_refs = [e.evidence_id for e in req.evidence][:1] or ["none"]
+            valid_refs = [e.evidence_id for e in req.evidence][:1]
+
+            def _fb_text(dim: str) -> str:
+                return self._insufficient_data_text(dim, req.locale)
+
             result = AnalysisReportResponse(
                 session_id=req.session_id,
                 overall=OverallFeedback(),
@@ -455,14 +485,14 @@ class ReportSynthesizer:
                         dimensions=[
                             DimensionFeedback(
                                 dimension=dim,
-                                strengths=[DimensionClaim(claim_id=f"c_fb_{dim}_s", text="Assessment pending.", evidence_refs=valid_refs, confidence=0.2)],
-                                risks=[DimensionClaim(claim_id=f"c_fb_{dim}_r", text="Assessment pending.", evidence_refs=valid_refs, confidence=0.2)],
-                                actions=[DimensionClaim(claim_id=f"c_fb_{dim}_a", text="Assessment pending.", evidence_refs=valid_refs, confidence=0.2)],
+                                strengths=[DimensionClaim(claim_id=f"c_fb_{dim}_s", text=_fb_text(dim), evidence_refs=valid_refs, confidence=0.2)],
+                                risks=[DimensionClaim(claim_id=f"c_fb_{dim}_r", text=_fb_text(dim), evidence_refs=valid_refs, confidence=0.2)],
+                                actions=[DimensionClaim(claim_id=f"c_fb_{dim}_a", text=_fb_text(dim), evidence_refs=valid_refs, confidence=0.2)],
                             )
                             for dim in DIMENSIONS
                         ],
                     )
-                    for s in (req.stats[:1] or [])
+                    for s in (req.stats or [])
                 ] or [
                     PersonFeedbackItem(
                         person_key="unknown",
@@ -470,9 +500,9 @@ class ReportSynthesizer:
                         dimensions=[
                             DimensionFeedback(
                                 dimension=dim,
-                                strengths=[DimensionClaim(claim_id=f"c_fb_{dim}_s", text="Assessment pending.", evidence_refs=valid_refs, confidence=0.2)],
-                                risks=[DimensionClaim(claim_id=f"c_fb_{dim}_r", text="Assessment pending.", evidence_refs=valid_refs, confidence=0.2)],
-                                actions=[DimensionClaim(claim_id=f"c_fb_{dim}_a", text="Assessment pending.", evidence_refs=valid_refs, confidence=0.2)],
+                                strengths=[DimensionClaim(claim_id=f"c_fb_{dim}_s", text=_fb_text(dim), evidence_refs=valid_refs, confidence=0.2)],
+                                risks=[DimensionClaim(claim_id=f"c_fb_{dim}_r", text=_fb_text(dim), evidence_refs=valid_refs, confidence=0.2)],
+                                actions=[DimensionClaim(claim_id=f"c_fb_{dim}_a", text=_fb_text(dim), evidence_refs=valid_refs, confidence=0.2)],
                             )
                             for dim in DIMENSIONS
                         ],

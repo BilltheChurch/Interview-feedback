@@ -6,6 +6,7 @@ export { useDeepLink } from './useDeepLink';
 export { useWebSocket } from './useWebSocket';
 export { useAudioCapture } from './useAudioCapture';
 export { useSession } from './useSession';
+export { useSessionOrchestrator } from './useSessionOrchestrator';
 
 export type { WebSocketStatus, StreamRole, UseWebSocketOptions, UseWebSocketReturn } from './useWebSocket';
 export type { AudioLevels, UseAudioCaptureReturn } from './useAudioCapture';

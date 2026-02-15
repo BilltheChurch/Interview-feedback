@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 
 from fastapi import FastAPI, HTTPException, Request
@@ -58,7 +59,7 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 async def request_guard(request: Request, call_next):
     if settings.inference_api_key:
         incoming_key = request.headers.get("x-api-key", "")
-        if incoming_key != settings.inference_api_key:
+        if not hmac.compare_digest(incoming_key.encode(), settings.inference_api_key.encode()):
             raise UnauthorizedError("invalid x-api-key")
 
     if request.method in {"POST", "PUT", "PATCH"}:
@@ -226,5 +227,5 @@ async def handle_http_exception(_: Request, exc: HTTPException) -> JSONResponse:
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
-    logger.exception("unexpected error")
-    return JSONResponse(status_code=500, content=ErrorResponse(detail=f"internal server error: {exc}").model_dump())
+    logger.exception("Unhandled error")
+    return JSONResponse(status_code=500, content=ErrorResponse(detail="internal server error").model_dump())

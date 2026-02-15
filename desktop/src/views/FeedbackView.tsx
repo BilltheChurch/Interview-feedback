@@ -602,7 +602,7 @@ function StageMemosSection({
       <div className="flex items-center gap-2 mb-4">
         <BookOpen className="w-4 h-4 text-accent" />
         <h2 className="text-sm font-semibold text-ink">Session Notes</h2>
-        <Chip className="text-[10px]">{memos.length} memo{memos.length !== 1 ? 's' : ''}</Chip>
+        <Chip className="text-xs">{memos.length} memo{memos.length !== 1 ? 's' : ''}</Chip>
       </div>
 
       {/* Free-form Notes (collapsible) */}
@@ -650,7 +650,7 @@ function StageMemosSection({
             >
               {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
               <span>{stage}</span>
-              <Chip className="text-[10px] ml-1">{stageMemos.length}</Chip>
+              <Chip className="text-xs ml-1">{stageMemos.length}</Chip>
             </button>
             <AnimatePresence>
               {isOpen && (
@@ -671,7 +671,7 @@ function StageMemosSection({
                       >
                         <div className="flex items-start gap-2">
                           <div className="flex items-center gap-1.5 shrink-0">
-                            <Chip variant={config.chipVariant} className="text-[10px]">
+                            <Chip variant={config.chipVariant} className="text-xs">
                               <MemoIcon className="w-3 h-3 mr-0.5 inline-block" />
                               {config.label}
                             </Chip>
@@ -1050,7 +1050,7 @@ function ClaimCard({
           const ev = getEvidenceById(report, refId);
           return ev?.weak;
         }) && (
-          <Chip variant="warning" className="text-[10px]">weak</Chip>
+          <Chip variant="warning" className="text-xs">weak</Chip>
         )}
       </div>
     </div>
@@ -1134,19 +1134,24 @@ function PersonFeedbackCard({
         <Chip>{person.speaker_id}</Chip>
       </div>
       {/* Compact summary chips */}
-      <div className="flex flex-wrap gap-1.5 mb-4">
-        <Chip variant="success" className="text-[10px]">
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        <Chip variant="success" className="text-xs">
           {person.dimensions.reduce((n, d) => n + d.claims.filter((c) => c.category === 'strength').length, 0)} strengths
         </Chip>
-        <Chip variant="warning" className="text-[10px]">
+        <Chip variant="warning" className="text-xs">
           {person.dimensions.reduce((n, d) => n + d.claims.filter((c) => c.category === 'risk').length, 0)} risks
         </Chip>
-        <Chip variant="info" className="text-[10px]">
+        <Chip variant="info" className="text-xs">
           {person.dimensions.reduce((n, d) => n + d.claims.filter((c) => c.category === 'action').length, 0)} actions
         </Chip>
       </div>
+      {/* Competency radar chart */}
+      {person.dimensions.length >= 3 && (
+        <CompetencyRadar dimensions={person.dimensions} />
+      )}
+      {/* Collapsible dimensions */}
       {person.dimensions.map((dim) => (
-        <DimensionSection
+        <DimensionSummaryRow
           key={dim.dimension}
           dim={dim}
           report={report}
@@ -1264,7 +1269,7 @@ function EvidenceTimeline({
                     {refClaims.map(({ person, claim }) => (
                       <span
                         key={claim.id}
-                        className="text-[10px] text-ink-tertiary bg-surface-hover rounded px-1.5 py-0.5"
+                        className="text-xs text-ink-tertiary bg-surface-hover rounded px-1.5 py-0.5"
                       >
                         {person}: {claim.text.slice(0, 30)}...
                       </span>
@@ -1273,7 +1278,7 @@ function EvidenceTimeline({
                 )}
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
-                {ev.weak && <Chip variant="warning" className="text-[10px]">weak</Chip>}
+                {ev.weak && <Chip variant="warning" className="text-xs">weak</Chip>}
                 <ConfidenceBadge score={ev.confidence} />
               </div>
             </button>
@@ -1580,6 +1585,257 @@ function EditClaimModal({
   );
 }
 
+/* ─── CompetencyRadar (SVG) ──────────────────────────── */
+
+function CompetencyRadar({
+  dimensions,
+}: {
+  dimensions: DimensionFeedback[];
+}) {
+  const cx = 90;
+  const cy = 90;
+  const r = 70;
+  const n = dimensions.length;
+  if (n < 3) return null;
+
+  const angleStep = (2 * Math.PI) / n;
+
+  // Score each dimension: ratio of strengths to total claims (0-1)
+  const scores = dimensions.map((dim) => {
+    const total = dim.claims.length;
+    if (total === 0) return 0.5;
+    const strengths = dim.claims.filter((c) => c.category === 'strength').length;
+    return strengths / total;
+  });
+
+  // Generate polygon points for the radar
+  const polygonPoints = scores
+    .map((score, i) => {
+      const angle = -Math.PI / 2 + i * angleStep;
+      const x = cx + r * score * Math.cos(angle);
+      const y = cy + r * score * Math.sin(angle);
+      return `${x},${y}`;
+    })
+    .join(' ');
+
+  // Grid rings at 25%, 50%, 75%, 100%
+  const rings = [0.25, 0.5, 0.75, 1.0];
+
+  return (
+    <div className="flex items-center justify-center py-3">
+      <svg width="180" height="180" viewBox="0 0 180 180" className="overflow-visible">
+        {/* Grid rings */}
+        {rings.map((ring) => (
+          <polygon
+            key={ring}
+            points={Array.from({ length: n })
+              .map((_, i) => {
+                const angle = -Math.PI / 2 + i * angleStep;
+                const x = cx + r * ring * Math.cos(angle);
+                const y = cy + r * ring * Math.sin(angle);
+                return `${x},${y}`;
+              })
+              .join(' ')}
+            fill="none"
+            stroke="var(--color-border)"
+            strokeWidth="0.5"
+            opacity={0.6}
+          />
+        ))}
+
+        {/* Axis lines */}
+        {dimensions.map((_, i) => {
+          const angle = -Math.PI / 2 + i * angleStep;
+          const x = cx + r * Math.cos(angle);
+          const y = cy + r * Math.sin(angle);
+          return (
+            <line
+              key={i}
+              x1={cx}
+              y1={cy}
+              x2={x}
+              y2={y}
+              stroke="var(--color-border)"
+              strokeWidth="0.5"
+              opacity={0.6}
+            />
+          );
+        })}
+
+        {/* Data polygon */}
+        <polygon
+          points={polygonPoints}
+          fill="var(--color-accent)"
+          fillOpacity={0.15}
+          stroke="var(--color-accent)"
+          strokeWidth="1.5"
+        />
+
+        {/* Data points */}
+        {scores.map((score, i) => {
+          const angle = -Math.PI / 2 + i * angleStep;
+          const x = cx + r * score * Math.cos(angle);
+          const y = cy + r * score * Math.sin(angle);
+          return (
+            <circle key={i} cx={x} cy={y} r="3" fill="var(--color-accent)" />
+          );
+        })}
+
+        {/* Labels */}
+        {dimensions.map((dim, i) => {
+          const angle = -Math.PI / 2 + i * angleStep;
+          const labelR = r + 14;
+          const x = cx + labelR * Math.cos(angle);
+          const y = cy + labelR * Math.sin(angle);
+          const label = dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1);
+          return (
+            <text
+              key={i}
+              x={x}
+              y={y}
+              textAnchor="middle"
+              dominantBaseline="central"
+              fill="var(--color-ink-secondary)"
+              fontSize="9"
+              fontWeight="500"
+            >
+              {label.length > 10 ? label.slice(0, 8) + '...' : label}
+            </text>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/* ─── DraftBanner ────────────────────────────────────── */
+
+function DraftBanner() {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-[--radius-card] mb-4"
+    >
+      <div className="w-2 h-2 rounded-full bg-warning animate-pulse shrink-0" />
+      <span className="text-sm text-warning font-medium">
+        This report is being finalized. Content may change.
+      </span>
+    </motion.div>
+  );
+}
+
+/* ─── SectionNav (sticky left sidebar) ───────────────── */
+
+function SectionNav({
+  report,
+  activeSection,
+  onSectionClick,
+}: {
+  report: FeedbackReport;
+  activeSection: string;
+  onSectionClick: (id: string) => void;
+}) {
+  const sections = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'notes', label: 'Session Notes' },
+    ...report.persons.map((p) => ({ id: `person-${p.speaker_id}`, label: p.person_name })),
+    { id: 'evidence', label: 'Evidence' },
+  ];
+
+  return (
+    <nav className="w-44 shrink-0 sticky top-6 self-start hidden lg:block">
+      <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2 px-2">
+        Sections
+      </h3>
+      <ul className="space-y-0.5">
+        {sections.map((section) => (
+          <li key={section.id}>
+            <button
+              onClick={() => onSectionClick(section.id)}
+              className={`
+                w-full text-left px-2 py-1.5 rounded-[--radius-button] text-sm transition-colors cursor-pointer
+                ${activeSection === section.id
+                  ? 'bg-accent-soft text-accent font-medium'
+                  : 'text-ink-secondary hover:bg-surface-hover hover:text-ink'
+                }
+              `}
+            >
+              {section.label}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+/* ─── DimensionSummaryRow (collapsed dimension) ──────── */
+
+function DimensionSummaryRow({
+  dim,
+  report,
+  onClaimEdit,
+  onEvidenceClick,
+  onNeedsEvidence,
+}: {
+  dim: DimensionFeedback;
+  report: FeedbackReport;
+  onClaimEdit: (claim: Claim) => void;
+  onEvidenceClick: (ev: EvidenceRef) => void;
+  onNeedsEvidence: (claim: Claim) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const Icon = DIMENSION_ICONS[dim.dimension] ?? Layers;
+  const label = dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1);
+
+  const strengthCount = dim.claims.filter((c) => c.category === 'strength').length;
+  const riskCount = dim.claims.filter((c) => c.category === 'risk').length;
+  const actionCount = dim.claims.filter((c) => c.category === 'action').length;
+
+  return (
+    <div className="mb-2 last:mb-0">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-2 w-full py-2 px-1 rounded-lg hover:bg-surface-hover transition-colors cursor-pointer"
+      >
+        {expanded ? <ChevronDown className="w-3.5 h-3.5 text-ink-tertiary" /> : <ChevronRight className="w-3.5 h-3.5 text-ink-tertiary" />}
+        <Icon className="w-4 h-4 text-accent" />
+        <span className="text-sm font-semibold text-ink flex-1 text-left">{label}</span>
+        <span className="text-xs text-ink-tertiary">
+          {strengthCount > 0 && <span className="text-success">{strengthCount}S</span>}
+          {riskCount > 0 && <span className="ml-1.5 text-warning">{riskCount}R</span>}
+          {actionCount > 0 && <span className="ml-1.5 text-blue-600">{actionCount}A</span>}
+        </span>
+      </button>
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-2 pl-6 pb-2">
+              {dim.claims.map((claim) => (
+                <ClaimCard
+                  key={claim.id}
+                  claim={claim}
+                  report={report}
+                  onEditClick={() => onClaimEdit(claim)}
+                  onEvidenceClick={onEvidenceClick}
+                  onNeedsEvidenceClick={() => onNeedsEvidence(claim)}
+                />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 /* ─── Dynamic Mock Generators ────────────────────────── */
 
 function generateMockPersonFeedback(name: string, speakerIndex: number): PersonFeedback {
@@ -1733,50 +1989,66 @@ export function FeedbackView() {
     setEvidenceModalMode('browse');
   };
 
+  // Section navigation
+  const [activeSection, setActiveSection] = useState('overview');
+
+  const handleSectionClick = useCallback((id: string) => {
+    setActiveSection(id);
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
   return (
     <div className="h-full overflow-y-auto">
-      <motion.div
-        initial="hidden"
-        animate="visible"
-        className="max-w-4xl mx-auto p-6"
-      >
-        <motion.div variants={fadeInUp} custom={0}>
-          <FeedbackHeader report={report} onRegenerate={handleRegenerate} onBack={() => navigate('/')} />
+      <div className="max-w-5xl mx-auto p-6">
+        <motion.div initial="hidden" animate="visible">
+          <motion.div variants={fadeInUp} custom={0}>
+            <FeedbackHeader report={report} onRegenerate={handleRegenerate} onBack={() => navigate('/')} />
+          </motion.div>
+
+          {/* Draft banner */}
+          {report.status === 'draft' && <DraftBanner />}
+
+          <div className="flex gap-6">
+            {/* Sticky left navigation */}
+            <SectionNav report={report} activeSection={activeSection} onSectionClick={handleSectionClick} />
+
+            {/* Content area */}
+            <div className="flex-1 min-w-0 space-y-4">
+              <motion.div variants={fadeInUp} custom={1} id="overview">
+                <OverallCard report={report} onEvidenceClick={handleEvidenceClick} />
+              </motion.div>
+
+              {/* Stage Memos */}
+              {(sessionMemos.length > 0 || sessionNotes) && (
+                <motion.div variants={fadeInUp} custom={2} id="notes">
+                  <StageMemosSection memos={sessionMemos} stages={sessionStages} notes={sessionNotes} />
+                </motion.div>
+              )}
+
+              {report.persons.map((person, index) => (
+                <motion.div key={person.speaker_id} variants={fadeInUp} custom={index + 3} id={`person-${person.speaker_id}`}>
+                  <PersonFeedbackCard
+                    person={person}
+                    report={report}
+                    onClaimEdit={handleClaimEdit}
+                    onEvidenceClick={handleEvidenceClick}
+                    onNeedsEvidence={handleNeedsEvidence}
+                  />
+                </motion.div>
+              ))}
+
+              <motion.div variants={fadeInUp} custom={report.persons.length + 3} id="evidence">
+                <EvidenceTimeline
+                  report={report}
+                  highlightEvidence={highlightEvidence}
+                  onEvidenceClick={handleTimelineEvidenceClick}
+                />
+              </motion.div>
+            </div>
+          </div>
         </motion.div>
-
-        <div className="space-y-4">
-          <motion.div variants={fadeInUp} custom={1}>
-            <OverallCard report={report} onEvidenceClick={handleEvidenceClick} />
-          </motion.div>
-
-          {/* Stage Memos — from interviewer's session notes */}
-          {(sessionMemos.length > 0 || sessionNotes) && (
-            <motion.div variants={fadeInUp} custom={2}>
-              <StageMemosSection memos={sessionMemos} stages={sessionStages} notes={sessionNotes} />
-            </motion.div>
-          )}
-
-          {report.persons.map((person, index) => (
-            <motion.div key={person.speaker_id} variants={fadeInUp} custom={index + 3}>
-              <PersonFeedbackCard
-                person={person}
-                report={report}
-                onClaimEdit={handleClaimEdit}
-                onEvidenceClick={handleEvidenceClick}
-                onNeedsEvidence={handleNeedsEvidence}
-              />
-            </motion.div>
-          ))}
-
-          <motion.div variants={fadeInUp} custom={report.persons.length + 3}>
-            <EvidenceTimeline
-              report={report}
-              highlightEvidence={highlightEvidence}
-              onEvidenceClick={handleTimelineEvidenceClick}
-            />
-          </motion.div>
-        </div>
-      </motion.div>
+      </div>
 
       {/* Edit Claim Modal */}
       <EditClaimModal

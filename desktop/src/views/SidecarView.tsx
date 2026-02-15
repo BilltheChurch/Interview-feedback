@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Star,
@@ -12,7 +12,6 @@ import {
   ChevronUp,
   Check,
   X,
-  FileText,
   BookOpen,
   Mic,
   Volume2,
@@ -25,21 +24,12 @@ import { StatusDot } from '../components/ui/StatusDot';
 import { Chip } from '../components/ui/Chip';
 import { MeterBar } from '../components/ui/MeterBar';
 import { ConfidenceBadge } from '../components/ui/ConfidenceBadge';
-import { EmptyState } from '../components/ui/EmptyState';
 import { RichNoteEditor, type RichNoteEditorRef } from '../components/RichNoteEditor';
+import { useSessionStore } from '../stores/sessionStore';
+import type { MemoType } from '../stores/sessionStore';
+import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
 
 /* ─── Types ─────────────────────────────────── */
-
-type MemoType = 'highlight' | 'issue' | 'question' | 'evidence';
-
-type Memo = {
-  id: string;
-  type: MemoType;
-  text: string;
-  timestamp: number; // seconds since session start
-  stage: string; // interview flow stage when captured
-  createdAt: Date;
-};
 
 type ParticipantStatus = 'pending' | 'capturing' | 'matched' | 'needs_confirm' | 'unknown';
 
@@ -79,8 +69,6 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-let memoIdCounter = 0;
-
 /* ─── CollapsibleSection ─────────────────────── */
 
 function CollapsibleSection({
@@ -114,72 +102,109 @@ function CollapsibleSection({
   );
 }
 
-/* ─── SidecarHeader ──────────────────────────── */
+/* ─── SidecarHeader (with audio heartbeat) ──── */
 
 function SidecarHeader({
   elapsed,
   sessionName,
-  showTranscript,
-  onToggleTranscript,
+  audioActive,
+  currentStage,
+  stages,
   onEndSession,
 }: {
   elapsed: number;
   sessionName: string;
-  showTranscript: boolean;
-  onToggleTranscript: () => void;
+  audioActive: boolean;
+  currentStage: number;
+  stages: string[];
   onEndSession: () => void;
 }) {
   return (
-    <header className="h-10 flex items-center justify-between px-3 bg-surface border-b border-border shrink-0">
+    <header
+      className={`h-10 flex items-center justify-between px-3 bg-surface border-b shrink-0 transition-colors duration-1000 ${
+        audioActive ? 'border-accent/60' : 'border-border'
+      }`}
+    >
       {/* Left: status + session name */}
       <div className="flex items-center gap-2 min-w-0">
         <StatusDot status="recording" />
-        <span className="text-sm text-ink truncate max-w-[200px]">
+        <span className="text-sm text-ink truncate max-w-[180px]">
           {sessionName}
         </span>
       </div>
 
-      {/* Center: timer */}
-      <AnimatePresence mode="popLayout">
-        <motion.span
-          key={elapsed}
-          initial={{ opacity: 0.5, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.2 }}
-          className="text-sm font-mono text-ink-secondary tabular-nums"
-        >
-          {formatTime(elapsed)}
-        </motion.span>
-      </AnimatePresence>
-
-      {/* Right: transcript toggle + end session */}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={onToggleTranscript}
-          className={`p-1.5 rounded-lg transition-colors duration-150 ${
-            showTranscript
-              ? 'bg-accent-soft text-accent'
-              : 'text-ink-tertiary hover:text-ink-secondary hover:bg-surface-hover'
-          }`}
-          title="Toggle transcript"
-          aria-label="Toggle transcript"
-        >
-          <FileText className="w-4 h-4" />
-        </button>
-        <button
-          onClick={onEndSession}
-          className="px-3 py-1.5 text-xs font-medium rounded-[--radius-button] text-ink-secondary hover:bg-error hover:text-white transition-colors duration-150"
-        >
-          End Session
-        </button>
+      {/* Center: timer + compact stage */}
+      <div className="flex items-center gap-3">
+        <AnimatePresence mode="popLayout">
+          <motion.span
+            key={elapsed}
+            initial={{ opacity: 0.5, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.2 }}
+            className="text-sm font-mono text-ink-secondary tabular-nums"
+          >
+            {formatTime(elapsed)}
+          </motion.span>
+        </AnimatePresence>
+        <span className="text-xs text-ink-tertiary">
+          <AnimatePresence mode="wait">
+            <motion.span
+              key={currentStage}
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 6 }}
+              transition={{ duration: 0.15 }}
+              className="text-accent font-medium"
+            >
+              {stages[currentStage]}
+            </motion.span>
+          </AnimatePresence>
+          {' '}
+          <span className="tabular-nums">{currentStage + 1}/{stages.length}</span>
+        </span>
       </div>
+
+      {/* Right: end session */}
+      <button
+        onClick={onEndSession}
+        className="px-3 py-1.5 text-xs font-medium rounded-[--radius-button] text-ink-secondary hover:bg-error hover:text-white transition-colors duration-150"
+      >
+        End Session
+      </button>
     </header>
   );
 }
 
-/* ─── QuickMarkBar ───────────────────────────── */
+/* ─── Compact Stage Progress Bar ─────────────── */
 
-function QuickMarkBar({ onMark }: { onMark: (type: MemoType) => void }) {
+function StageProgressBar({ currentStage, stages }: { currentStage: number; stages: string[] }) {
+  return (
+    <div className="flex items-center gap-1 px-3 py-1 border-b border-border/50">
+      {stages.map((_, i) => (
+        <div
+          key={i}
+          className={`h-1 flex-1 rounded-full transition-colors duration-200 ${
+            i <= currentStage ? 'bg-accent' : 'bg-border'
+          }`}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ─── QuickMarkBar (bottom, with memo count) ── */
+
+function QuickMarkBar({
+  onMark,
+  memoCount,
+  onToggleMemos,
+  memosVisible,
+}: {
+  onMark: (type: MemoType) => void;
+  memoCount: number;
+  onToggleMemos: () => void;
+  memosVisible: boolean;
+}) {
   const buttons: { type: MemoType; icon: typeof Star; color: string; shortcut: string }[] = [
     { type: 'highlight', icon: Star, color: 'text-accent hover:bg-accent-soft', shortcut: '1' },
     { type: 'issue', icon: AlertTriangle, color: 'text-warning hover:bg-amber-50', shortcut: '2' },
@@ -188,7 +213,7 @@ function QuickMarkBar({ onMark }: { onMark: (type: MemoType) => void }) {
   ];
 
   return (
-    <div className="flex items-center gap-1 px-3 py-1.5 border-b border-border bg-surface">
+    <div className="flex items-center gap-1 px-3 py-1.5 border-t border-border bg-surface shrink-0">
       {buttons.map(({ type, icon: Icon, color, shortcut }) => (
         <motion.button
           key={type}
@@ -201,46 +226,24 @@ function QuickMarkBar({ onMark }: { onMark: (type: MemoType) => void }) {
           aria-label={`${memoConfig[type].label} (Cmd+${shortcut})`}
         >
           <Icon className="w-4 h-4" />
-          <span className="absolute -top-1 -right-1 w-4 h-4 rounded text-[9px] font-medium bg-surface border border-border text-ink-tertiary flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+          <span className="absolute -top-1 -right-1 w-4 h-4 rounded text-xs font-medium bg-surface border border-border text-ink-tertiary flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150">
             {shortcut}
           </span>
         </motion.button>
       ))}
-      <span className="ml-auto text-[10px] text-ink-tertiary">Cmd+1-4</span>
-    </div>
-  );
-}
-
-/* ─── StageIndicator ─────────────────────────── */
-
-function StageIndicator({ currentStage, stages }: { currentStage: number; stages: string[] }) {
-  return (
-    <div className="flex items-center gap-2 px-4 py-1.5 bg-accent-soft/50 border-b border-accent-soft">
-      <AnimatePresence mode="wait">
-        <motion.span
-          key={currentStage}
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 8 }}
-          transition={{ duration: 0.2 }}
-          className="text-xs font-medium text-accent"
-        >
-          {stages[currentStage]}
-        </motion.span>
-      </AnimatePresence>
-      <div className="flex-1 flex items-center gap-1">
-        {stages.map((_, i) => (
-          <div
-            key={i}
-            className={`h-1 flex-1 rounded-full transition-colors duration-200 ${
-              i <= currentStage ? 'bg-accent' : 'bg-border'
-            }`}
-          />
-        ))}
-      </div>
-      <span className="text-[10px] text-ink-tertiary tabular-nums">
-        {currentStage + 1}/{stages.length}
-      </span>
+      <span className="ml-1 text-xs text-ink-tertiary">Cmd+1-4</span>
+      <button
+        onClick={onToggleMemos}
+        className="ml-auto flex items-center gap-1.5 px-2 py-1 rounded-[--radius-chip] text-xs text-ink-secondary hover:bg-surface-hover transition-colors"
+      >
+        <BookOpen className="w-3.5 h-3.5" />
+        <span className="tabular-nums">{memoCount} memo{memoCount !== 1 ? 's' : ''}</span>
+        {memosVisible ? (
+          <ChevronDown className="w-3 h-3" />
+        ) : (
+          <ChevronUp className="w-3 h-3" />
+        )}
+      </button>
     </div>
   );
 }
@@ -260,7 +263,7 @@ function MemoFlashcard({
   memo,
   onClick,
 }: {
-  memo: Memo;
+  memo: DisplayMemo;
   onClick: () => void;
 }) {
   const cfg = memoConfig[memo.type];
@@ -278,7 +281,7 @@ function MemoFlashcard({
       transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
       onClick={onClick}
       className={`
-        w-[140px] h-[130px] shrink-0 flex flex-col
+        w-[130px] h-[110px] shrink-0 flex flex-col
         rounded-xl border border-border/60 border-t-[3px] ${style.topBorder}
         bg-surface shadow-card hover:shadow-card-hover
         cursor-pointer select-none text-left
@@ -286,23 +289,23 @@ function MemoFlashcard({
       `}
     >
       {/* Card header — type icon + label */}
-      <div className={`flex items-center gap-1.5 px-2.5 pt-2.5 pb-1.5 ${style.bg} rounded-t-[9px]`}>
-        <Icon className={`w-3.5 h-3.5 ${style.iconColor}`} />
-        <span className={`text-[10px] font-semibold ${style.iconColor}`}>
+      <div className={`flex items-center gap-1.5 px-2.5 pt-2 pb-1 ${style.bg} rounded-t-[9px]`}>
+        <Icon className={`w-3 h-3 ${style.iconColor}`} />
+        <span className={`text-xs font-semibold ${style.iconColor}`}>
           {cfg.label}
         </span>
       </div>
 
-      {/* Text preview — 3 lines */}
-      <div className="flex-1 px-2.5 py-2 min-h-0">
-        <p className="text-[11px] text-ink leading-snug line-clamp-3">
+      {/* Text preview — 2 lines */}
+      <div className="flex-1 px-2.5 py-1.5 min-h-0">
+        <p className="text-xs text-ink leading-snug line-clamp-2">
           {memo.text}
         </p>
       </div>
 
       {/* Footer — timestamp */}
-      <div className="flex items-center justify-end px-2.5 pb-2">
-        <span className="text-[9px] text-ink-tertiary tabular-nums font-mono">
+      <div className="flex items-center justify-end px-2.5 pb-1.5">
+        <span className="text-xs text-ink-tertiary tabular-nums font-mono">
           {formatTime(memo.timestamp)}
         </span>
       </div>
@@ -311,7 +314,6 @@ function MemoFlashcard({
 }
 
 /* ─── MemoNotepadOverlay (expanded detail) ───── */
-/* Rendered at SidecarView body level for full-screen coverage */
 
 function MemoNotepadOverlay({
   memo,
@@ -319,8 +321,8 @@ function MemoNotepadOverlay({
   onClose,
   onNavigate,
 }: {
-  memo: Memo;
-  memos: Memo[];
+  memo: DisplayMemo;
+  memos: DisplayMemo[];
   onClose: () => void;
   onNavigate: (id: string) => void;
 }) {
@@ -374,7 +376,7 @@ function MemoNotepadOverlay({
           </button>
         </div>
 
-        {/* Notepad body — lined paper feel */}
+        {/* Notepad body */}
         <div className="flex-1 overflow-y-auto px-6 py-5">
           <p className="text-[15px] text-ink leading-[2] whitespace-pre-wrap"
              style={{
@@ -417,127 +419,54 @@ function MemoNotepadOverlay({
   );
 }
 
-/* ─── Stage lane divider ─────────────────────── */
+/* ─── Compact MemoTray (collapsible from bottom bar) ── */
 
-function StageLaneDivider({ label }: { label: string }) {
-  return (
-    <div className="flex flex-col items-center gap-1 shrink-0 self-stretch py-2">
-      <div className="w-px flex-1 bg-border/60" />
-      <span className="text-[9px] font-semibold text-accent uppercase tracking-wider whitespace-nowrap px-1">
-        {label}
-      </span>
-      <div className="w-px flex-1 bg-border/60" />
-    </div>
-  );
-}
-
-/* ─── MemoTimeline (horizontal flashcard tray) ── */
-
-function MemoTimeline({
+function MemoTray({
   memos,
-  stages,
-  currentStage,
   onOpenMemo,
 }: {
-  memos: Memo[];
-  stages: string[];
-  currentStage: number;
+  memos: DisplayMemo[];
   onOpenMemo: (id: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to rightmost (newest) card when a memo is added
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
     }
   }, [memos.length]);
 
-  // Group memos by stage for lane rendering
-  const memosByStage = useMemo(() => {
-    const map = new Map<string, Memo[]>();
-    for (const stage of stages) {
-      map.set(stage, []);
-    }
-    for (const memo of memos) {
-      const list = map.get(memo.stage);
-      if (list) list.push(memo);
-    }
-    return map;
-  }, [memos, stages]);
-
   return (
-    <div className="h-[190px] shrink-0 border-t border-border bg-ink/[0.03] flex flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-1.5 border-b border-border/50 shrink-0">
-        <span className="text-xs font-medium text-ink-secondary uppercase tracking-wider">
-          Memos
-        </span>
-        <span className="text-xs text-ink-tertiary tabular-nums">
-          {memos.length} captured
-        </span>
-      </div>
-
-      {/* Horizontal flashcard strip — grouped by stage */}
+    <motion.div
+      initial={{ height: 0, opacity: 0 }}
+      animate={{ height: 'auto', opacity: 1 }}
+      exit={{ height: 0, opacity: 0 }}
+      transition={{ duration: 0.25 }}
+      className="border-t border-border/50 bg-ink/[0.02] overflow-hidden shrink-0"
+    >
       <div
         ref={scrollRef}
-        className="flex-1 flex items-center gap-2 px-3 overflow-x-auto overflow-y-hidden"
+        className="flex items-center gap-2 px-3 py-2 overflow-x-auto overflow-y-hidden"
         style={{ scrollBehavior: 'smooth' }}
       >
         {memos.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <BookOpen className="w-5 h-5 text-ink-tertiary/50 mx-auto mb-1" />
-              <p className="text-[11px] text-ink-tertiary">No memos yet</p>
-              <p className="text-[9px] text-ink-tertiary/60">Cmd+1-4 to capture moments</p>
-            </div>
+          <div className="flex items-center gap-2 py-2 text-xs text-ink-tertiary">
+            <BookOpen className="w-4 h-4 text-ink-tertiary/50" />
+            <span>No memos yet — type notes, then Cmd+1-4 to capture</span>
           </div>
         ) : (
-          <>
-            {Array.from(memosByStage.entries()).map(([stage, stageMemos], stageIdx) => {
-              if (stageMemos.length === 0) return null;
-              return (
-                <div key={stage} className="flex items-center gap-2 shrink-0">
-                  {/* Stage lane divider */}
-                  {stageIdx > 0 && <StageLaneDivider label={stage} />}
-                  {stageIdx === 0 && <StageLaneDivider label={stage} />}
-
-                  {/* Cards in this stage */}
-                  <AnimatePresence initial={false}>
-                    {stageMemos.map((memo) => (
-                      <MemoFlashcard
-                        key={memo.id}
-                        memo={memo}
-                        onClick={() => onOpenMemo(memo.id)}
-                      />
-                    ))}
-                  </AnimatePresence>
-                </div>
-              );
-            })}
-
-            {/* Show current stage indicator if no memos yet in current stage */}
-            {(() => {
-              const currentStageName = stages[currentStage];
-              const currentStageMemos = memosByStage.get(currentStageName) || [];
-              if (currentStageMemos.length === 0 && memos.length > 0) {
-                return (
-                  <div className="flex items-center gap-2 shrink-0">
-                    <StageLaneDivider label={currentStageName} />
-                    <div className="w-[140px] h-[130px] shrink-0 rounded-xl border-2 border-dashed border-border/40 flex items-center justify-center">
-                      <p className="text-[10px] text-ink-tertiary text-center px-3">
-                        Recording in<br /><span className="font-semibold text-accent">{currentStageName}</span>
-                      </p>
-                    </div>
-                  </div>
-                );
-              }
-              return null;
-            })()}
-          </>
+          <AnimatePresence initial={false}>
+            {memos.map((memo) => (
+              <MemoFlashcard
+                key={memo.id}
+                memo={memo}
+                onClick={() => onOpenMemo(memo.id)}
+              />
+            ))}
+          </AnimatePresence>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -564,7 +493,7 @@ function FlowControl({
           <div
             key={stage}
             className={`
-              flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors duration-150
+              flex items-center gap-2 px-2 py-1 rounded-lg text-xs font-medium transition-colors duration-150
               ${isCurrent ? 'bg-accent-soft text-accent' : ''}
               ${isPast ? 'text-ink-tertiary' : ''}
               ${!isPast && !isCurrent ? 'text-ink-tertiary opacity-50' : ''}
@@ -594,12 +523,12 @@ function FlowControl({
 
 /* ─── AudioMeters ────────────────────────────── */
 
-function AudioMeters() {
+function AudioMeters({ mic, system, mixed }: { mic: number; system: number; mixed: number }) {
   return (
     <>
-      <MeterBar label="Mic" value={42} />
-      <MeterBar label="System" value={28} />
-      <MeterBar label="Mixed" value={35} />
+      <MeterBar label="Mic" value={mic} />
+      <MeterBar label="Sys" value={system} />
+      <MeterBar label="Mix" value={mixed} />
     </>
   );
 }
@@ -643,7 +572,7 @@ function EnrollmentPanel({
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: 8 }}
-                className="text-[10px] text-warning animate-pulse"
+                className="text-xs text-warning animate-pulse"
               >
                 Speaking...
               </motion.span>
@@ -662,7 +591,7 @@ function EnrollmentPanel({
           {p.status === 'needs_confirm' && (
             <button
               onClick={(e) => { e.stopPropagation(); onConfirm(p.name); }}
-              className="text-[10px] text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
+              className="text-xs text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
             >
               Confirm
             </button>
@@ -670,7 +599,7 @@ function EnrollmentPanel({
           {p.status === 'pending' && (
             <button
               onClick={(e) => { e.stopPropagation(); onEnroll(p.name); }}
-              className="text-[10px] text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
+              className="text-xs text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
             >
               Enroll
             </button>
@@ -697,7 +626,7 @@ function ParticipationSignals({ participants }: { participants: Participant[] })
               style={{ width: `${p.talkTimePct}%` }}
             />
           </div>
-          <span className="text-[10px] text-ink-tertiary tabular-nums w-14 text-right shrink-0">
+          <span className="text-xs text-ink-tertiary tabular-nums w-14 text-right shrink-0">
             {p.talkTimePct}% / {p.turnCount}t
           </span>
         </div>
@@ -706,24 +635,7 @@ function ParticipationSignals({ participants }: { participants: Participant[] })
   );
 }
 
-/* ─── TranscriptOverlay ──────────────────────── */
-
-function TranscriptOverlay({ visible }: { visible: boolean }) {
-  if (!visible) return null;
-
-  return (
-    <div className="absolute inset-y-0 right-0 w-80 bg-surface/95 backdrop-blur border-l border-border p-4 overflow-y-auto z-10">
-      <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
-        Live Transcript
-      </h3>
-      <p className="text-xs text-ink-tertiary italic">
-        Transcript will appear here during the session...
-      </p>
-    </div>
-  );
-}
-
-/* ─── ContextDrawer ──────────────────────────── */
+/* ─── ContextDrawer (narrower default) ───────── */
 
 function ContextDrawer({
   open,
@@ -734,6 +646,7 @@ function ContextDrawer({
   onEnroll,
   onConfirm,
   stages,
+  audioLevels,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -743,15 +656,15 @@ function ContextDrawer({
   onEnroll: (name: string) => void;
   onConfirm: (name: string) => void;
   stages: string[];
+  audioLevels: { mic: number; system: number; mixed: number };
 }) {
   return (
     <motion.aside
-      animate={{ width: open ? '22%' : '2.75rem' }}
+      animate={{ width: open ? 180 : 44 }}
       transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
       className="shrink-0 border-l border-border bg-surface flex flex-col relative"
-      style={{ minWidth: open ? 200 : undefined }}
     >
-      {/* Toggle button — top edge */}
+      {/* Toggle button */}
       <button
         onClick={onToggle}
         className="absolute top-2 -left-3 w-6 h-6 rounded-full bg-surface border border-border shadow-sm flex items-center justify-center text-ink-tertiary hover:text-ink-secondary hover:bg-surface-hover transition-colors duration-150 z-10"
@@ -772,17 +685,17 @@ function ContextDrawer({
 
       {/* Expanded content */}
       {open && (
-        <div className="flex-1 overflow-y-auto p-3 pt-6 flex flex-col gap-4">
+        <div className="flex-1 overflow-y-auto p-2.5 pt-6 flex flex-col gap-3">
+          <CollapsibleSection title="Audio" defaultOpen>
+            <AudioMeters mic={audioLevels.mic} system={audioLevels.system} mixed={audioLevels.mixed} />
+          </CollapsibleSection>
           <CollapsibleSection title="Flow">
             <FlowControl currentStage={currentStage} onAdvance={onAdvanceStage} stages={stages} />
           </CollapsibleSection>
-          <CollapsibleSection title="Audio">
-            <AudioMeters />
-          </CollapsibleSection>
-          <CollapsibleSection title="Participants">
+          <CollapsibleSection title="Speakers" defaultOpen={false}>
             <EnrollmentPanel participants={participants} onEnroll={onEnroll} onConfirm={onConfirm} />
           </CollapsibleSection>
-          <CollapsibleSection title="Talk Time">
+          <CollapsibleSection title="Talk Time" defaultOpen={false}>
             <ParticipationSignals participants={participants} />
           </CollapsibleSection>
         </div>
@@ -791,10 +704,20 @@ function ContextDrawer({
   );
 }
 
+/* ─── DisplayMemo — enriches store Memo with stage name ── */
+
+type DisplayMemo = {
+  id: string;
+  type: MemoType;
+  text: string;
+  timestamp: number;
+  stage: string;
+  createdAt: Date;
+};
+
 /* ─── SidecarView (main export) ──────────────── */
 
 export function SidecarView() {
-  const navigate = useNavigate();
   const location = useLocation();
   const locationState = location.state as {
     sessionId?: string;
@@ -803,17 +726,29 @@ export function SidecarView() {
     participants?: string[];
     stages?: string[];
   } | null;
-  const sessionId = locationState?.sessionId || `sess_${Date.now()}`;
-  const sessionDisplayName = locationState?.sessionName || 'Interview Session';
 
-  // Build stages from route state, falling back to defaults
-  const stages = locationState?.stages && locationState.stages.length > 0
-    ? locationState.stages
-    : defaultStages;
+  // ── Store selectors ──
+  const sessionTimer = useSessionStore((s) => s.elapsedSeconds);
+  const storeMemos = useSessionStore((s) => s.memos);
+  const currentStage = useSessionStore((s) => s.currentStage);
+  const audioLevels = useSessionStore((s) => s.audioLevels);
+  const storeAddMemo = useSessionStore((s) => s.addMemo);
+  const advanceStage = useSessionStore((s) => s.advanceStage);
+  const storeSetNotes = useSessionStore((s) => s.setNotes);
+  const storeStages = useSessionStore((s) => s.stages);
+  const storeSessionName = useSessionStore((s) => s.sessionName);
+  const storeSessionId = useSessionStore((s) => s.sessionId);
 
-  // Build participant list from route state, falling back to mock data
-  // If locationState exists (user came from SetupView), trust it — even if participants is empty.
-  // Only fall back to mockParticipants when there's NO locationState (direct URL access during dev).
+  const { end } = useSessionOrchestrator();
+
+  // Derive display values
+  const sessionId = storeSessionId || locationState?.sessionId || `sess_${Date.now()}`;
+  const sessionDisplayName = storeSessionName || locationState?.sessionName || 'Interview Session';
+  const stages = storeStages.length > 0
+    ? storeStages
+    : (locationState?.stages && locationState.stages.length > 0 ? locationState.stages : defaultStages);
+
+  // Build participant list
   const initialParticipants: Participant[] = locationState
     ? [
         ...(locationState.participants || []).map(name => ({
@@ -826,45 +761,51 @@ export function SidecarView() {
       ]
     : mockParticipants;
 
-  const [sessionTimer, setSessionTimer] = useState(0);
+  // ── UI-only local state ──
   const [notes, setNotes] = useState('');
   const [plainText, setPlainText] = useState('');
-  const [memos, setMemos] = useState<Memo[]>([]);
-  const [currentStage, setCurrentStage] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(true);
-  const [showTranscript, setShowTranscript] = useState(false);
+  const [memosVisible, setMemosVisible] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>(initialParticipants);
   const [openMemoId, setOpenMemoId] = useState<string | null>(null);
 
   const editorRef = useRef<RichNoteEditorRef>(null);
 
-  // Session timer
-  useEffect(() => {
-    const id = setInterval(() => setSessionTimer((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
+  // Audio activity indicator
+  const audioActive = audioLevels.mic > 0.05 || audioLevels.system > 0.05;
 
-  // Save memo: captures current editor text, then clears the editor
+  // Enrich store memos with stage name for display
+  const memos: DisplayMemo[] = useMemo(
+    () => storeMemos.map((m) => ({
+      id: m.id,
+      type: m.type,
+      text: m.text,
+      timestamp: m.timestamp,
+      stage: stages[currentStage] ?? 'Unknown',
+      createdAt: m.createdAt,
+    })),
+    [storeMemos, stages, currentStage],
+  );
+
+  // Save memo
   const addMemo = useCallback(
     (type: MemoType) => {
       const text = plainText.trim();
-      if (!text) return; // nothing to save
-
-      const memo: Memo = {
-        id: String(++memoIdCounter),
-        type,
-        text: text.slice(0, 200),
-        timestamp: sessionTimer,
-        stage: stages[currentStage],
-        createdAt: new Date(),
-      };
-      setMemos((prev) => [...prev, memo]);
-
-      // Clear editor
+      if (!text) return;
+      storeAddMemo(type, text.slice(0, 200));
       editorRef.current?.clearContent();
       setPlainText('');
     },
-    [plainText, sessionTimer, stages, currentStage],
+    [plainText, storeAddMemo],
+  );
+
+  // Sync notes to store
+  const handleNotesChange = useCallback(
+    (html: string) => {
+      setNotes(html);
+      storeSetNotes(html);
+    },
+    [storeSetNotes],
   );
 
   // Keyboard shortcuts: Cmd+1/2/3/4 for quick marks
@@ -881,17 +822,11 @@ export function SidecarView() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [addMemo]);
 
-  // Advance stage
-  const advanceStage = useCallback(() => {
-    setCurrentStage((s) => Math.min(s + 1, stages.length - 1));
-  }, [stages.length]);
-
   // Enrollment handlers
   const handleEnroll = useCallback((name: string) => {
     setParticipants(prev => prev.map(p =>
       p.name === name ? { ...p, status: 'capturing' as ParticipantStatus } : p
     ));
-    // Simulate enrollment completion after 3 seconds
     setTimeout(() => {
       setParticipants(prev => prev.map(p =>
         p.name === name ? { ...p, status: 'needs_confirm' as ParticipantStatus, confidence: 0.7 + Math.random() * 0.25 } : p
@@ -905,73 +840,66 @@ export function SidecarView() {
     ));
   }, []);
 
-  // End session — persist and navigate to feedback
+  // End session
   const handleEndSession = useCallback(() => {
-    // Update session status in localStorage
     try {
       const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
-      const updated = sessions.map((s: any) =>
+      const updated = sessions.map((s: Record<string, unknown>) =>
         s.id === sessionId ? { ...s, status: 'completed' } : s
       );
       localStorage.setItem('ifb_sessions', JSON.stringify(updated));
     } catch { /* ignore parse errors */ }
 
-    // Serialize memos for route state (drop Date objects)
-    const serializedMemos = memos.map(m => ({
-      id: m.id,
-      type: m.type,
-      text: m.text,
-      timestamp: m.timestamp,
-      stage: m.stage,
-    }));
-
-    navigate(`/feedback/${sessionId}`, {
-      state: {
-        sessionName: sessionDisplayName,
-        participants: participants.map(p => p.name).filter(n => n !== 'Interviewer'),
-        mode: locationState?.mode,
-        memos: serializedMemos,
-        stages,
-        notes,
-      },
-    });
-  }, [navigate, sessionId, sessionDisplayName, participants, locationState?.mode, memos, stages, notes]);
+    end();
+  }, [end, sessionId]);
 
   return (
     <div className="flex flex-col h-full bg-bg">
-      {/* Header */}
+      {/* Header — compact with timer, stage, and audio heartbeat */}
       <SidecarHeader
         elapsed={sessionTimer}
         sessionName={sessionDisplayName}
-        showTranscript={showTranscript}
-        onToggleTranscript={() => setShowTranscript((v) => !v)}
+        audioActive={audioActive}
+        currentStage={currentStage}
+        stages={stages}
         onEndSession={handleEndSession}
       />
 
+      {/* Thin stage progress bar */}
+      <StageProgressBar currentStage={currentStage} stages={stages} />
+
       {/* Body */}
       <div className="flex flex-1 min-h-0 relative">
-        {/* Notes workspace — takes remaining width */}
+        {/* Notes workspace — takes maximum space */}
         <div className="flex-1 flex flex-col min-w-0">
-          <QuickMarkBar onMark={addMemo} />
-          <StageIndicator currentStage={currentStage} stages={stages} />
+          {/* Notes editor — hero element, fills available space */}
           <RichNoteEditor
             ref={editorRef}
             content={notes}
-            onContentChange={setNotes}
+            onContentChange={handleNotesChange}
             onPlainTextChange={setPlainText}
             placeholder="Type your notes here..."
             className="flex-1"
             autoFocus
           />
-          <MemoTimeline
-            memos={memos}
-            stages={stages}
-            currentStage={currentStage}
-            onOpenMemo={(id) => setOpenMemoId(id)}
+
+          {/* Collapsible memo tray */}
+          <AnimatePresence>
+            {memosVisible && (
+              <MemoTray memos={memos} onOpenMemo={(id) => setOpenMemoId(id)} />
+            )}
+          </AnimatePresence>
+
+          {/* Quick mark bar — at bottom, with memo count toggle */}
+          <QuickMarkBar
+            onMark={addMemo}
+            memoCount={memos.length}
+            onToggleMemos={() => setMemosVisible(v => !v)}
+            memosVisible={memosVisible}
           />
         </div>
 
-        {/* Context drawer — right rail */}
+        {/* Context drawer — narrower right rail */}
         <ContextDrawer
           open={drawerOpen}
           onToggle={() => setDrawerOpen((v) => !v)}
@@ -981,12 +909,10 @@ export function SidecarView() {
           onEnroll={handleEnroll}
           onConfirm={handleConfirm}
           stages={stages}
+          audioLevels={audioLevels}
         />
 
-        {/* Transcript overlay */}
-        <TranscriptOverlay visible={showTranscript} />
-
-        {/* Memo notepad overlay — covers entire workspace */}
+        {/* Memo notepad overlay */}
         <AnimatePresence>
           {openMemoId && (() => {
             const memo = memos.find((m) => m.id === openMemoId);

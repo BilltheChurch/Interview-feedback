@@ -26,6 +26,24 @@ import {
   type InferenceBackendTimelineItem
 } from "./inference_client";
 import { analyzeEventsLocally } from "./local_events_analyzer";
+import { validateApiKey } from "./auth";
+import {
+  decodeBase64ToBytes,
+  bytesToBase64,
+  concatUint8Arrays,
+  pcm16ToWavBytes,
+  truncatePcm16WavToSeconds,
+  tailPcm16BytesToWavForSeconds,
+  buildDocxBytesFromText,
+  encodeUtf8,
+  TARGET_SAMPLE_RATE,
+  TARGET_CHANNELS,
+  ONE_SECOND_PCM_BYTES
+} from "./audio-utils";
+import {
+  buildReconciledTranscript,
+  resolveStudentBinding
+} from "./reconcile";
 import type {
   FinalizeV2Status,
   MemoItem,
@@ -490,6 +508,9 @@ interface Env {
   FINALIZE_TIMEOUT_MS?: string;
   FINALIZE_WATCHDOG_MS?: string;
   DIARIZATION_BACKEND_DEFAULT?: "cloud" | "edge";
+  AUDIO_RETENTION_HOURS?: string;
+  WORKER_API_KEY?: string;
+  DEFAULT_LOCALE?: string;
   RESULT_BUCKET: R2Bucket;
   MEETING_SESSION: DurableObjectNamespace<MeetingSessionDO>;
 }
@@ -576,9 +597,6 @@ const STORAGE_KEY_UTTERANCES_RAW_BY_STREAM = "utterances_raw_by_stream";
 const STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM = "utterances_merged_by_stream";
 
 const TARGET_FORMAT = "pcm_s16le";
-const TARGET_SAMPLE_RATE = 16000;
-const TARGET_CHANNELS = 1;
-const ONE_SECOND_PCM_BYTES = 32000;
 const INFERENCE_MAX_AUDIO_SECONDS = 30;
 const DASHSCOPE_DEFAULT_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 const DASHSCOPE_DEFAULT_MODEL = "fun-asr-realtime-2025-11-07";
@@ -690,238 +708,17 @@ function parseBool(raw: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+function getSessionLocale(state: SessionState | undefined, env?: Env): string {
+  const fromConfig = (state?.config as Record<string, unknown>)?.locale as string | undefined;
+  return fromConfig || env?.DEFAULT_LOCALE || 'zh-CN';
+}
+
 function isWebSocketRequest(request: Request): boolean {
   return request.headers.get("upgrade")?.toLowerCase() === "websocket";
 }
 
-function decodeBase64ToBytes(contentB64: string): Uint8Array {
-  const binary = atob(contentB64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const step = 0x2000;
-  for (let i = 0; i < bytes.length; i += step) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + step));
-  }
-  return btoa(binary);
-}
-
-function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((acc, item) => acc + item.byteLength, 0);
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged;
-}
-
-function pcm16ToWavBytes(pcm: Uint8Array, sampleRate = TARGET_SAMPLE_RATE, channels = TARGET_CHANNELS): Uint8Array {
-  const header = new Uint8Array(44);
-  const view = new DataView(header.buffer);
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-
-  const encoder = new TextEncoder();
-  header.set(encoder.encode("RIFF"), 0);
-  view.setUint32(4, 36 + pcm.byteLength, true);
-  header.set(encoder.encode("WAVE"), 8);
-  header.set(encoder.encode("fmt "), 12);
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  header.set(encoder.encode("data"), 36);
-  view.setUint32(40, pcm.byteLength, true);
-
-  return concatUint8Arrays([header, pcm]);
-}
-
-function truncatePcm16WavToSeconds(
-  wavBytes: Uint8Array,
-  maxSeconds: number,
-  sampleRate = TARGET_SAMPLE_RATE,
-  channels = TARGET_CHANNELS
-): Uint8Array {
-  const maxPcmBytes = Math.max(0, Math.floor(maxSeconds * sampleRate * channels * 2));
-  if (maxPcmBytes <= 0 || wavBytes.byteLength <= 44) {
-    return wavBytes;
-  }
-
-  const pcm = wavBytes.subarray(44);
-  if (pcm.byteLength <= maxPcmBytes) {
-    return wavBytes;
-  }
-
-  return pcm16ToWavBytes(pcm.subarray(0, maxPcmBytes), sampleRate, channels);
-}
-
-function tailPcm16BytesToWavForSeconds(
-  pcmBytes: Uint8Array,
-  seconds: number,
-  sampleRate = TARGET_SAMPLE_RATE,
-  channels = TARGET_CHANNELS
-): Uint8Array {
-  const maxPcmBytes = Math.max(ONE_SECOND_PCM_BYTES, Math.floor(seconds * sampleRate * channels * 2));
-  if (pcmBytes.byteLength <= maxPcmBytes) {
-    return pcm16ToWavBytes(pcmBytes, sampleRate, channels);
-  }
-  const offset = Math.max(0, pcmBytes.byteLength - maxPcmBytes);
-  return pcm16ToWavBytes(pcmBytes.subarray(offset), sampleRate, channels);
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-const CRC32_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i += 1) {
-    let c = i;
-    for (let j = 0; j < 8; j += 1) {
-      c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    table[i] = c >>> 0;
-  }
-  return table;
-})();
-
-function crc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < bytes.length; i += 1) {
-    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function encodeUtf8(input: string): Uint8Array {
-  return new TextEncoder().encode(input);
-}
-
-function makeZipStored(files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  const centralChunks: Uint8Array[] = [];
-  let offset = 0;
-  for (const file of files) {
-    const nameBytes = encodeUtf8(file.name);
-    const fileData = file.data;
-    const crc = crc32(fileData);
-    const localHeader = new Uint8Array(30 + nameBytes.length);
-    const localView = new DataView(localHeader.buffer);
-    localView.setUint32(0, 0x04034b50, true);
-    localView.setUint16(4, 20, true);
-    localView.setUint16(6, 0, true);
-    localView.setUint16(8, 0, true);
-    localView.setUint16(10, 0, true);
-    localView.setUint16(12, 0, true);
-    localView.setUint32(14, crc, true);
-    localView.setUint32(18, fileData.length, true);
-    localView.setUint32(22, fileData.length, true);
-    localView.setUint16(26, nameBytes.length, true);
-    localView.setUint16(28, 0, true);
-    localHeader.set(nameBytes, 30);
-    chunks.push(localHeader, fileData);
-
-    const centralHeader = new Uint8Array(46 + nameBytes.length);
-    const centralView = new DataView(centralHeader.buffer);
-    centralView.setUint32(0, 0x02014b50, true);
-    centralView.setUint16(4, 20, true);
-    centralView.setUint16(6, 20, true);
-    centralView.setUint16(8, 0, true);
-    centralView.setUint16(10, 0, true);
-    centralView.setUint16(12, 0, true);
-    centralView.setUint16(14, 0, true);
-    centralView.setUint32(16, crc, true);
-    centralView.setUint32(20, fileData.length, true);
-    centralView.setUint32(24, fileData.length, true);
-    centralView.setUint16(28, nameBytes.length, true);
-    centralView.setUint16(30, 0, true);
-    centralView.setUint16(32, 0, true);
-    centralView.setUint16(34, 0, true);
-    centralView.setUint16(36, 0, true);
-    centralView.setUint32(38, 0, true);
-    centralView.setUint32(42, offset, true);
-    centralHeader.set(nameBytes, 46);
-    centralChunks.push(centralHeader);
-
-    offset += localHeader.length + fileData.length;
-  }
-
-  const centralSize = centralChunks.reduce((sum, item) => sum + item.length, 0);
-  const end = new Uint8Array(22);
-  const endView = new DataView(end.buffer);
-  endView.setUint32(0, 0x06054b50, true);
-  endView.setUint16(4, 0, true);
-  endView.setUint16(6, 0, true);
-  endView.setUint16(8, files.length, true);
-  endView.setUint16(10, files.length, true);
-  endView.setUint32(12, centralSize, true);
-  endView.setUint32(16, offset, true);
-  endView.setUint16(20, 0, true);
-
-  return concatUint8Arrays([...chunks, ...centralChunks, end]);
-}
-
-function xmlEscape(input: string): string {
-  return input
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-function buildDocxBytesFromText(content: string): Uint8Array {
-  const paragraphXml = content
-    .split(/\r?\n/)
-    .map((line) => `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(line)}</w:t></w:r></w:p>`)
-    .join("");
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>`;
-  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`;
-  const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
- xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
- xmlns:o="urn:schemas-microsoft-com:office:office"
- xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
- xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
- xmlns:v="urn:schemas-microsoft-com:vml"
- xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
- xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
- xmlns:w10="urn:schemas-microsoft-com:office:word"
- xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
- xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
- xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"
- xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
- xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"
- xmlns:wne="http://schemas.microsoft.com/office/2006/wordml"
- xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
- mc:Ignorable="w14 w15 wp14">
- <w:body>${paragraphXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body>
-</w:document>`;
-  return makeZipStored([
-    { name: "[Content_Types].xml", data: encodeUtf8(contentTypes) },
-    { name: "_rels/.rels", data: encodeUtf8(rels) },
-    { name: "word/document.xml", data: encodeUtf8(documentXml) }
-  ]);
 }
 
 function toWebSocketHandshakeUrl(raw: string): string {
@@ -1528,6 +1325,10 @@ export default {
       });
     }
 
+    // ── Auth gate (skipped for /health, skipped when WORKER_API_KEY is empty) ──
+    const authError = validateApiKey(request, env as unknown as Record<string, unknown>);
+    if (authError) return authError;
+
     const wsRoleMatch = path.match(WS_INGEST_ROLE_ROUTE_REGEX);
     if (wsRoleMatch) {
       const [, rawSessionId, rawRole] = wsRoleMatch;
@@ -1751,7 +1552,46 @@ export class MeetingSessionDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     await this.enqueueMutation(async () => {
       await this.failStuckFinalizeIfNeeded("alarm");
+      await this.cleanupExpiredAudioChunks();
     });
+  }
+
+  private async cleanupExpiredAudioChunks(): Promise<void> {
+    const finalizedAt = await this.ctx.storage.get<string>(STORAGE_KEY_FINALIZED_AT);
+    if (!finalizedAt) return;
+
+    const age = Date.now() - new Date(finalizedAt).getTime();
+    const retentionMs = (Number(this.env.AUDIO_RETENTION_HOURS) || 72) * 3600 * 1000;
+    if (age <= retentionMs) return;
+
+    // Derive the session R2 prefix from the stored result key
+    const resultKey = await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2);
+    if (!resultKey) return;
+
+    // resultKey is "sessions/{sessionSegment}/result_v2.json"
+    const sessionPrefix = resultKey.replace(/\/result_v2\.json$/, "");
+    const chunksPrefix = `${sessionPrefix}/chunks/`;
+
+    let cursor: string | undefined;
+    let deletedCount = 0;
+    do {
+      const listing = await this.env.RESULT_BUCKET.list({
+        prefix: chunksPrefix,
+        cursor,
+        limit: 100
+      });
+      if (listing.objects.length > 0) {
+        await Promise.all(
+          listing.objects.map((obj) => this.env.RESULT_BUCKET.delete(obj.key))
+        );
+        deletedCount += listing.objects.length;
+      }
+      cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+    } while (cursor);
+
+    if (deletedCount > 0) {
+      console.log(`[cleanup] deleted ${deletedCount} expired audio chunks from ${chunksPrefix}`);
+    }
   }
 
   private asrRealtimeEnabled(): boolean {
@@ -2339,46 +2179,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     eventDecision: "auto" | "confirm" | "unknown" | null,
     speakerMapByCluster: Map<string, SpeakerMapItem> = new Map()
   ): { speaker_name: string | null; decision: "auto" | "confirm" | "unknown" | null } {
-    if (!clusterId) {
-      if (eventSpeakerName) {
-        return {
-          speaker_name: eventSpeakerName,
-          decision: eventDecision ?? "confirm"
-        };
-      }
-      return { speaker_name: null, decision: "unknown" };
-    }
-    const meta = state.cluster_binding_meta[clusterId];
-    const directBinding = valueAsString(state.bindings[clusterId]);
-    const metaBinding = valueAsString(meta?.participant_name);
-    const bound = directBinding || metaBinding || null;
-    if (meta?.locked && bound) return { speaker_name: bound, decision: "auto" };
-    if (meta?.source === "manual_map" && bound) return { speaker_name: bound, decision: "auto" };
-    if (meta?.source === "enrollment_match" && bound) {
-      return { speaker_name: bound, decision: directBinding ? "auto" : "confirm" };
-    }
-    if (meta?.source === "name_extract" && bound) return { speaker_name: bound, decision: "confirm" };
-    if (bound) return { speaker_name: bound, decision: directBinding ? "auto" : "confirm" };
-
-    const mapItem = speakerMapByCluster.get(clusterId);
-    const mapName = valueAsString(mapItem?.display_name ?? mapItem?.person_id);
-    if (mapName) {
-      if (mapItem?.source === "manual") {
-        return { speaker_name: mapName, decision: "auto" };
-      }
-      if (mapItem?.source === "enroll" || mapItem?.source === "name_extract") {
-        return { speaker_name: mapName, decision: "confirm" };
-      }
-      return { speaker_name: mapName, decision: eventDecision ?? "confirm" };
-    }
-
-    if (eventSpeakerName) {
-      return {
-        speaker_name: eventSpeakerName,
-        decision: eventDecision ?? "confirm"
-      };
-    }
-    return { speaker_name: null, decision: "unknown" };
+    return resolveStudentBinding(state, clusterId, eventSpeakerName, eventDecision, speakerMapByCluster);
   }
 
   private buildTranscriptForFeedback(
@@ -2388,78 +2189,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
     speakerLogsStored: SpeakerLogs,
     diarizationBackend: "cloud" | "edge"
   ): TranscriptItem[] {
-    const eventByUtterance = new Map(
-      events
-        .filter((item) => item.stream_role === "students" && item.utterance_id)
-        .map((item) => [item.utterance_id as string, item])
-    );
-    const teacherEventByUtterance = new Map(
-      events
-        .filter((item) => item.stream_role === "teacher" && item.utterance_id)
-        .map((item) => [item.utterance_id as string, item])
-    );
-    const edgeTurns =
-      diarizationBackend === "edge"
-        ? [...speakerLogsStored.turns]
-            .filter((item) => item.stream_role === "students")
-            .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
-        : [];
-    const speakerMapByCluster = new Map(
-      speakerLogsStored.speaker_map.map((item) => [item.cluster_id, item])
-    );
-    const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
-      if (edgeTurns.length === 0) return null;
-      let bestCluster: string | null = null;
-      let bestOverlap = 0;
-      for (const turn of edgeTurns) {
-        const overlap = Math.min(endMs, turn.end_ms) - Math.max(startMs, turn.start_ms);
-        if (overlap > bestOverlap) {
-          bestOverlap = overlap;
-          bestCluster = turn.cluster_id;
-        }
-      }
-      return bestOverlap > 0 ? bestCluster : null;
-    };
-
-    return [...rawByStream.teacher, ...rawByStream.students]
-      .map((item) => {
-        const event =
-          item.stream_role === "teacher"
-            ? teacherEventByUtterance.get(item.utterance_id)
-            : eventByUtterance.get(item.utterance_id);
-        const inferredStudentsCluster =
-          item.stream_role === "students" && diarizationBackend === "edge"
-            ? inferStudentsClusterFromEdgeTurns(item.start_ms, item.end_ms)
-            : null;
-        const clusterId =
-          event?.cluster_id ??
-          (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
-        const reconciled =
-          item.stream_role === "students"
-            ? this.resolveStudentBindingForFeedback(
-                state,
-                clusterId ?? null,
-                event?.speaker_name ?? null,
-                event?.decision ?? null,
-                speakerMapByCluster
-              )
-            : {
-                speaker_name: event?.speaker_name ?? null,
-                decision: event?.decision ?? null
-              };
-        return {
-          utterance_id: item.utterance_id,
-          stream_role: item.stream_role,
-          cluster_id: clusterId ?? null,
-          speaker_name: reconciled.speaker_name,
-          decision: reconciled.decision,
-          text: item.text,
-          start_ms: item.start_ms,
-          end_ms: item.end_ms,
-          duration_ms: item.duration_ms
-        } satisfies TranscriptItem;
-      })
-      .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+    return buildReconciledTranscript({
+      utterances: [...rawByStream.teacher, ...rawByStream.students],
+      events,
+      speakerLogs: speakerLogsStored,
+      state,
+      diarizationBackend
+    });
   }
 
   private buildEvidenceIndex(perPerson: PersonFeedbackItem[]): Record<string, string[]> {
@@ -2624,13 +2360,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
     });
     const assembleMs = Date.now() - assembleStart;
 
+    const locale = getSessionLocale(state, this.env);
     const eventsStart = Date.now();
     const eventsPayload = {
       session_id: sessionId,
       transcript,
       memos: memosWithEvidence,
       stats,
-      locale: "zh-CN"
+      locale
     };
     const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
     const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
@@ -2652,7 +2389,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         stats,
         evidence,
         events: analysisEvents,
-        locale: "zh-CN"
+        locale
       });
       reportTimeline = reportResult.timeline;
       const payload = reportResult.data;
@@ -4508,81 +4245,18 @@ export class MeetingSessionDO extends DurableObject<Env> {
         this.loadAsrByStream()
       ]);
       const state = normalizeSessionState(stateRaw);
+      const locale = getSessionLocale(state, this.env);
       const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
 
-      const eventByUtterance = new Map(
-        events
-          .filter((item) => item.stream_role === "students" && item.utterance_id)
-          .map((item) => [item.utterance_id as string, item])
-      );
-      const teacherEventByUtterance = new Map(
-        events
-          .filter((item) => item.stream_role === "teacher" && item.utterance_id)
-          .map((item) => [item.utterance_id as string, item])
-      );
-
-      const edgeTurns =
-        diarizationBackend === "edge"
-          ? [...speakerLogsStored.turns]
-              .filter((item) => item.stream_role === "students")
-              .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
-          : [];
-      const speakerMapByCluster = new Map(
-        speakerLogsStored.speaker_map.map((item) => [item.cluster_id, item])
-      );
-      const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
-        if (edgeTurns.length === 0) return null;
-        let bestCluster: string | null = null;
-        let bestOverlap = 0;
-        for (const turn of edgeTurns) {
-          const overlap = Math.min(endMs, turn.end_ms) - Math.max(startMs, turn.start_ms);
-          if (overlap > bestOverlap) {
-            bestOverlap = overlap;
-            bestCluster = turn.cluster_id;
-          }
-        }
-        return bestOverlap > 0 ? bestCluster : null;
-      };
-
-      const transcript = [...rawByStream.teacher, ...rawByStream.students]
-        .filter((item) => item.end_seq <= cutoff[item.stream_role])
-        .map((item) => {
-          const event = item.stream_role === "teacher"
-            ? teacherEventByUtterance.get(item.utterance_id)
-            : eventByUtterance.get(item.utterance_id);
-          const inferredStudentsCluster =
-            item.stream_role === "students" && diarizationBackend === "edge"
-              ? inferStudentsClusterFromEdgeTurns(item.start_ms, item.end_ms)
-              : null;
-          const clusterId =
-            event?.cluster_id ??
-            (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
-          const reconciled =
-            item.stream_role === "students"
-              ? this.resolveStudentBindingForFeedback(
-                  state,
-                  clusterId ?? null,
-                  event?.speaker_name ?? null,
-                  event?.decision ?? null,
-                  speakerMapByCluster
-                )
-              : {
-                  speaker_name: event?.speaker_name ?? null,
-                  decision: event?.decision ?? null
-                };
-          return {
-            utterance_id: item.utterance_id,
-            stream_role: item.stream_role,
-            cluster_id: clusterId ?? null,
-            speaker_name: reconciled.speaker_name,
-            decision: reconciled.decision,
-            text: item.text,
-            start_ms: item.start_ms,
-            end_ms: item.end_ms,
-            duration_ms: item.duration_ms
-          };
-        })
-        .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+      const cutoffUtterances = [...rawByStream.teacher, ...rawByStream.students]
+        .filter((item) => item.end_seq <= cutoff[item.stream_role]);
+      const transcript = buildReconciledTranscript({
+        utterances: cutoffUtterances,
+        events,
+        speakerLogs: speakerLogsStored,
+        state,
+        diarizationBackend
+      });
 
       mergedByStream.teacher = mergeUtterances(rawByStream.teacher);
       mergedByStream.students = mergeUtterances(rawByStream.students);
@@ -4625,7 +4299,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const memoBindings = extractMemoNames(memos, knownSpeakers);
       const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
       const enrichedMemos = addStageMetadata(memos, configStages);
-      const evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
+      let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
 
       // Keep legacy evidence + memo-first as fallback baseline
       const legacyEvidence = buildEvidence({ memos, transcript });
@@ -4658,7 +4332,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         transcript,
         memos: memosWithEvidence,
         stats,
-        locale: "zh-CN"
+        locale
       };
       const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
       const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
@@ -4729,7 +4403,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           freeFormNotes,
           historical: [],
           stages: contextStages.length > 0 ? contextStages : configStages,
-          locale: "zh-CN",
+          locale,
         });
 
         const synthStart = Date.now();
@@ -4781,7 +4455,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
             stats,
             evidence: legacyEvidence,
             events: analysisEvents,
-            locale: "zh-CN"
+            locale
           });
           reportTimeline = reportResult.timeline;
           if (reportResult.warnings.length > 0) {
@@ -4829,6 +4503,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
       const reportMs = Date.now() - reportStart;
       backendTimeline.push(...reportTimeline);
+
+      // ── Evidence namespace alignment ──
+      // When report comes from legacy or memo_first fallback, the claim evidence_refs
+      // reference legacy evidence IDs. Switch the evidence pack to match.
+      if (reportSource === 'memo_first_fallback' || reportSource === 'memo_first' || reportSource === 'llm_enhanced' || reportSource === 'llm_failed') {
+        evidence = legacyEvidence;
+      }
 
       // ── Quality gate enforcement (new) ──
       const synthQualityGate = enforceQualityGates({
@@ -5379,76 +5060,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
       };
       const normalizedState = normalizeSessionState(state);
       const diarizationBackend = normalizedState.config?.diarization_backend === "edge" ? "edge" : "cloud";
-      const studentEventByUtterance = new Map(
-        events
-          .filter((item) => item.stream_role === "students" && item.utterance_id)
-          .map((item) => [String(item.utterance_id), item])
-      );
-      const teacherEventByUtterance = new Map(
-        events
-          .filter((item) => item.stream_role === "teacher" && item.utterance_id)
-          .map((item) => [String(item.utterance_id), item])
-      );
-      const edgeTurns =
-        diarizationBackend === "edge"
-          ? [...speakerLogs.turns]
-              .filter((item) => item.stream_role === "students")
-              .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
-          : [];
-      const speakerMapByCluster = new Map(
-        speakerLogs.speaker_map.map((item) => [item.cluster_id, item])
-      );
-      const inferStudentsClusterFromEdgeTurns = (startMs: number, endMs: number): string | null => {
-        if (edgeTurns.length === 0) return null;
-        let bestCluster: string | null = null;
-        let bestOverlap = 0;
-        for (const turn of edgeTurns) {
-          const overlap = Math.min(endMs, turn.end_ms) - Math.max(startMs, turn.start_ms);
-          if (overlap > bestOverlap) {
-            bestOverlap = overlap;
-            bestCluster = turn.cluster_id;
-          }
-        }
-        return bestOverlap > 0 ? bestCluster : null;
-      };
-      const metricsTranscript: TranscriptItem[] = [...utterancesByStream.teacher, ...utterancesByStream.students]
-        .map((item) => {
-          const event =
-            item.stream_role === "teacher"
-              ? teacherEventByUtterance.get(item.utterance_id)
-              : studentEventByUtterance.get(item.utterance_id);
-          const inferredStudentsCluster =
-            item.stream_role === "students" && diarizationBackend === "edge"
-              ? inferStudentsClusterFromEdgeTurns(item.start_ms, item.end_ms)
-              : null;
-          const clusterId =
-            event?.cluster_id ??
-            (item.stream_role === "students" ? inferredStudentsCluster : "teacher");
-          const reconciled =
-            item.stream_role === "students"
-              ? this.resolveStudentBindingForFeedback(
-                  normalizedState,
-                  clusterId ?? null,
-                  event?.speaker_name ?? null,
-                  event?.decision ?? null,
-                  speakerMapByCluster
-                )
-              : {
-                  speaker_name: event?.speaker_name ?? null,
-                  decision: event?.decision ?? null
-                };
-          return {
-            utterance_id: item.utterance_id,
-            stream_role: item.stream_role,
-            cluster_id: clusterId ?? null,
-            speaker_name: reconciled.speaker_name,
-            decision: reconciled.decision,
-            text: item.text,
-            start_ms: item.start_ms,
-            end_ms: item.end_ms,
-            duration_ms: item.duration_ms
-          };
-        });
+      const metricsTranscript = buildReconciledTranscript({
+        utterances: [...utterancesByStream.teacher, ...utterancesByStream.students],
+        events,
+        speakerLogs,
+        state: normalizedState,
+        diarizationBackend
+      });
       const qualityMetrics = this.buildQualityMetrics(metricsTranscript, normalizedState.capture_by_stream ?? defaultCaptureByStream());
       const speechBackendMode = this.speechBackendMode(normalizedState, dependencyHealth);
 
@@ -5814,7 +5432,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         transcript: report.transcript,
         memos: report.memos,
         stats: report.stats,
-        locale: "zh-CN"
+        locale: getSessionLocale(
+          normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)),
+          this.env
+        )
       };
       const regenResult = await this.invokeInferenceRegenerateClaim(inferenceReq);
       const regeneratedClaim = regenResult.data?.claim;

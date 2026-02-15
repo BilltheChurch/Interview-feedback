@@ -1,13 +1,16 @@
+import { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { PipOverlay } from './components/PipOverlay';
 import { HomeView } from './views/HomeView';
 import { SetupView } from './views/SetupView';
 import { SidecarView } from './views/SidecarView';
 import { FeedbackView } from './views/FeedbackView';
 import { HistoryView } from './views/HistoryView';
 import { SettingsView } from './views/SettingsView';
+import { LoginView } from './views/LoginView';
 import { useDeepLink } from './hooks/useDeepLink';
 
 function AppRoutes() {
@@ -39,11 +42,36 @@ function AppRoutes() {
 }
 
 export function App() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const state = await window.desktopAPI.authGetState();
+        setIsAuthenticated(state.microsoft.connected || state.google.connected);
+      } catch {
+        // If auth check fails (e.g. not in Electron), allow through
+        setIsAuthenticated(false);
+      }
+      setAuthChecked(true);
+    })();
+  }, []);
+
+  if (!authChecked) {
+    return null;
+  }
+
+  if (!isAuthenticated) {
+    return <LoginView onAuthenticated={() => setIsAuthenticated(true)} />;
+  }
+
   return (
     <HashRouter>
       <AppShell>
         <AppRoutes />
       </AppShell>
+      <PipOverlay />
     </HashRouter>
   );
 }

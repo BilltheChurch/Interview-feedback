@@ -20,6 +20,7 @@ class GraphCalendarClient {
     this.clientId = safeString(options.clientId);
     this.tenantId = safeString(options.tenantId) || "common";
     this.scopes = Array.isArray(options.scopes) && options.scopes.length > 0 ? options.scopes : DEFAULT_SCOPES;
+    this.openBrowser = typeof options.openBrowser === "function" ? options.openBrowser : undefined;
     this._pca = null;
     this._cacheLoaded = false;
   }
@@ -115,16 +116,13 @@ class GraphCalendarClient {
 
   async connect() {
     const pca = await this._loadCache();
-    const result = await pca.acquireTokenByDeviceCode({
+    const interactiveRequest = {
       scopes: this.scopes,
-      deviceCodeCallback: (response) => {
-        this.log("[graph] device code", {
-          message: response?.message,
-          userCode: response?.userCode,
-          verificationUri: response?.verificationUri
-        });
-      }
-    });
+      openBrowser: this.openBrowser || undefined,
+      successTemplate: "<h1>Authentication successful</h1><p>You can close this window now.</p>",
+      errorTemplate: "<h1>Authentication failed</h1><p>{{error}}</p>"
+    };
+    const result = await pca.acquireTokenInteractive(interactiveRequest);
     await this._saveCache();
     return {
       connected: true,
@@ -168,15 +166,11 @@ class GraphCalendarClient {
       });
       return token;
     } catch (_error) {
-      const token = await pca.acquireTokenByDeviceCode({
+      const token = await pca.acquireTokenInteractive({
         scopes: this.scopes,
-        deviceCodeCallback: (response) => {
-          this.log("[graph] device code (reauth)", {
-            message: response?.message,
-            userCode: response?.userCode,
-            verificationUri: response?.verificationUri
-          });
-        }
+        openBrowser: this.openBrowser || undefined,
+        successTemplate: "<h1>Re-authentication successful</h1><p>You can close this window now.</p>",
+        errorTemplate: "<h1>Authentication failed</h1><p>{{error}}</p>"
       });
       await this._saveCache();
       return token;
