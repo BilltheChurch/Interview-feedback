@@ -458,6 +458,156 @@ export function buildMultiEvidence(options: {
   return evidence;
 }
 
+export function enrichEvidencePack(
+  transcript: TranscriptItem[],
+  stats: SpeakerStatItem[]
+): EvidenceItem[] {
+  const evidence: EvidenceItem[] = [];
+  let seq = 900;
+
+  function nextEvidenceId(): string {
+    return `e_${String(seq++).padStart(6, "0")}`;
+  }
+
+  const sorted = [...transcript].sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+
+  // ── 1. Transcript quote evidence (per speaker) ──────────────────────
+  // Group utterances by speaker
+  const bySpeaker = new Map<string, TranscriptItem[]>();
+  for (const item of sorted) {
+    const key = speakerKey(item);
+    if (!bySpeaker.has(key)) bySpeaker.set(key, []);
+    bySpeaker.get(key)!.push(item);
+  }
+
+  for (const [, utterances] of bySpeaker) {
+    // Filter to substantive utterances (>= 20 chars)
+    const substantive = utterances.filter(u => u.text.trim().length >= 20);
+    // Sort by text length descending (longest / most substantive first)
+    substantive.sort((a, b) => b.text.length - a.text.length);
+    // Take top 5
+    const top = substantive.slice(0, 5);
+    for (const u of top) {
+      evidence.push({
+        evidence_id: nextEvidenceId(),
+        type: "transcript_quote",
+        time_range_ms: [u.start_ms, u.end_ms],
+        utterance_ids: [u.utterance_id],
+        speaker: {
+          cluster_id: u.cluster_id ?? null,
+          person_id: u.speaker_name ?? null,
+          display_name: u.speaker_name ?? null,
+        },
+        quote: quoteFromUtterance(u.text),
+        confidence: 0.85,
+        weak: false,
+        weak_reason: null,
+        source: "auto_generated",
+      });
+    }
+  }
+
+  // ── 2. Stats summary evidence (per speaker) ─────────────────────────
+  for (const stat of stats) {
+    const name = stat.speaker_name ?? stat.speaker_key;
+    const pct = Math.round((stat.talk_time_pct ?? 0) * 100);
+    const parts: string[] = [
+      `${name} 发言 ${stat.turns} 次，占比 ${pct}%`,
+    ];
+    if (stat.interruptions > 0) {
+      parts.push(`打断他人 ${stat.interruptions} 次`);
+    }
+    if (stat.interrupted_by_others > 0) {
+      parts.push(`被他人打断 ${stat.interrupted_by_others} 次`);
+    }
+    const quote = parts.join("，");
+
+    evidence.push({
+      evidence_id: nextEvidenceId(),
+      type: "stats_summary",
+      time_range_ms: [0, 0],
+      utterance_ids: [],
+      speaker: {
+        cluster_id: null,
+        person_id: stat.speaker_name ?? null,
+        display_name: name,
+      },
+      quote,
+      confidence: 0.95,
+      weak: false,
+      weak_reason: null,
+      source: "auto_generated",
+    });
+  }
+
+  // ── 3. Interaction pattern evidence ─────────────────────────────────
+  const AGREE_SIGNALS = ["agree", "同意", "对", "yeah"];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const curr = sorted[i];
+    const currText = curr.text.toLowerCase();
+
+    // Check for agreement signals in current utterance
+    for (const signal of AGREE_SIGNALS) {
+      if (currText.includes(signal)) {
+        evidence.push({
+          evidence_id: nextEvidenceId(),
+          type: "interaction_pattern",
+          time_range_ms: [curr.start_ms, curr.end_ms],
+          utterance_ids: [curr.utterance_id],
+          speaker: {
+            cluster_id: curr.cluster_id ?? null,
+            person_id: curr.speaker_name ?? null,
+            display_name: curr.speaker_name ?? null,
+          },
+          quote: quoteFromUtterance(curr.text),
+          confidence: 0.70,
+          weak: false,
+          weak_reason: null,
+          source: "auto_generated",
+        });
+        break; // Only one interaction evidence per utterance for agree signals
+      }
+    }
+
+    // Check for rapid response pattern (gap < 500ms and prev duration >= 1200ms)
+    if (i > 0) {
+      const prev = sorted[i - 1];
+      const prevKey = speakerKey(prev);
+      const currKey = speakerKey(curr);
+      if (prevKey !== currKey) {
+        const gap = curr.start_ms - prev.end_ms;
+        if (gap < 500 && prev.duration_ms >= 1200) {
+          // Check we haven't already added an agree-signal evidence for this utterance
+          const alreadyAdded = evidence.some(
+            e => e.type === "interaction_pattern" && e.utterance_ids.includes(curr.utterance_id)
+          );
+          if (!alreadyAdded) {
+            evidence.push({
+              evidence_id: nextEvidenceId(),
+              type: "interaction_pattern",
+              time_range_ms: [curr.start_ms, curr.end_ms],
+              utterance_ids: [curr.utterance_id],
+              speaker: {
+                cluster_id: curr.cluster_id ?? null,
+                person_id: curr.speaker_name ?? null,
+                display_name: curr.speaker_name ?? null,
+              },
+              quote: quoteFromUtterance(curr.text),
+              confidence: 0.70,
+              weak: false,
+              weak_reason: null,
+              source: "auto_generated",
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return evidence;
+}
+
 export function addStageMetadata(
   memos: MemoItem[],
   stages: string[]

@@ -9,7 +9,7 @@ import {
   type ReconcileUtterance,
   type ReconcileSpeakerEvent,
 } from "../src/reconcile";
-import { buildMultiEvidence } from "../src/finalize_v2";
+import { buildMultiEvidence, enrichEvidencePack } from "../src/finalize_v2";
 import type { SpeakerLogs, SpeakerMapItem } from "../src/types_v2";
 import type { GlobalClusterResult, CachedEmbedding } from "../src/providers/types";
 
@@ -717,5 +717,46 @@ describe("buildMultiEvidence semantic matching", () => {
     expect(fallback).toBeDefined();
     expect(fallback!.confidence).toBe(0.35);
     expect(fallback!.source).toBe("memo_text");
+  });
+});
+
+/* ── enrichEvidencePack ──────────────────────── */
+
+describe("enrichEvidencePack", () => {
+  const transcript = [
+    { utterance_id: "u1", stream_role: "students" as const, cluster_id: "Tina", speaker_name: "Tina", text: "I think biocompatibility is most important because without it patients may experience rejection reactions and need secondary surgery", start_ms: 200000, end_ms: 210000, duration_ms: 10000 },
+    { utterance_id: "u2", stream_role: "students" as const, cluster_id: "Tina", speaker_name: "Tina", text: "So let me summarize what we have discussed so far", start_ms: 230000, end_ms: 235000, duration_ms: 5000 },
+    { utterance_id: "u3", stream_role: "students" as const, cluster_id: "Rice", speaker_name: "Rice", text: "I agree with your point about biocompatibility", start_ms: 210000, end_ms: 215000, duration_ms: 5000 },
+    { utterance_id: "u4", stream_role: "students" as const, cluster_id: "Rice", speaker_name: "Rice", text: "And I also think the repair aspect is very important for long term use", start_ms: 250000, end_ms: 260000, duration_ms: 10000 },
+  ];
+
+  const stats = [
+    { speaker_key: "Tina", speaker_name: "Tina", talk_time_ms: 15000, talk_time_pct: 0.5, turns: 2, silence_ms: 0, interruptions: 1, interrupted_by_others: 0 },
+    { speaker_key: "Rice", speaker_name: "Rice", talk_time_ms: 15000, talk_time_pct: 0.5, turns: 2, silence_ms: 0, interruptions: 0, interrupted_by_others: 1 },
+  ];
+
+  it("should generate transcript_quote evidence for substantive utterances", () => {
+    const enriched = enrichEvidencePack(transcript, stats);
+    const quotes = enriched.filter(e => e.type === "transcript_quote");
+    expect(quotes.length).toBeGreaterThanOrEqual(2);
+    expect(quotes.every(e => e.utterance_ids.length === 1)).toBe(true);
+    expect(quotes.every(e => e.confidence === 0.85)).toBe(true);
+    expect(quotes.every(e => e.source === "auto_generated")).toBe(true);
+  });
+
+  it("should generate stats_summary evidence for each speaker", () => {
+    const enriched = enrichEvidencePack(transcript, stats);
+    const summaries = enriched.filter(e => e.type === "stats_summary");
+    expect(summaries.length).toBe(2); // One per speaker
+    expect(summaries.every(e => e.confidence === 0.95)).toBe(true);
+  });
+
+  it("should detect interaction patterns (agree signals)", () => {
+    const enriched = enrichEvidencePack(transcript, stats);
+    const interactions = enriched.filter(e => e.type === "interaction_pattern");
+    expect(interactions.length).toBeGreaterThanOrEqual(1);
+    // Rice's "I agree" should be detected
+    const agreeEvidence = interactions.find(e => e.quote.toLowerCase().includes("agree"));
+    expect(agreeEvidence).toBeDefined();
   });
 });
