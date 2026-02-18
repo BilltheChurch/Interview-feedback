@@ -9,7 +9,7 @@ import {
   type ReconcileUtterance,
   type ReconcileSpeakerEvent,
 } from "../src/reconcile";
-import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats, memoAssistedBinding } from "../src/finalize_v2";
+import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats, memoAssistedBinding, generateStatsObservations } from "../src/finalize_v2";
 import type { SpeakerLogs, SpeakerMapItem } from "../src/types_v2";
 import type { GlobalClusterResult, CachedEmbedding } from "../src/providers/types";
 
@@ -879,5 +879,56 @@ describe("memoAssistedBinding", () => {
 
     const result = memoAssistedBinding({ clusters, bindings: {}, bindingMeta: {}, transcript, memos, roster: ["Rice"] });
     expect(result.newBindings["c1"]).toBeUndefined();
+  });
+});
+
+/* ── generateStatsObservations ───────────────── */
+
+describe("generateStatsObservations", () => {
+  it("should generate insights about talk time distribution", () => {
+    const stats = [
+      { speaker_key: "Tina", speaker_name: "Tina", talk_time_ms: 120000, talk_time_pct: 0.42, turns: 12, silence_ms: 0, interruptions: 2, interrupted_by_others: 0 },
+      { speaker_key: "Rice", speaker_name: "Rice", talk_time_ms: 50000, talk_time_pct: 0.18, turns: 5, silence_ms: 0, interruptions: 0, interrupted_by_others: 1 },
+      { speaker_key: "Daisy", speaker_name: "Daisy", talk_time_ms: 60000, talk_time_pct: 0.21, turns: 8, silence_ms: 0, interruptions: 1, interrupted_by_others: 1 },
+    ];
+    const observations = generateStatsObservations(stats, 290000);
+    expect(observations.length).toBeGreaterThanOrEqual(2);
+    // Should mention the highest speaker
+    expect(observations.some(o => o.includes("Tina"))).toBe(true);
+  });
+
+  it("should mention the lowest speaker when multiple speakers exist", () => {
+    const stats = [
+      { speaker_key: "Tina", speaker_name: "Tina", talk_time_ms: 120000, talk_time_pct: 0.60, turns: 12, silence_ms: 0, interruptions: 0, interrupted_by_others: 0 },
+      { speaker_key: "Rice", speaker_name: "Rice", talk_time_ms: 30000, talk_time_pct: 0.15, turns: 3, silence_ms: 0, interruptions: 0, interrupted_by_others: 0 },
+    ];
+    const observations = generateStatsObservations(stats, 200000);
+    expect(observations.some(o => o.includes("Rice"))).toBe(true);
+  });
+
+  it("should mention interruption patterns", () => {
+    const stats = [
+      { speaker_key: "A", speaker_name: "A", talk_time_ms: 60000, talk_time_pct: 0.50, turns: 6, silence_ms: 0, interruptions: 3, interrupted_by_others: 1 },
+      { speaker_key: "B", speaker_name: "B", talk_time_ms: 60000, talk_time_pct: 0.50, turns: 6, silence_ms: 0, interruptions: 0, interrupted_by_others: 3 },
+    ];
+    const observations = generateStatsObservations(stats, 120000);
+    expect(observations.some(o => o.includes("打断"))).toBe(true);
+    expect(observations.some(o => o.includes("A"))).toBe(true);
+  });
+
+  it("should include total duration context", () => {
+    const stats = [
+      { speaker_key: "A", speaker_name: "A", talk_time_ms: 60000, talk_time_pct: 1.0, turns: 6, silence_ms: 0, interruptions: 0, interrupted_by_others: 0 },
+    ];
+    const observations = generateStatsObservations(stats, 120000);
+    expect(observations.some(o => o.includes("2分"))).toBe(true);
+  });
+
+  it("should return empty array when no named speakers", () => {
+    const stats = [
+      { speaker_key: "unknown", speaker_name: "unknown", talk_time_ms: 60000, talk_time_pct: 1.0, turns: 6, silence_ms: 0, interruptions: 0, interrupted_by_others: 0 },
+    ];
+    const observations = generateStatsObservations(stats, 60000);
+    expect(observations).toEqual([]);
   });
 });

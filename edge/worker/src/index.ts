@@ -12,8 +12,11 @@ import {
   computeSpeakerStats,
   computeUnknownRatio,
   enforceQualityGates,
+  enrichEvidencePack,
   extractMemoNames,
+  generateStatsObservations,
   addStageMetadata,
+  memoAssistedBinding,
   validatePersonFeedbackEvidence
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
@@ -4904,6 +4907,27 @@ export class MeetingSessionDO extends DurableObject<Env> {
       mergedByStream.students = mergeUtterances(rawByStream.students);
       await this.storeUtterancesMergedByStream(mergedByStream);
 
+      // ── Memo-assisted binding: resolve unidentified clusters using teacher notes ──
+      const rosterNames = (state.roster ?? []).map(r => r.name).filter(Boolean);
+      const memoBindResult = memoAssistedBinding({
+        clusters: state.clusters.map(c => ({ cluster_id: c.cluster_id, turn_ids: [] })),
+        bindings: state.bindings,
+        bindingMeta: state.cluster_binding_meta,
+        transcript,
+        memos,
+        roster: rosterNames,
+      });
+      for (const [clusterId, name] of Object.entries(memoBindResult.newBindings)) {
+        state.bindings[clusterId] = name;
+        state.cluster_binding_meta[clusterId] = {
+          participant_name: name,
+          source: "name_extract",
+          confidence: 0.7,
+          locked: false,
+          updated_at: new Date().toISOString(),
+        };
+      }
+
       const unresolvedClusterCount = state.clusters.filter((cluster) => {
         const bound = state.bindings[cluster.cluster_id];
         const meta = state.cluster_binding_meta[cluster.cluster_id];
@@ -4947,6 +4971,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
       const enrichedMemos = addStageMetadata(memos, configStages);
       let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
+
+      // ── Enrich evidence pack with transcript quotes, stats summaries, interaction patterns ──
+      const enrichedEvidence = enrichEvidencePack(transcript, stats);
+      evidence = [...evidence, ...enrichedEvidence];
+
+      // ── Generate stats observations for LLM context ──
+      const audioDurationMs = transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+      const statsObservations = generateStatsObservations(stats, audioDurationMs);
 
       // Keep legacy evidence + memo-first as fallback baseline
       const legacyEvidence = buildEvidence({ memos, transcript });
@@ -5105,6 +5137,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
             stages: contextStages.length > 0 ? contextStages : configStages,
             locale,
             nameAliases: configNameAliases,
+            statsObservations,
           });
 
           const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
@@ -5640,11 +5673,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const enrichedMemos = addStageMetadata(memos, (state.config as Record<string, unknown>)?.stages as string[] ?? []);
       const knownSpeakers = mergedStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
       const memoBindings = extractMemoNames(enrichedMemos, knownSpeakers);
-      const evidence = buildMultiEvidence({
+      let evidence = buildMultiEvidence({
         memos: enrichedMemos,
         transcript: finalTranscript as TranscriptItem[],
         bindings: memoBindings
       });
+
+      // ── Enrich evidence pack with transcript quotes, stats summaries, interaction patterns ──
+      const tier2EnrichedEvidence = enrichEvidencePack(finalTranscript as TranscriptItem[], mergedStats);
+      evidence = [...evidence, ...tier2EnrichedEvidence];
+
+      // ── Generate stats observations for LLM context ──
+      const tier2AudioDurationMs = finalTranscript.length > 0 ? Math.max(...finalTranscript.map(u => u.end_ms)) : 0;
+      const tier2StatsObservations = generateStatsObservations(mergedStats, tier2AudioDurationMs);
 
       const locale = getSessionLocale(state, this.env);
       const fullConfig = (state.config ?? {}) as Record<string, unknown>;
@@ -5676,6 +5717,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         stages: contextStages.length > 0 ? contextStages : configStages,
         locale,
         nameAliases: configNameAliases,
+        statsObservations: tier2StatsObservations,
       });
       const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
       if (synthResult.warnings.length > 0) {

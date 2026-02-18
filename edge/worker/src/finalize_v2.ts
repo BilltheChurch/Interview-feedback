@@ -235,6 +235,56 @@ export function computeSpeakerStats(transcript: TranscriptItem[]): SpeakerStatIt
   return [...statMap.values()].sort((a, b) => b.talk_time_ms - a.talk_time_ms);
 }
 
+export function generateStatsObservations(
+  stats: SpeakerStatItem[],
+  audioDurationMs: number
+): string[] {
+  const observations: string[] = [];
+  const named = stats.filter(s => s.speaker_name && s.speaker_name !== "unknown");
+  if (named.length === 0) return observations;
+
+  const sorted = [...named].sort((a, b) => b.talk_time_ms - a.talk_time_ms);
+
+  // 1. Highest speaker
+  const top = sorted[0];
+  const topPct = Math.round((top.talk_time_pct ?? 0) * 100);
+  observations.push(
+    `${top.speaker_name} 的发言时间占比最高 (${topPct}%)，发言 ${top.turns} 次` +
+    (sorted.length > 1 ? `，显著领先其他参与者` : "")
+  );
+
+  // 2. Lowest speaker
+  if (sorted.length > 1) {
+    const bottom = sorted[sorted.length - 1];
+    const bottomPct = Math.round((bottom.talk_time_pct ?? 0) * 100);
+    const avgTurnMs = bottom.turns > 0 ? Math.round(bottom.talk_time_ms / bottom.turns / 1000) : 0;
+    observations.push(
+      `${bottom.speaker_name} 发言次数最少 (${bottom.turns} 次，占比 ${bottomPct}%)` +
+      (avgTurnMs > 0 ? `，但每次发言平均时长 ${avgTurnMs}s` : "")
+    );
+  }
+
+  // 3. Interruption patterns
+  const interrupters = named.filter(s => s.interruptions > 0);
+  if (interrupters.length > 0) {
+    const topInt = [...interrupters].sort((a, b) => b.interruptions - a.interruptions)[0];
+    observations.push(
+      `${topInt.speaker_name} 打断他人 ${topInt.interruptions} 次` +
+      (topInt.interrupted_by_others > 0 ? `，自身也被打断 ${topInt.interrupted_by_others} 次` : "")
+    );
+  }
+
+  // 4. Total duration context
+  const totalSec = Math.round(audioDurationMs / 1000);
+  const totalMin = Math.floor(totalSec / 60);
+  const remainSec = totalSec % 60;
+  observations.push(
+    `整体讨论时长约 ${totalMin}分${remainSec}秒，共 ${named.length} 位参与者`
+  );
+
+  return observations;
+}
+
 function quoteFromUtterance(text: string, maxLen = 160): string {
   const normalized = text.trim().replace(/\s+/g, " ");
   if (normalized.length <= maxLen) return normalized;
@@ -1435,6 +1485,7 @@ export function buildSynthesizePayload(params: {
   stages: string[];
   locale: string;
   nameAliases?: Record<string, string[]>;
+  statsObservations?: string[];
 }): SynthesizeRequestPayload {
   return {
     session_id: params.sessionId,
@@ -1476,6 +1527,9 @@ export function buildSynthesizePayload(params: {
     locale: params.locale,
     ...(params.nameAliases && Object.keys(params.nameAliases).length > 0
       ? { name_aliases: params.nameAliases }
+      : {}),
+    ...(params.statsObservations && params.statsObservations.length > 0
+      ? { stats_observations: params.statsObservations }
       : {}),
   };
 }
