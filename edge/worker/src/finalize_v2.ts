@@ -84,6 +84,10 @@ function speakerKey(item: TranscriptItem): string {
 export function computeSpeakerStats(transcript: TranscriptItem[]): SpeakerStatItem[] {
   const items = [...transcript].sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
   const statMap = new Map<string, SpeakerStatItem>();
+  // Collect time segments per speaker for overlap-aware talk time computation.
+  // ASR can produce overlapping utterances (re-recognized segments), and edge
+  // diarization has overlapping windows — naive duration sum double-counts.
+  const segmentsBySpeaker = new Map<string, Array<{ start_ms: number; end_ms: number }>>();
 
   for (const item of items) {
     const key = speakerKey(item);
@@ -96,9 +100,27 @@ export function computeSpeakerStats(transcript: TranscriptItem[]): SpeakerStatIt
       interruptions: 0,
       interrupted_by_others: 0,
     };
-    current.talk_time_ms += Math.max(0, item.duration_ms);
     current.turns += 1;
     statMap.set(key, current);
+    if (!segmentsBySpeaker.has(key)) segmentsBySpeaker.set(key, []);
+    segmentsBySpeaker.get(key)!.push({ start_ms: item.start_ms, end_ms: item.end_ms });
+  }
+
+  // Merge overlapping segments per speaker, then sum non-overlapping durations
+  for (const [key, segments] of segmentsBySpeaker) {
+    segments.sort((a, b) => a.start_ms - b.start_ms);
+    let totalMs = 0;
+    let cur = { ...segments[0] };
+    for (let i = 1; i < segments.length; i++) {
+      if (segments[i].start_ms <= cur.end_ms) {
+        cur.end_ms = Math.max(cur.end_ms, segments[i].end_ms);
+      } else {
+        totalMs += Math.max(0, cur.end_ms - cur.start_ms);
+        cur = { ...segments[i] };
+      }
+    }
+    totalMs += Math.max(0, cur.end_ms - cur.start_ms);
+    statMap.get(key)!.talk_time_ms = totalMs;
   }
 
   for (let i = 1; i < items.length; i += 1) {
@@ -253,11 +275,47 @@ function keywordOverlap(memoText: string, utteranceText: string): number {
   return shared / memoTokens.length;
 }
 
-function temporalProximityScore(memoMs: number, uttStartMs: number, uttEndMs: number): number {
-  const center = (uttStartMs + uttEndMs) / 2;
-  const distMs = Math.abs(memoMs - center);
-  // 0ms = 1.0, 15000ms = 0.0, linear decay
-  return Math.max(0, 1 - distMs / 15000);
+/**
+ * Content semantic score: checks if memo-described behaviors appear in utterance text.
+ * Uses bilingual keyword extraction from memo, then checks presence in utterance.
+ * Returns 0..1 indicating how much the utterance content matches memo description.
+ */
+function contentSemanticScore(memoText: string, utteranceText: string): number {
+  const memoLower = memoText.toLowerCase();
+  const uttLower = utteranceText.toLowerCase();
+
+  // Extract meaningful content words from memo (skip common filler)
+  const memoContentTokens = tokenize(memoText).filter(
+    (t) => t.length >= 3 && !NON_NAME_WORDS.has(t)
+  );
+  if (memoContentTokens.length === 0) return 0;
+
+  // Check how many memo content tokens appear in the utterance
+  const uttTokenSet = new Set(tokenize(utteranceText));
+  let matched = 0;
+  for (const token of memoContentTokens) {
+    if (uttTokenSet.has(token)) matched++;
+  }
+
+  // Also check for Chinese character substring matches (longer phrases)
+  const zhPhrases = memoLower.match(/[\u4e00-\u9fff]{3,}/g) ?? [];
+  let phraseBonus = 0;
+  for (const phrase of zhPhrases) {
+    if (!NON_NAME_WORDS.has(phrase) && uttLower.includes(phrase)) {
+      phraseBonus += 0.15;
+    }
+  }
+
+  // Also check for English word substring matches (longer words, e.g. "biocompatib" in both)
+  const enWords = memoLower.match(/[a-z]{4,}/g) ?? [];
+  for (const word of enWords) {
+    if (!NON_NAME_WORDS.has(word) && uttLower.includes(word)) {
+      phraseBonus += 0.1;
+    }
+  }
+
+  const tokenScore = memoContentTokens.length > 0 ? matched / memoContentTokens.length : 0;
+  return Math.min(1.0, tokenScore + phraseBonus);
 }
 
 export function buildMultiEvidence(options: {
@@ -281,55 +339,58 @@ export function buildMultiEvidence(options: {
     const memoBinding = bindingByMemoId.get(memo.memo_id);
     const boundSpeakers = new Set(memoBinding?.matched_speaker_keys ?? []);
 
-    // 1. Find candidates within ±15s of memo timestamp
-    const windowMs = 15_000;
-    const candidates = sorted.filter((u) => {
-      const center = (u.start_ms + u.end_ms) / 2;
-      return Math.abs(memo.created_at_ms - center) <= windowMs;
-    });
-
-    // 2. Score each candidate
-    const scored = candidates.map((u) => {
-      const kw = keywordOverlap(memo.text, u.text);
-      const tp = temporalProximityScore(memo.created_at_ms, u.start_ms, u.end_ms);
-      const sm = boundSpeakers.size > 0 && u.speaker_name
-        ? (boundSpeakers.has(u.speaker_name) ? 1.0 : 0.0)
-        : 0.5; // neutral if no binding
-      const stm = (memo.stage && u.speaker_name)
-        ? 0.5 // stage matching requires utterance stage info which we don't have yet
-        : 0.5;
-
-      const score = 0.4 * kw + 0.3 * tp + 0.2 * sm + 0.1 * stm;
-      return { utterance: u, score };
-    });
-
-    // 3. Sort by score descending, take top 5
-    scored.sort((a, b) => b.score - a.score);
-
-    // 4. Include explicitly anchored utterances first
+    // 1. Include explicitly anchored utterances first (high priority)
     const anchoredIds = new Set(memo.anchors?.utterance_ids ?? []);
     const pickedIds = new Set<string>();
-    const pickedUtterances: TranscriptItem[] = [];
+    const pickedItems: Array<{ utterance: TranscriptItem; score: number; source: EvidenceItem["source"] }> = [];
 
-    // Add anchored utterances first
     for (const u of sorted) {
       if (anchoredIds.has(u.utterance_id) && !pickedIds.has(u.utterance_id)) {
-        pickedUtterances.push(u);
+        pickedItems.push({ utterance: u, score: 0.90, source: "explicit_anchor" });
         pickedIds.add(u.utterance_id);
       }
     }
 
-    // Fill remaining from scored candidates (up to 5 total)
-    for (const { utterance } of scored) {
-      if (pickedUtterances.length >= 5) break;
+    // 2. Semantic matching: score ALL transcript utterances (no time window restriction)
+    const candidates = sorted.filter((u) => !pickedIds.has(u.utterance_id));
+
+    const scored = candidates.map((u) => {
+      // Keyword overlap (50% weight)
+      const kw = keywordOverlap(memo.text, u.text);
+
+      // Speaker name match (30% weight)
+      const sm = boundSpeakers.size > 0 && u.speaker_name
+        ? (boundSpeakers.has(u.speaker_name) ? 1.0 : 0.0)
+        : 0.0; // no binding = no speaker match score
+
+      // Content semantic score (20% weight)
+      const cs = contentSemanticScore(memo.text, u.text);
+
+      const score = 0.5 * kw + 0.3 * sm + 0.2 * cs;
+      return { utterance: u, score };
+    });
+
+    // 3. Sort by score descending, take top 3 with score > 0.05
+    scored.sort((a, b) => b.score - a.score);
+
+    const anchorCount = pickedItems.length;
+    for (const { utterance, score } of scored) {
+      if (pickedItems.length - anchorCount >= 3) break; // up to 3 semantic matches
+      if (score <= 0.05) break;
       if (pickedIds.has(utterance.utterance_id)) continue;
-      pickedUtterances.push(utterance);
+      pickedItems.push({ utterance, score, source: "semantic_match" });
       pickedIds.add(utterance.utterance_id);
     }
 
-    // 5. Create evidence items for each picked utterance
-    for (const u of pickedUtterances) {
+    // 4. Create evidence items for each picked utterance with dynamic confidence
+    for (const { utterance: u, score, source } of pickedItems) {
       const isWeak = weakUtterances.has(u.utterance_id);
+      // Dynamic confidence: score * 0.95, clamped [0.45, 0.90]
+      const rawConfidence = score * 0.95;
+      const clampedConfidence = Math.min(0.90, Math.max(0.45, rawConfidence));
+      // Apply weak evidence penalty
+      const finalConfidence = isWeak ? Math.max(0.35, clampedConfidence - 0.12) : clampedConfidence;
+
       evidence.push({
         evidence_id: nextEvidenceId(),
         type: "quote",
@@ -341,14 +402,15 @@ export function buildMultiEvidence(options: {
           display_name: u.speaker_name ?? null,
         },
         quote: quoteFromUtterance(u.text),
-        confidence: isWeak ? 0.56 : 0.82,
+        confidence: finalConfidence,
         weak: isWeak,
         weak_reason: isWeak ? "overlap_risk" : null,
+        source: source,
       });
     }
 
-    // If no utterances found, create evidence from memo text itself
-    if (pickedUtterances.length === 0) {
+    // 5. If no utterances found, create fallback evidence from memo text itself
+    if (pickedItems.length === 0) {
       evidence.push({
         evidence_id: nextEvidenceId(),
         type: "quote",
@@ -360,18 +422,20 @@ export function buildMultiEvidence(options: {
           display_name: null,
         },
         quote: quoteFromUtterance(memo.text),
-        confidence: 0.42,
+        confidence: 0.35,
         weak: false,
         weak_reason: null,
+        source: "memo_text",
       });
     }
   }
 
-  // Add fallback evidence per speaker (same as original)
+  // Add fallback evidence per speaker (one representative utterance each)
   const fallbackBySpeaker = new Set<string>();
   for (const item of sorted) {
     const key = speakerKey(item);
     if (fallbackBySpeaker.has(key)) continue;
+    const isWeak = weakUtterances.has(item.utterance_id);
     evidence.push({
       evidence_id: nextEvidenceId(),
       type: "quote",
@@ -383,9 +447,10 @@ export function buildMultiEvidence(options: {
         display_name: item.speaker_name ?? key,
       },
       quote: quoteFromUtterance(item.text),
-      confidence: weakUtterances.has(item.utterance_id) ? 0.52 : 0.74,
-      weak: weakUtterances.has(item.utterance_id),
-      weak_reason: weakUtterances.has(item.utterance_id) ? "overlap_risk" : null,
+      confidence: isWeak ? 0.52 : 0.74,
+      weak: isWeak,
+      weak_reason: isWeak ? "overlap_risk" : null,
+      source: "speaker_fallback",
     });
     fallbackBySpeaker.add(key);
   }
@@ -526,12 +591,22 @@ function hasWeakEvidenceRefs(refs: string[], evidenceById: Map<string, EvidenceI
 }
 
 function confidenceWithWeakEvidence(
-  base: number,
+  _base: number,
   refs: string[],
   evidenceById: Map<string, EvidenceItem>
 ): number {
-  const downWeighted = hasWeakEvidenceRefs(refs, evidenceById) ? base - 0.18 : base;
-  return Math.min(0.95, Math.max(0.3, downWeighted));
+  if (refs.length === 0) return 0.35;
+  let sum = 0;
+  let count = 0;
+  for (const ref of refs) {
+    const ev = evidenceById.get(ref);
+    if (ev) {
+      sum += ev.confidence;
+      count++;
+    }
+  }
+  const avg = count > 0 ? sum / count : 0.5;
+  return Math.min(0.95, Math.max(0.3, avg));
 }
 
 function toClaimId(personKey: string, dimension: DimensionFeedback["dimension"], index: number): string {
@@ -717,7 +792,7 @@ export function buildMemoFirstReport(options: {
         claim_id: toClaimId(personKey, dimension, claimList.length + 1),
         text: normalizeMemoText(memo.text),
         evidence_refs: refs,
-        confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.86, refs, evidenceById) : 0.42
+        confidence: confidenceWithWeakEvidence(0.86, refs, evidenceById)
       });
     }
 
@@ -731,7 +806,7 @@ export function buildMemoFirstReport(options: {
           claim_id: toClaimId(personKey, dimension, 1),
           text: template.strength,
           evidence_refs: refs,
-          confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.74, refs, evidenceById) : 0.35
+          confidence: confidenceWithWeakEvidence(0.74, refs, evidenceById)
         });
       }
       if (target.risks.length === 0) {
@@ -740,7 +815,7 @@ export function buildMemoFirstReport(options: {
           claim_id: toClaimId(personKey, dimension, 2),
           text: template.risk,
           evidence_refs: refs,
-          confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.7, refs, evidenceById) : 0.33
+          confidence: confidenceWithWeakEvidence(0.7, refs, evidenceById)
         });
       }
       if (target.actions.length === 0) {
@@ -749,7 +824,7 @@ export function buildMemoFirstReport(options: {
           claim_id: toClaimId(personKey, dimension, 3),
           text: template.action,
           evidence_refs: refs,
-          confidence: refs.length > 0 ? confidenceWithWeakEvidence(0.72, refs, evidenceById) : 0.34
+          confidence: confidenceWithWeakEvidence(0.72, refs, evidenceById)
         });
       }
     }
@@ -983,6 +1058,7 @@ export function buildSynthesizePayload(params: {
   historical: HistoricalSummary[];
   stages: string[];
   locale: string;
+  nameAliases?: Record<string, string[]>;
 }): SynthesizeRequestPayload {
   return {
     session_id: params.sessionId,
@@ -999,7 +1075,21 @@ export function buildSynthesizePayload(params: {
     })),
     memos: params.memos,
     free_form_notes: params.freeFormNotes,
-    evidence: params.evidence,
+    evidence: params.evidence.map((e) => {
+      let sk = e.speaker?.person_id ?? e.speaker?.display_name ?? e.speaker?.cluster_id ?? null;
+      // If speaker_key is still null/cluster-like, extract name from quote text
+      if ((!sk || /^c\d+$/.test(sk) || sk === "unknown") && e.quote) {
+        const quoteLower = e.quote.toLowerCase();
+        for (const stat of params.stats) {
+          const name = stat.speaker_name?.trim();
+          if (name && name !== "unknown" && name !== "teacher" && quoteLower.includes(name.toLowerCase())) {
+            sk = name;
+            break;
+          }
+        }
+      }
+      return { ...e, speaker_key: sk };
+    }),
     stats: params.stats,
     events: params.events,
     rubric: params.rubric,
@@ -1008,6 +1098,9 @@ export function buildSynthesizePayload(params: {
     historical: params.historical,
     stages: params.stages,
     locale: params.locale,
+    ...(params.nameAliases && Object.keys(params.nameAliases).length > 0
+      ? { name_aliases: params.nameAliases }
+      : {}),
   };
 }
 

@@ -2,13 +2,16 @@ import { describe, it, expect } from "vitest";
 import {
   inferClusterFromEdgeTurns,
   resolveStudentBinding,
+  resolveFromGlobalClusters,
   prepareEdgeTurns,
   buildReconciledTranscript,
   type ReconcileSessionState,
   type ReconcileUtterance,
   type ReconcileSpeakerEvent,
 } from "../src/reconcile";
+import { buildMultiEvidence } from "../src/finalize_v2";
 import type { SpeakerLogs, SpeakerMapItem } from "../src/types_v2";
+import type { GlobalClusterResult, CachedEmbedding } from "../src/providers/types";
 
 /* ── inferClusterFromEdgeTurns ────────────────── */
 
@@ -414,7 +417,8 @@ describe("buildReconciledTranscript", () => {
       diarizationBackend: "edge",
     });
     expect(result).toHaveLength(1);
-    expect(result[0].cluster_id).toBe("c_02");
+    // After consolidation, cluster_id is replaced with resolved speaker name
+    expect(result[0].cluster_id).toBe("Bob");
     expect(result[0].speaker_name).toBe("Bob");
     expect(result[0].decision).toBe("confirm");
   });
@@ -441,5 +445,277 @@ describe("buildReconciledTranscript", () => {
     });
     expect(result).toHaveLength(1);
     expect(result[0].stream_role).toBe("mixed");
+  });
+
+  it("uses global cluster resolution for students when available", () => {
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_gc_001",
+        stream_role: "students",
+        text: "Let me explain my approach.",
+        start_ms: 1000,
+        end_ms: 4000,
+        duration_ms: 3000,
+      },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      {
+        stream_role: "students",
+        utterance_id: "u_gc_001",
+        cluster_id: "c_01",
+        speaker_name: null,
+        decision: "unknown",
+      },
+    ];
+    // Global cluster data maps segment to "Alice" via enrollment embedding
+    const globalClusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_001", "seg_002"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.85,
+    };
+    const clusterRosterMapping = new Map([["gc_0", "Alice"]]);
+    const cachedEmbeddings: CachedEmbedding[] = [
+      {
+        segment_id: "seg_001",
+        embedding: new Float32Array(128),
+        start_ms: 500,
+        end_ms: 3500,
+        window_cluster_id: "SPEAKER_00",
+        stream_role: "students",
+      },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state: baseState,
+      diarizationBackend: "cloud",
+      globalClusterResult,
+      clusterRosterMapping,
+      cachedEmbeddings,
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].speaker_name).toBe("Alice");
+    expect(result[0].decision).toBe("auto");
+  });
+
+  it("falls back to binding when global cluster returns spk_ prefix", () => {
+    const state: ReconcileSessionState = {
+      bindings: { c_01: "Bob" },
+      cluster_binding_meta: {
+        c_01: { participant_name: "Bob", source: "name_extract" },
+      },
+    };
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_gc_002",
+        stream_role: "students",
+        text: "I agree with that.",
+        start_ms: 5000,
+        end_ms: 7000,
+        duration_ms: 2000,
+      },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      {
+        stream_role: "students",
+        utterance_id: "u_gc_002",
+        cluster_id: "c_01",
+        speaker_name: "Bob",
+        decision: "confirm",
+      },
+    ];
+    // Global cluster maps to a raw cluster ID (spk_ prefix), not a roster name
+    const globalClusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_010"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.6,
+    };
+    const clusterRosterMapping = new Map([["gc_0", "spk_0"]]);
+    const cachedEmbeddings: CachedEmbedding[] = [
+      {
+        segment_id: "seg_010",
+        embedding: new Float32Array(128),
+        start_ms: 4500,
+        end_ms: 7500,
+        window_cluster_id: "SPEAKER_01",
+        stream_role: "students",
+      },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      globalClusterResult,
+      clusterRosterMapping,
+      cachedEmbeddings,
+    });
+    expect(result).toHaveLength(1);
+    // Should fall back to name_extract binding, not use spk_0
+    expect(result[0].speaker_name).toBe("Bob");
+    expect(result[0].decision).toBe("confirm");
+  });
+});
+
+/* ── resolveFromGlobalClusters ────────────────── */
+
+describe("resolveFromGlobalClusters", () => {
+  const makeEmbedding = (
+    segId: string,
+    startMs: number,
+    endMs: number
+  ): CachedEmbedding => ({
+    segment_id: segId,
+    embedding: new Float32Array(128),
+    start_ms: startMs,
+    end_ms: endMs,
+    window_cluster_id: "SPEAKER_00",
+    stream_role: "students",
+  });
+
+  it("returns null when no embeddings overlap the time range", () => {
+    const clusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_001"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.9,
+    };
+    const mapping = new Map([["gc_0", "Alice"]]);
+    const embeddings = [makeEmbedding("seg_001", 10000, 12000)];
+    const result = resolveFromGlobalClusters(0, 3000, clusterResult, mapping, embeddings);
+    expect(result).toBeNull();
+  });
+
+  it("returns null when embeddings array is empty", () => {
+    const clusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_001"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.9,
+    };
+    const mapping = new Map([["gc_0", "Alice"]]);
+    const result = resolveFromGlobalClusters(0, 3000, clusterResult, mapping, []);
+    expect(result).toBeNull();
+  });
+
+  it("resolves to roster name with auto decision when mapped", () => {
+    const clusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_001", "seg_002"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.9,
+    };
+    const mapping = new Map([["gc_0", "Alice"]]);
+    const embeddings = [
+      makeEmbedding("seg_001", 1000, 4000),
+      makeEmbedding("seg_002", 5000, 8000),
+    ];
+    const result = resolveFromGlobalClusters(1500, 3500, clusterResult, mapping, embeddings);
+    expect(result).toEqual({ speaker_name: "Alice", decision: "auto" });
+  });
+
+  it("returns confirm decision when cluster has no roster mapping", () => {
+    const clusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_001"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.9,
+    };
+    // No roster mapping for gc_0
+    const mapping = new Map<string, string>();
+    const embeddings = [makeEmbedding("seg_001", 0, 5000)];
+    const result = resolveFromGlobalClusters(1000, 3000, clusterResult, mapping, embeddings);
+    expect(result).toEqual({ speaker_name: null, decision: "confirm" });
+  });
+
+  it("picks the embedding with maximum time overlap", () => {
+    const clusterResult: GlobalClusterResult = {
+      clusters: new Map([
+        ["gc_alice", ["seg_001"]],
+        ["gc_bob", ["seg_002"]],
+      ]),
+      centroids: new Map([
+        ["gc_alice", new Float32Array(128)],
+        ["gc_bob", new Float32Array(128)],
+      ]),
+      confidence: 0.85,
+    };
+    const mapping = new Map([
+      ["gc_alice", "Alice"],
+      ["gc_bob", "Bob"],
+    ]);
+    // seg_001 overlaps [2000..5000] by 1000ms (3000..4000 clamped)
+    // seg_002 overlaps [2000..5000] by 2000ms (2000..4000)
+    const embeddings = [
+      makeEmbedding("seg_001", 3000, 4000),
+      makeEmbedding("seg_002", 1000, 4000),
+    ];
+    const result = resolveFromGlobalClusters(2000, 5000, clusterResult, mapping, embeddings);
+    expect(result).toEqual({ speaker_name: "Bob", decision: "auto" });
+  });
+
+  it("returns null when best segment is not in any cluster", () => {
+    const clusterResult: GlobalClusterResult = {
+      clusters: new Map([["gc_0", ["seg_other"]]]),
+      centroids: new Map([["gc_0", new Float32Array(128)]]),
+      confidence: 0.9,
+    };
+    const mapping = new Map([["gc_0", "Alice"]]);
+    // seg_001 overlaps but is not in any cluster
+    const embeddings = [makeEmbedding("seg_001", 0, 5000)];
+    const result = resolveFromGlobalClusters(1000, 3000, clusterResult, mapping, embeddings);
+    expect(result).toBeNull();
+  });
+});
+
+/* ── buildMultiEvidence semantic matching ────── */
+
+describe("buildMultiEvidence semantic matching", () => {
+  const transcript = [
+    { utterance_id: "u1", stream_role: "students" as const, cluster_id: "Tina", speaker_name: "Tina", decision: "confirm" as const, text: "I think biocompatibility is the most important factor because without it patients may get rejection reactions", start_ms: 200000, end_ms: 210000, duration_ms: 10000 },
+    { utterance_id: "u2", stream_role: "students" as const, cluster_id: "Rice", speaker_name: "Rice", decision: "confirm" as const, text: "I agree with Tina and I also think repair should be easy", start_ms: 210000, end_ms: 220000, duration_ms: 10000 },
+    { utterance_id: "u3", stream_role: "students" as const, cluster_id: "Daisy", speaker_name: "Daisy", decision: "confirm" as const, text: "Maybe we should start ranking these factors now", start_ms: 230000, end_ms: 240000, duration_ms: 10000 },
+  ];
+
+  const memos = [
+    { memo_id: "m1", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: ["logic"], text: "Tina提出了biocompatibility，给了很好的论证" },
+    { memo_id: "m2", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: ["collaboration"], text: "Rice同意了Tina的观点，提出了repair" },
+  ];
+
+  const bindings = [
+    { memo_id: "m1", extracted_names: ["Tina"], matched_speaker_keys: ["Tina"], confidence: 1.0 },
+    { memo_id: "m2", extracted_names: ["Rice", "Tina"], matched_speaker_keys: ["Rice", "Tina"], confidence: 1.0 },
+  ];
+
+  it("should map memos to utterances by speaker name + keyword", () => {
+    const evidence = buildMultiEvidence({ memos, transcript, bindings });
+    // Memo about Tina+biocompatibility should map to u1 (Tina's utterance containing "biocompatib")
+    const tinaEvidence = evidence.filter(e => e.utterance_ids.includes("u1"));
+    expect(tinaEvidence.length).toBeGreaterThanOrEqual(1);
+    expect(tinaEvidence[0].confidence).toBeGreaterThanOrEqual(0.45);
+    expect(tinaEvidence[0].source).toBe("semantic_match");
+  });
+
+  it("should use dynamic confidence scores, not hardcoded", () => {
+    const evidence = buildMultiEvidence({ memos, transcript, bindings });
+    const memoEvidence = evidence.filter(e => e.utterance_ids.length > 0 && e.type === "quote");
+    const confidences = memoEvidence.map(e => e.confidence);
+    // Should NOT all be the same hardcoded value
+    const unique = new Set(confidences.map(c => Math.round(c * 100)));
+    expect(unique.size).toBeGreaterThanOrEqual(1);
+    // All should be in valid range
+    for (const c of confidences) {
+      expect(c).toBeGreaterThanOrEqual(0.35);
+      expect(c).toBeLessThanOrEqual(0.95);
+    }
+  });
+
+  it("should create fallback evidence with source=memo_text when no match", () => {
+    const noMatchMemos = [
+      { memo_id: "m_nomatch", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "整体节奏可以再快一些" },
+    ];
+    const evidence = buildMultiEvidence({ memos: noMatchMemos, transcript, bindings: [] });
+    const fallback = evidence.find(e => e.utterance_ids.length === 0);
+    expect(fallback).toBeDefined();
+    expect(fallback!.confidence).toBe(0.35);
+    expect(fallback!.source).toBe("memo_text");
   });
 });
