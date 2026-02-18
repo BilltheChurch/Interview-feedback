@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.schemas import (
     AnalysisReportResponse,
     EvidenceRef,
@@ -276,21 +278,20 @@ class FailingLLM:
         raise Exception("LLM unavailable")
 
 
-def test_synthesize_fallback_on_llm_failure() -> None:
+def test_synthesize_raises_on_llm_failure() -> None:
+    """Synthesize endpoint should raise on LLM failure (no internal fallback).
+    The worker handles the fallback chain: synthesize → report → memo_first."""
     synthesizer = ReportSynthesizer(llm=FailingLLM())
     req = _build_test_request()
-    result = synthesizer.synthesize(req)
-    assert result.quality is not None
-    assert result.quality.report_source == "memo_first_fallback"
-    assert len(result.per_person) >= 1
+    with pytest.raises(Exception):
+        synthesizer.synthesize(req)
 
 
 # ── New tests for P0/P1 fixes ──────────────────────────────────────────────
 
 
-def test_multi_person_fallback_retains_all_speakers() -> None:
-    """Double-fallback (both LLM and ReportGenerator fail) must include ALL
-    speakers from req.stats, not just the first one."""
+def test_multi_person_llm_failure_raises() -> None:
+    """LLM failure in synthesize should raise — worker handles fallback."""
 
     class AlwaysFailingLLM:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
@@ -298,28 +299,16 @@ def test_multi_person_fallback_retains_all_speakers() -> None:
 
     synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
     req = _build_test_request()
-    # Ensure we have 2 speakers in stats
     assert len(req.stats) == 2
 
-    result = synthesizer.synthesize(req)
-    speaker_keys = {p.person_key for p in result.per_person}
-    # Must include both speakers, not just the first
-    assert "Alice" in speaker_keys
-    assert "Interviewer" in speaker_keys
-    assert len(result.per_person) >= 2
+    with pytest.raises(RuntimeError, match="boom"):
+        synthesizer.synthesize(req)
 
 
-def test_no_evidence_ref_is_none_in_any_output() -> None:
-    """No claim in any code path should contain evidence_refs=['none']."""
-
-    class AlwaysFailingLLM:
-        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
-            raise RuntimeError("boom")
-
-    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+def test_no_evidence_ref_is_none_in_success_output() -> None:
+    """No claim in successful synthesis should contain evidence_refs=['none']."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
     req = _build_test_request()
-    # Clear all evidence to trigger the edge case
-    req.evidence = []
     result = synthesizer.synthesize(req)
 
     for person in result.per_person:
@@ -348,15 +337,9 @@ def test_no_pending_assessment_dummy_text() -> None:
                 )
 
 
-def test_no_pending_assessment_in_fallback() -> None:
-    """Even in the double-fallback path, no 'Pending assessment.' or
-    'Assessment pending.' should appear."""
-
-    class AlwaysFailingLLM:
-        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
-            raise RuntimeError("boom")
-
-    synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
+def test_no_pending_assessment_in_success_output() -> None:
+    """Successful synthesis should not contain 'Pending assessment.' dummy text."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
     req = _build_test_request()
     result = synthesizer.synthesize(req)
 
@@ -386,10 +369,8 @@ def test_chinese_token_counting() -> None:
     assert synthesizer._estimate_tokens("") == 0
 
 
-def test_fallback_locale_aware_zh() -> None:
-    """When LLM fails and the request has no evidence (forcing double-fallback),
-    fallback text should be in Chinese when locale is zh-CN."""
-    from unittest.mock import patch
+def test_llm_failure_raises_zh() -> None:
+    """LLM failure should raise for zh-CN locale — worker handles fallback."""
 
     class AlwaysFailingLLM:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
@@ -398,22 +379,12 @@ def test_fallback_locale_aware_zh() -> None:
     synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
     req = _build_test_request()
     req.locale = "zh-CN"
-    # Force double-fallback by making ReportGenerator also fail
-    with patch("app.services.report_generator.ReportGenerator.generate", side_effect=RuntimeError("double boom")):
-        result = synthesizer.synthesize(req)
-
-    for person in result.per_person:
-        for dim in person.dimensions:
-            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
-                assert "暂无法评估" in claim.text or "维度数据不足" in claim.text, (
-                    f"Expected Chinese fallback text, got: {claim.text}"
-                )
+    with pytest.raises(RuntimeError, match="boom"):
+        synthesizer.synthesize(req)
 
 
-def test_fallback_locale_aware_en() -> None:
-    """When LLM fails and the request has no evidence (forcing double-fallback),
-    fallback text should be in English when locale is en."""
-    from unittest.mock import patch
+def test_llm_failure_raises_en() -> None:
+    """LLM failure should raise for en locale — worker handles fallback."""
 
     class AlwaysFailingLLM:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
@@ -422,13 +393,294 @@ def test_fallback_locale_aware_en() -> None:
     synthesizer = ReportSynthesizer(llm=AlwaysFailingLLM())
     req = _build_test_request()
     req.locale = "en"
-    # Force double-fallback by making ReportGenerator also fail
-    with patch("app.services.report_generator.ReportGenerator.generate", side_effect=RuntimeError("double boom")):
-        result = synthesizer.synthesize(req)
+    with pytest.raises(RuntimeError, match="boom"):
+        synthesizer.synthesize(req)
 
-    for person in result.per_person:
-        for dim in person.dimensions:
-            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
-                assert "Insufficient data" in claim.text, (
-                    f"Expected English fallback text, got: {claim.text}"
-                )
+
+# ── Tests for interviewer filtering and empty dimensions ──────────────────
+
+
+def test_interviewer_filtered_from_llm_output() -> None:
+    """LLM output should not include the interviewer (teacher stream_role)."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    speaker_keys = {p.person_key for p in result.per_person}
+    assert "Interviewer" not in speaker_keys, "Interviewer should be filtered out"
+    assert "Alice" in speaker_keys, "Alice (interviewee) should be present"
+
+
+def test_interviewer_filtered_via_session_context() -> None:
+    """When session_context.interviewer_name is set, that person should be excluded."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    req.session_context = SessionContext(
+        mode="1v1",
+        interviewer_name="Interviewer",
+    )
+    result = synthesizer.synthesize(req)
+
+    speaker_keys = {p.person_key for p in result.per_person}
+    assert "Interviewer" not in speaker_keys
+
+
+def test_zero_talk_time_speaker_filtered() -> None:
+    """Speakers with talk_time_ms=0 should be excluded from per_person."""
+
+    class MockLLMWithSilentSpeaker:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "summary_sections": [],
+                    "team_dynamics": {"highlights": [], "risks": []},
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                            for dim in ["leadership", "collaboration", "logic", "structure", "initiative"]
+                        ],
+                        "summary": {"strengths": [], "risks": [], "actions": []},
+                    },
+                    {
+                        "person_key": "Silent",
+                        "display_name": "Silent Person",
+                        "dimensions": [
+                            {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                            for dim in ["leadership", "collaboration", "logic", "structure", "initiative"]
+                        ],
+                        "summary": {"strengths": [], "risks": [], "actions": []},
+                    },
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMWithSilentSpeaker())
+    req = _build_test_request()
+    # Add a silent speaker with 0 talk time
+    req.stats.append(SpeakerStat(speaker_key="Silent", speaker_name="Silent Person", talk_time_ms=0, turns=0))
+    result = synthesizer.synthesize(req)
+
+    speaker_keys = {p.person_key for p in result.per_person}
+    assert "Silent" not in speaker_keys, "Zero talk-time speaker should be filtered out"
+    assert "Alice" in speaker_keys
+
+
+def test_empty_dimension_arrays_allowed() -> None:
+    """DimensionFeedback should accept empty strengths/risks/actions arrays."""
+    from app.schemas import DimensionFeedback
+
+    dim = DimensionFeedback(dimension="leadership", strengths=[], risks=[], actions=[])
+    assert dim.strengths == []
+    assert dim.risks == []
+    assert dim.actions == []
+
+
+def test_dimensions_without_evidence_get_empty_arrays() -> None:
+    """When LLM returns a dimension with no claims, it should have empty arrays (no placeholders)."""
+
+    class MockLLMPartialDimensions:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "summary_sections": [
+                        {"topic": "Summary", "bullets": ["Good [e_000001]"], "evidence_ids": ["e_000001"]}
+                    ],
+                    "team_dynamics": {"highlights": [], "risks": []},
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {
+                                "dimension": "leadership",
+                                "strengths": [
+                                    {"claim_id": "c_Alice_leadership_01", "text": "Led well [e_000001].", "evidence_refs": ["e_000001"], "confidence": 0.85}
+                                ],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            # Other dimensions completely empty
+                            {"dimension": "collaboration", "strengths": [], "risks": [], "actions": []},
+                            {"dimension": "logic", "strengths": [], "risks": [], "actions": []},
+                        ],
+                        "summary": {"strengths": ["Good leader"], "risks": [], "actions": []},
+                    }
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMPartialDimensions())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    assert alice.person_key == "Alice"
+    # All 5 dimensions should be present
+    assert len(alice.dimensions) == 5
+
+    # leadership should have a claim
+    leadership = next(d for d in alice.dimensions if d.dimension == "leadership")
+    assert len(leadership.strengths) == 1
+
+    # collaboration should have empty arrays (no placeholders)
+    collab = next(d for d in alice.dimensions if d.dimension == "collaboration")
+    assert collab.strengths == []
+    assert collab.risks == []
+    assert collab.actions == []
+
+    # structure and initiative (not returned by LLM) should also be empty
+    structure = next(d for d in alice.dimensions if d.dimension == "structure")
+    assert structure.strengths == []
+    initiative = next(d for d in alice.dimensions if d.dimension == "initiative")
+    assert initiative.strengths == []
+
+
+def test_user_prompt_includes_stats_observations() -> None:
+    """Stats observations should appear in the user prompt."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    req.stats_observations = ["Tina spoke most (42%)", "Rice spoke least (15%)"]
+    truncated, _ = synthesizer._truncate_transcript(req.transcript)
+    prompt = synthesizer._build_user_prompt(req, truncated)
+    data = json.loads(prompt)
+    assert "stats_observations" in data
+    assert len(data["stats_observations"]) == 2
+
+
+def test_system_prompt_includes_supporting_utterances_instruction() -> None:
+    """System prompt should instruct LLM to output supporting_utterances."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+    assert "supporting_utterances" in prompt
+
+
+def test_system_prompt_requires_minimum_summary_sections() -> None:
+    """System prompt should require minimum 2 summary sections."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+    assert "2" in prompt  # Should mention "at least 2" or "minimum 2"
+
+
+def test_transcript_truncation_increased() -> None:
+    """Transcript should be truncated at 6000 tokens, not 4000."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    import inspect
+    sig = inspect.signature(synthesizer._truncate_transcript)
+    max_tokens_default = sig.parameters["max_tokens"].default
+    assert max_tokens_default == 6000
+
+
+def test_supporting_utterances_parsed_from_llm_output() -> None:
+    """supporting_utterances from LLM claim output should be parsed into DimensionClaim."""
+
+    class MockLLMWithSupportingUtterances:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "summary_sections": [
+                        {"topic": "Summary", "bullets": ["Good [e_000001]"], "evidence_ids": ["e_000001"]}
+                    ],
+                    "team_dynamics": {"highlights": ["Strong team"], "risks": ["Low energy"]},
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {
+                                "dimension": "leadership",
+                                "strengths": [
+                                    {
+                                        "claim_id": "c_Alice_leadership_01",
+                                        "text": "Led the discussion well [e_000001].",
+                                        "evidence_refs": ["e_000001"],
+                                        "confidence": 0.85,
+                                        "supporting_utterances": ["u1", "u2"],
+                                    }
+                                ],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            *[
+                                {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                                for dim in ["collaboration", "logic", "structure", "initiative"]
+                            ],
+                        ],
+                        "summary": {"strengths": ["Good leader"], "risks": [], "actions": []},
+                    }
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMWithSupportingUtterances())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    leadership = next(d for d in alice.dimensions if d.dimension == "leadership")
+    assert len(leadership.strengths) == 1
+    claim = leadership.strengths[0]
+    assert claim.supporting_utterances == ["u1", "u2"]
+
+
+def test_claim_without_valid_refs_gets_empty_list() -> None:
+    """A claim whose evidence_refs don't match any valid evidence IDs
+    should have refs=[] — NOT auto-filled with arbitrary evidence."""
+
+    class MockLLMInvalidRefs:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "summary_sections": [],
+                    "team_dynamics": {"highlights": [], "risks": []},
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {
+                                "dimension": "leadership",
+                                "strengths": [
+                                    {
+                                        "claim_id": "c_no_refs_01",
+                                        "text": "Good leadership skills.",
+                                        "evidence_refs": ["e_NONEXISTENT"],
+                                        "confidence": 0.80,
+                                    },
+                                    {
+                                        "claim_id": "c_no_refs_02",
+                                        "text": "Clear communication.",
+                                        "evidence_refs": [],
+                                        "confidence": 0.75,
+                                    },
+                                ],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            *[
+                                {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                                for dim in ["collaboration", "logic", "structure", "initiative"]
+                            ],
+                        ],
+                        "summary": {"strengths": [], "risks": [], "actions": []},
+                    }
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMInvalidRefs())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    leadership = next(d for d in alice.dimensions if d.dimension == "leadership")
+
+    # Both claims should have empty evidence_refs (not auto-filled)
+    for claim in leadership.strengths:
+        assert claim.evidence_refs == [], (
+            f"Claim {claim.claim_id} should have empty refs but got {claim.evidence_refs}"
+        )
