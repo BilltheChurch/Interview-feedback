@@ -1583,6 +1583,7 @@ export function buildResultV2(params: {
   sessionId: string;
   finalizedAt: string;
   tentative: boolean;
+  confidenceLevel: "high" | "medium" | "low";
   unresolvedClusterCount: number;
   diarizationBackend: "cloud" | "edge";
   transcript: TranscriptItem[];
@@ -1633,6 +1634,7 @@ export function buildResultV2(params: {
       session_id: params.sessionId,
       finalized_at: params.finalizedAt,
       tentative: params.tentative,
+      confidence_level: params.confidenceLevel,
       unresolved_cluster_count: params.unresolvedClusterCount,
       diarization_backend: params.diarizationBackend,
     },
