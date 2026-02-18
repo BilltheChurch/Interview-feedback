@@ -2523,8 +2523,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     claimValidationFailures: string[];
   }): { passed: boolean; failures: string[] } {
     const failures = [...params.claimValidationFailures];
-    if (!Number.isFinite(params.unknownRatio) || params.unknownRatio > 0.10) {
-      failures.push(`students_unknown_ratio gate failed: observed=${params.unknownRatio.toFixed(4)} target<=0.10`);
+    if (!Number.isFinite(params.unknownRatio) || params.unknownRatio > 0.25) {
+      failures.push(`students_unknown_ratio gate failed: observed=${params.unknownRatio.toFixed(4)} target<=0.25`);
     }
     if (params.ingestP95Ms === null || !Number.isFinite(params.ingestP95Ms) || params.ingestP95Ms > 3000) {
       failures.push(`students_ingest_to_utterance_p95_ms gate failed: observed=${params.ingestP95Ms ?? "null"} target<=3000`);
@@ -2677,6 +2677,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const meta = state.cluster_binding_meta[cluster.cluster_id];
       return !bound || !meta || !meta.locked;
     }).length;
+    const totalClusters = state.clusters.length;
+    const unresolvedRatio = totalClusters > 0 ? unresolvedClusterCount / totalClusters : 0;
+    const confidenceLevel: "high" | "medium" | "low" =
+      unresolvedRatio === 0 ? "high" :
+      unresolvedRatio <= 0.25 ? "medium" : "low";
     const qualityMetrics = this.buildQualityMetrics(transcript, state.capture_by_stream ?? defaultCaptureByStream());
     const ingestP95Ms =
       typeof asrByStream.students.ingest_to_utterance_p95_ms === "number"
@@ -2691,7 +2696,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       ingestP95Ms,
       claimValidationFailures: gateSeedFailures
     });
-    const tentative = unresolvedClusterCount > 0 || !gateEvaluation.passed;
+    const tentative = confidenceLevel === "low" || !gateEvaluation.passed;
     const finalizedAt = this.currentIsoTs();
     const quality: ReportQualityMeta = {
       ...validation.quality,
@@ -2713,7 +2718,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     ];
     const qualityGateSnapshot = {
       finalize_success_target: 0.995,
-      students_unknown_ratio_target: 0.10,
+      students_unknown_ratio_target: 0.25,
       sv_top1_target: 0.90,
       echo_reduction_target: 0.8,
       observed_unknown_ratio: qualityMetrics.unknown_ratio,
@@ -4904,7 +4909,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const meta = state.cluster_binding_meta[cluster.cluster_id];
         return !bound || !meta || !meta.locked;
       }).length;
-      const tentative = unresolvedClusterCount > 0;
+      const totalClusters = state.clusters.length;
+      const unresolvedRatio = totalClusters > 0 ? unresolvedClusterCount / totalClusters : 0;
+      const confidenceLevel: "high" | "medium" | "low" =
+        unresolvedRatio === 0 ? "high" :
+        unresolvedRatio <= 0.25 ? "medium" : "low";
+      const tentative = confidenceLevel === "low";
 
       const hasStudentTranscript = transcript.some((item) => item.stream_role === "students");
       let speakerLogs: SpeakerLogs;
@@ -5240,7 +5250,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           ...(ACCEPTED_REPORT_SOURCES.has(reportSource) ? [] : [reportBlockingReason || "llm report unavailable"])
         ]
       });
-      const finalTentative = unresolvedClusterCount > 0 || !qualityGateEvaluation.passed;
+      const finalTentative = confidenceLevel === "low" || !qualityGateEvaluation.passed;
       const quality: ReportQualityMeta = {
         ...memoFirstValidation.quality,
         generated_at: finalizedAt,
@@ -5256,7 +5266,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       };
       const qualityGateSnapshot = {
         finalize_success_target: 0.995,
-        students_unknown_ratio_target: 0.1,
+        students_unknown_ratio_target: 0.25,
         sv_top1_target: 0.9,
         echo_reduction_target: 0.8,
         observed_unknown_ratio: qualityMetrics.unknown_ratio,

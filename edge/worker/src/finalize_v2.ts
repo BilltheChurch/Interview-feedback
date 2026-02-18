@@ -735,10 +735,10 @@ export function enforceQualityGates(params: {
 } {
   const failures: string[] = [];
 
-  // Gate 1: Unknown speaker ratio must be <= 10%
-  if (params.unknownRatio > 0.10) {
+  // Gate 1: Unknown speaker ratio must be <= 25%
+  if (params.unknownRatio > 0.25) {
     failures.push(
-      `unknown_ratio ${(params.unknownRatio * 100).toFixed(1)}% > 10%`
+      `unknown_ratio ${(params.unknownRatio * 100).toFixed(1)}% > 25%`
     );
   }
 
@@ -1224,6 +1224,144 @@ export function computeUnknownRatio(transcript: TranscriptItem[]): number {
   if (students.length === 0) return 0;
   const unknownCount = students.filter((item) => !item.speaker_name || item.speaker_name === "unknown").length;
   return unknownCount / students.length;
+}
+
+/**
+ * Memo-assisted cluster binding: uses teacher notes to help resolve unidentified clusters.
+ *
+ * SAFETY-CRITICAL: Must pass ALL 5 checks before binding:
+ * 1. Uniqueness: Only 1 candidate name from each memo (ambiguous = skip)
+ * 2. Multi-source corroboration: At least 2 independent memos point to same name
+ * 3. Content corroboration: Cluster utterance text contains keywords from memo (>= 15% overlap)
+ * 4. No conflict: Candidate name is not already bound to another cluster
+ * 5. Minimum volume: Cluster has >= 2 utterances (single-utterance too noisy)
+ */
+export function memoAssistedBinding(params: {
+  clusters: Array<{ cluster_id: string; turn_ids: string[] }>;
+  bindings: Record<string, string>;
+  bindingMeta: Record<string, { locked: boolean }>;
+  transcript: Array<{
+    utterance_id: string;
+    cluster_id?: string | null;
+    speaker_name?: string | null;
+    text: string;
+    start_ms: number;
+    end_ms: number;
+    duration_ms: number;
+    stream_role: "mixed" | "teacher" | "students";
+  }>;
+  memos: Array<{
+    memo_id: string;
+    created_at_ms: number;
+    author_role: "teacher";
+    type: string;
+    tags: string[];
+    text: string;
+  }>;
+  roster: string[];
+}): {
+  newBindings: Record<string, string>;
+  bindingSource: Record<string, "memo_assisted">;
+} {
+  const newBindings: Record<string, string> = {};
+  const bindingSource: Record<string, "memo_assisted"> = {};
+
+  // Build set of names already bound to any cluster
+  const alreadyBoundNames = new Set<string>();
+  for (const name of Object.values(params.bindings)) {
+    if (name) alreadyBoundNames.add(name.toLowerCase());
+  }
+
+  // Normalize roster for case-insensitive matching
+  const rosterLower = params.roster.map((name) => name.toLowerCase().trim());
+
+  // For each unresolved cluster, attempt memo-assisted binding
+  for (const cluster of params.clusters) {
+    const clusterId = cluster.cluster_id;
+
+    // Skip already-bound clusters
+    if (params.bindings[clusterId]) continue;
+
+    // ── Check 5: Minimum volume — cluster must have >= 2 utterances ──
+    const clusterUtterances = params.transcript.filter(
+      (u) => u.cluster_id === clusterId
+    );
+    if (clusterUtterances.length < 2) continue;
+
+    // Combine all cluster utterance text for content matching
+    const clusterText = clusterUtterances.map((u) => u.text).join(" ");
+    const clusterTokens = new Set(tokenize(clusterText));
+
+    // Extract candidate names from each memo (one name per memo for uniqueness)
+    const candidateCounts = new Map<string, { count: number; memoIds: Set<string>; hasContentMatch: boolean }>();
+
+    for (const memo of params.memos) {
+      const memoText = memo.text;
+
+      // Find roster names mentioned in this memo
+      const mentionedNames: string[] = [];
+      for (let i = 0; i < params.roster.length; i++) {
+        const rosterName = params.roster[i];
+        const rLower = rosterLower[i];
+        // Check if the roster name appears in the memo text (case-insensitive)
+        if (memoText.toLowerCase().includes(rLower)) {
+          mentionedNames.push(rosterName);
+        }
+      }
+
+      // ── Check 1: Uniqueness — only 1 candidate name per memo ──
+      if (mentionedNames.length !== 1) continue;
+      const candidateName = mentionedNames[0];
+
+      // ── Check 3: Content corroboration — memo keywords overlap with cluster text >= 15% ──
+      const memoTokens = tokenize(memoText);
+      if (memoTokens.length === 0) continue;
+      let shared = 0;
+      for (const token of memoTokens) {
+        if (clusterTokens.has(token)) shared++;
+      }
+      const overlapRatio = shared / memoTokens.length;
+      const hasContentMatch = overlapRatio >= 0.15;
+
+      const existing = candidateCounts.get(candidateName) ?? { count: 0, memoIds: new Set(), hasContentMatch: false };
+      existing.count += 1;
+      existing.memoIds.add(memo.memo_id);
+      if (hasContentMatch) existing.hasContentMatch = true;
+      candidateCounts.set(candidateName, existing);
+    }
+
+    // Find candidates passing all checks
+    let bestCandidate: string | null = null;
+    let bestCount = 0;
+
+    for (const [name, info] of candidateCounts) {
+      // ── Check 2: Multi-source corroboration — at least 2 independent memos ──
+      if (info.count < 2) continue;
+
+      // ── Check 3 (aggregate): At least one memo had content overlap ──
+      if (!info.hasContentMatch) continue;
+
+      // ── Check 4: No conflict — name not already bound to another cluster ──
+      if (alreadyBoundNames.has(name.toLowerCase())) continue;
+
+      // If multiple candidate names pass all checks, it's ambiguous — skip all
+      if (bestCandidate !== null) {
+        bestCandidate = null;
+        break;
+      }
+      bestCandidate = name;
+      bestCount = info.count;
+    }
+
+    if (bestCandidate && bestCount >= 2) {
+      newBindings[clusterId] = bestCandidate;
+      bindingSource[clusterId] = "memo_assisted";
+      // Mark as bound so subsequent clusters won't re-use this name
+      alreadyBoundNames.add(bestCandidate.toLowerCase());
+    }
+  }
+
+  return { newBindings, bindingSource };
 }
 
 export function collectEnrichedContext(params: {

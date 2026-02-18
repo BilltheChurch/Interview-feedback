@@ -9,7 +9,7 @@ import {
   type ReconcileUtterance,
   type ReconcileSpeakerEvent,
 } from "../src/reconcile";
-import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats } from "../src/finalize_v2";
+import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats, memoAssistedBinding } from "../src/finalize_v2";
 import type { SpeakerLogs, SpeakerMapItem } from "../src/types_v2";
 import type { GlobalClusterResult, CachedEmbedding } from "../src/providers/types";
 
@@ -795,5 +795,89 @@ describe("computeSpeakerStats global dedup", () => {
     ];
     const stats = computeSpeakerStats(transcript);
     expect(stats[0].talk_time_pct).toBeCloseTo(1.0);
+  });
+});
+
+/* ── memoAssistedBinding ─────────────────────── */
+
+describe("memoAssistedBinding", () => {
+  it("should bind cluster when 2+ memos corroborate with content match", () => {
+    const clusters = [
+      { cluster_id: "c1", turn_ids: ["t1", "t2", "t3"] },
+    ];
+    const bindings: Record<string, string> = {};
+    const bindingMeta: Record<string, { locked: boolean }> = {};
+    const transcript = [
+      { utterance_id: "u1", cluster_id: "c1", speaker_name: null, text: "biocompatibility is critical for patient safety", start_ms: 100000, end_ms: 110000, duration_ms: 10000, stream_role: "students" as const },
+      { utterance_id: "u2", cluster_id: "c1", speaker_name: null, text: "I believe we should prioritize it", start_ms: 200000, end_ms: 210000, duration_ms: 10000, stream_role: "students" as const },
+    ];
+    const memos = [
+      { memo_id: "m1", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice提出了biocompatibility的重要性" },
+      { memo_id: "m2", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice给了很好的论证，关于patient safety" },
+    ];
+    const roster = ["Tina", "Rice", "Daisy"];
+
+    const result = memoAssistedBinding({ clusters, bindings, bindingMeta, transcript, memos, roster });
+    expect(result.newBindings["c1"]).toBe("Rice");
+    expect(result.bindingSource["c1"]).toBe("memo_assisted");
+  });
+
+  it("should NOT bind when only 1 memo mentions the name (insufficient corroboration)", () => {
+    const clusters = [{ cluster_id: "c1", turn_ids: ["t1", "t2"] }];
+    const transcript = [
+      { utterance_id: "u1", cluster_id: "c1", speaker_name: null, text: "some text here", start_ms: 100000, end_ms: 110000, duration_ms: 10000, stream_role: "students" as const },
+      { utterance_id: "u2", cluster_id: "c1", speaker_name: null, text: "more text", start_ms: 200000, end_ms: 210000, duration_ms: 10000, stream_role: "students" as const },
+    ];
+    const memos = [
+      { memo_id: "m1", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice did well here" },
+    ];
+
+    const result = memoAssistedBinding({ clusters, bindings: {}, bindingMeta: {}, transcript, memos, roster: ["Rice"] });
+    expect(result.newBindings["c1"]).toBeUndefined();
+  });
+
+  it("should NOT bind when multiple names are mentioned (ambiguous)", () => {
+    const clusters = [{ cluster_id: "c1", turn_ids: ["t1", "t2"] }];
+    const transcript = [
+      { utterance_id: "u1", cluster_id: "c1", speaker_name: null, text: "something about design", start_ms: 100000, end_ms: 110000, duration_ms: 10000, stream_role: "students" as const },
+      { utterance_id: "u2", cluster_id: "c1", speaker_name: null, text: "another point", start_ms: 200000, end_ms: 210000, duration_ms: 10000, stream_role: "students" as const },
+    ];
+    const memos = [
+      { memo_id: "m1", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice and Tina discussed this point" },
+      { memo_id: "m2", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice and Tina both contributed" },
+    ];
+
+    const result = memoAssistedBinding({ clusters, bindings: {}, bindingMeta: {}, transcript, memos, roster: ["Rice", "Tina"] });
+    expect(result.newBindings["c1"]).toBeUndefined();
+  });
+
+  it("should NOT bind when name already bound to another cluster", () => {
+    const clusters = [{ cluster_id: "c2", turn_ids: ["t3", "t4"] }];
+    const bindings = { "c1": "Rice" }; // Rice already bound to c1
+    const transcript = [
+      { utterance_id: "u3", cluster_id: "c2", speaker_name: null, text: "biocompatibility matters", start_ms: 300000, end_ms: 310000, duration_ms: 10000, stream_role: "students" as const },
+      { utterance_id: "u4", cluster_id: "c2", speaker_name: null, text: "for sure", start_ms: 310000, end_ms: 320000, duration_ms: 10000, stream_role: "students" as const },
+    ];
+    const memos = [
+      { memo_id: "m1", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice gave good point about biocompatibility" },
+      { memo_id: "m2", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice continued with strong argument" },
+    ];
+
+    const result = memoAssistedBinding({ clusters, bindings, bindingMeta: {}, transcript, memos, roster: ["Rice", "Tina"] });
+    expect(result.newBindings["c2"]).toBeUndefined();
+  });
+
+  it("should NOT bind clusters with fewer than 2 utterances", () => {
+    const clusters = [{ cluster_id: "c1", turn_ids: ["t1"] }];
+    const transcript = [
+      { utterance_id: "u1", cluster_id: "c1", speaker_name: null, text: "biocompatibility is critical for patient safety", start_ms: 100000, end_ms: 110000, duration_ms: 10000, stream_role: "students" as const },
+    ];
+    const memos = [
+      { memo_id: "m1", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice提出了biocompatibility" },
+      { memo_id: "m2", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "Rice关于patient safety的论证" },
+    ];
+
+    const result = memoAssistedBinding({ clusters, bindings: {}, bindingMeta: {}, transcript, memos, roster: ["Rice"] });
+    expect(result.newBindings["c1"]).toBeUndefined();
   });
 });
