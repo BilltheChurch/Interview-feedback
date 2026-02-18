@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -67,7 +67,7 @@ class SessionState(BaseModel):
     clusters: list[ClusterState] = Field(default_factory=list)
     bindings: dict[str, str] = Field(default_factory=dict)
     roster: list[RosterEntry] | None = None
-    config: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
     participant_profiles: list[ParticipantProfile] = Field(default_factory=list)
     cluster_binding_meta: dict[str, BindingMeta] = Field(default_factory=dict)
 
@@ -142,6 +142,13 @@ class DiarizeResponse(BaseModel):
     tracks: list[SpeakerTrack]
 
 
+class DeviceInfo(BaseModel):
+    sv_device: str = "cpu"
+    whisper_device: str = "auto"
+    pyannote_device: str = "auto"
+    whisper_model_size: str = "large-v3"
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     app_name: str
@@ -156,6 +163,7 @@ class HealthResponse(BaseModel):
     rate_limit_window_seconds: int
     segmenter_backend: Literal["vad", "diarization"]
     diarization_enabled: bool
+    devices: DeviceInfo | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -278,6 +286,7 @@ class DimensionClaim(BaseModel):
     text: str = Field(min_length=1, max_length=3000)
     evidence_refs: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0, le=1)
+    supporting_utterances: list[str] = Field(default_factory=list)
 
     @field_validator("evidence_refs")
     @classmethod
@@ -287,9 +296,9 @@ class DimensionClaim(BaseModel):
 
 class DimensionFeedback(BaseModel):
     dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
-    strengths: list[DimensionClaim] = Field(min_length=1)
-    risks: list[DimensionClaim] = Field(min_length=1)
-    actions: list[DimensionClaim] = Field(min_length=1)
+    strengths: list[DimensionClaim] = Field(default_factory=list)
+    risks: list[DimensionClaim] = Field(default_factory=list)
+    actions: list[DimensionClaim] = Field(default_factory=list)
 
 
 class PersonSummary(BaseModel):
@@ -452,4 +461,48 @@ class SynthesizeReportRequest(BaseModel):
     memo_speaker_bindings: list[MemoSpeakerBinding] = Field(default_factory=list)
     historical: list[HistoricalSummary] = Field(default_factory=list)
     stages: list[str] = Field(default_factory=list)
+    locale: str = "zh-CN"
+    name_aliases: dict[str, list[str]] = Field(default_factory=dict)
+    stats_observations: list[str] = Field(default_factory=list)
+
+
+# ── Incremental Checkpoint Schemas ─────────────────────────────────────────
+
+
+class CheckpointSpeakerNote(BaseModel):
+    speaker_key: str
+    observations: list[str] = Field(default_factory=list)
+
+
+class CheckpointDimensionSignal(BaseModel):
+    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    speaker_key: str
+    signal: Literal["positive", "negative", "neutral"]
+    note: str = ""
+
+
+class CheckpointRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    checkpoint_index: int = Field(ge=0)
+    utterances: list[TranscriptUtterance]
+    memos: list[Memo] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+    locale: str = "zh-CN"
+
+
+class CheckpointResponse(BaseModel):
+    session_id: str
+    checkpoint_index: int
+    timestamp_ms: int = Field(ge=0)
+    summary: str = ""
+    per_speaker_notes: list[CheckpointSpeakerNote] = Field(default_factory=list)
+    dimension_signals: list[CheckpointDimensionSignal] = Field(default_factory=list)
+
+
+class MergeCheckpointsRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    checkpoints: list[CheckpointResponse] = Field(min_length=1)
+    final_stats: list[SpeakerStat] = Field(default_factory=list)
+    final_memos: list[Memo] = Field(default_factory=list)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
     locale: str = "zh-CN"

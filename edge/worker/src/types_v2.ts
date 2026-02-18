@@ -64,6 +64,8 @@ export type FinalizeV2Stage =
   | "freeze"
   | "drain"
   | "replay_gap"
+  | "local_asr"
+  | "cluster"
   | "reconcile"
   | "stats"
   | "events"
@@ -85,9 +87,34 @@ export interface FinalizeV2Status {
   finished_at?: string | null;
 }
 
+// ── Tier 2 Background Processing Status ──────────────────────────────────
+
+export type Tier2StatusState =
+  | "idle"
+  | "pending"
+  | "downloading"
+  | "transcribing"
+  | "diarizing"
+  | "reconciling"
+  | "reporting"
+  | "persisting"
+  | "succeeded"
+  | "failed";
+
+export interface Tier2Status {
+  enabled: boolean;
+  status: Tier2StatusState;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error?: string | null;
+  report_version: "tier1_instant" | "tier2_refined";
+  progress: number;
+  warnings: string[];
+}
+
 export interface EvidenceItem {
   evidence_id: string;
-  type: "quote" | "segment";
+  type: "quote" | "segment" | "stats_summary" | "interaction_pattern" | "transcript_quote";
   time_range_ms: [number, number];
   utterance_ids: string[];
   speaker: {
@@ -99,6 +126,7 @@ export interface EvidenceItem {
   confidence: number;
   weak?: boolean;
   weak_reason?: string | null;
+  source?: "explicit_anchor" | "semantic_match" | "speaker_fallback" | "memo_text" | "llm_backfill" | "auto_generated";
 }
 
 export interface DimensionClaim {
@@ -106,6 +134,7 @@ export interface DimensionClaim {
   text: string;
   evidence_refs: string[];
   confidence: number;
+  supporting_utterances?: string[];
 }
 
 export interface DimensionFeedback {
@@ -144,6 +173,7 @@ export interface SpeakerStatItem {
   speaker_key: string;
   speaker_name?: string | null;
   talk_time_ms: number;
+  talk_time_pct: number;
   turns: number;
   silence_ms: number;
   interruptions: number;
@@ -155,6 +185,7 @@ export interface ResultV2 {
     session_id: string;
     finalized_at: string;
     tentative: boolean;
+    confidence_level: "high" | "medium" | "low";
     unresolved_cluster_count: number;
     diarization_backend: "cloud" | "edge";
   };
@@ -299,5 +330,58 @@ export interface SynthesizeRequestPayload {
   memo_speaker_bindings: MemoSpeakerBinding[];
   historical: HistoricalSummary[];
   stages: string[];
+  locale: string;
+  name_aliases?: Record<string, string[]>;
+  stats_observations?: string[];
+}
+
+// ── Incremental Checkpoint Types ────────────────────────────────────────
+
+export interface CheckpointSpeakerNote {
+  speaker_key: string;
+  observations: string[];
+}
+
+export interface CheckpointDimensionSignal {
+  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
+  speaker_key: string;
+  signal: "positive" | "negative" | "neutral";
+  note: string;
+}
+
+export interface CheckpointRequestPayload {
+  session_id: string;
+  checkpoint_index: number;
+  utterances: Array<{
+    utterance_id: string;
+    stream_role: "mixed" | "teacher" | "students";
+    speaker_name?: string | null;
+    cluster_id?: string | null;
+    decision?: "auto" | "confirm" | "unknown" | null;
+    text: string;
+    start_ms: number;
+    end_ms: number;
+    duration_ms: number;
+  }>;
+  memos: MemoItem[];
+  stats: SpeakerStatItem[];
+  locale: string;
+}
+
+export interface CheckpointResult {
+  session_id: string;
+  checkpoint_index: number;
+  timestamp_ms: number;
+  summary: string;
+  per_speaker_notes: CheckpointSpeakerNote[];
+  dimension_signals: CheckpointDimensionSignal[];
+}
+
+export interface MergeCheckpointsRequestPayload {
+  session_id: string;
+  checkpoints: CheckpointResult[];
+  final_stats: SpeakerStatItem[];
+  final_memos: MemoItem[];
+  evidence: Array<EvidenceItem & { speaker_key?: string | null }>;
   locale: string;
 }
