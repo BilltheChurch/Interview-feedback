@@ -17,6 +17,7 @@ import {
   generateStatsObservations,
   addStageMetadata,
   memoAssistedBinding,
+  backfillSupportingUtterances,
   validatePersonFeedbackEvidence
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
@@ -5175,6 +5176,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
             reportSource = (candidateQuality?.report_source as typeof reportSource) ?? "llm_synthesized";
             reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
             reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
+            // Stage 2 LLM fine-matching: backfill supporting_utterances into evidence
+            evidence = backfillSupportingUtterances(evidence, finalPerPerson);
           } else {
             reportSource = "memo_first_fallback";
             reportBlockingReason = candidateValidation.failures[0] || "analysis/synthesize invalid evidence refs";
@@ -5750,6 +5753,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
             : null;
           reportSource = (candidateQuality?.report_source as typeof reportSource) ?? "llm_synthesized";
           reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
+          // Stage 2 LLM fine-matching: backfill supporting_utterances into evidence
+          evidence = backfillSupportingUtterances(evidence, finalPerPerson);
         } else {
           tier2Warnings.push("tier2 LLM report had invalid evidence refs, keeping tier1 report content");
           reportSource = tier1Result.quality.report_source ?? "memo_first";

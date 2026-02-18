@@ -1534,6 +1534,51 @@ export function buildSynthesizePayload(params: {
   };
 }
 
+/**
+ * Stage 2 LLM fine-matching: backfill supporting_utterances from LLM claims
+ * into evidence items that currently have empty utterance_ids.
+ *
+ * Only evidence with empty utterance_ids gets backfilled (to avoid overwriting
+ * good semantic matches). The +0.10 confidence bonus rewards LLM-validated
+ * evidence, capped at 0.95.
+ */
+export function backfillSupportingUtterances(
+  evidence: EvidenceItem[],
+  perPerson: Array<{
+    person_key: string;
+    dimensions: Array<{
+      strengths: Array<{ evidence_refs: string[]; supporting_utterances?: string[] }>;
+      risks: Array<{ evidence_refs: string[]; supporting_utterances?: string[] }>;
+      actions: Array<{ evidence_refs: string[]; supporting_utterances?: string[] }>;
+    }>;
+  }>
+): EvidenceItem[] {
+  const evidenceById = new Map(evidence.map(e => [e.evidence_id, { ...e }]));
+
+  for (const person of perPerson) {
+    for (const dim of person.dimensions) {
+      const allClaims = [...dim.strengths, ...dim.risks, ...dim.actions];
+      for (const claim of allClaims) {
+        const supp = claim.supporting_utterances;
+        if (!supp || supp.length === 0) continue;
+
+        for (const ref of claim.evidence_refs) {
+          const ev = evidenceById.get(ref);
+          if (!ev) continue;
+          // Only backfill if evidence has empty utterance_ids
+          if (ev.utterance_ids.length === 0) {
+            ev.utterance_ids = [...new Set([...ev.utterance_ids, ...supp])];
+            ev.confidence = Math.min(0.95, ev.confidence + 0.10);
+            ev.source = "llm_backfill";
+          }
+        }
+      }
+    }
+  }
+
+  return [...evidenceById.values()];
+}
+
 export function buildResultV2(params: {
   sessionId: string;
   finalizedAt: string;

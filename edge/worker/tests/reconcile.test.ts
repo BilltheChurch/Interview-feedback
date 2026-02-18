@@ -9,7 +9,7 @@ import {
   type ReconcileUtterance,
   type ReconcileSpeakerEvent,
 } from "../src/reconcile";
-import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats, memoAssistedBinding, generateStatsObservations } from "../src/finalize_v2";
+import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats, memoAssistedBinding, generateStatsObservations, backfillSupportingUtterances } from "../src/finalize_v2";
 import type { SpeakerLogs, SpeakerMapItem } from "../src/types_v2";
 import type { GlobalClusterResult, CachedEmbedding } from "../src/providers/types";
 
@@ -930,5 +930,79 @@ describe("generateStatsObservations", () => {
     ];
     const observations = generateStatsObservations(stats, 60000);
     expect(observations).toEqual([]);
+  });
+});
+
+/* ── backfillSupportingUtterances ────────────── */
+
+describe("backfillSupportingUtterances", () => {
+  it("should merge supporting_utterances into evidence utterance_ids", () => {
+    const evidence = [
+      { evidence_id: "e_000001", type: "quote" as const, time_range_ms: [0, 10000] as [number, number], utterance_ids: [], speaker: { cluster_id: null, person_id: null, display_name: null }, quote: "test", confidence: 0.42, source: "memo_text" as const },
+    ];
+    const perPerson = [{
+      person_key: "Tina",
+      display_name: "Tina",
+      dimensions: [{
+        dimension: "leadership",
+        strengths: [{ claim_id: "c1", text: "test", evidence_refs: ["e_000001"], confidence: 0.7, supporting_utterances: ["u1", "u2"] }],
+        risks: [],
+        actions: [],
+      }],
+      summary: { strengths: [], risks: [], actions: [] },
+    }];
+
+    const result = backfillSupportingUtterances(evidence, perPerson);
+    const updated = result.find(e => e.evidence_id === "e_000001");
+    expect(updated!.utterance_ids).toContain("u1");
+    expect(updated!.utterance_ids).toContain("u2");
+    // Confidence should get +0.10 bonus
+    expect(updated!.confidence).toBeGreaterThan(0.42);
+    expect(updated!.confidence).toBeLessThanOrEqual(0.95);
+    expect(updated!.source).toBe("llm_backfill");
+  });
+
+  it("should not backfill evidence that already has utterance_ids", () => {
+    const evidence = [
+      { evidence_id: "e_000002", type: "quote" as const, time_range_ms: [0, 10000] as [number, number], utterance_ids: ["existing_u"], speaker: { cluster_id: null, person_id: null, display_name: null }, quote: "test", confidence: 0.70, source: "semantic_match" as const },
+    ];
+    const perPerson = [{
+      person_key: "Tina",
+      display_name: "Tina",
+      dimensions: [{
+        dimension: "leadership",
+        strengths: [{ claim_id: "c1", text: "test", evidence_refs: ["e_000002"], confidence: 0.7, supporting_utterances: ["u1"] }],
+        risks: [],
+        actions: [],
+      }],
+      summary: { strengths: [], risks: [], actions: [] },
+    }];
+
+    const result = backfillSupportingUtterances(evidence, perPerson);
+    const notUpdated = result.find(e => e.evidence_id === "e_000002");
+    expect(notUpdated!.utterance_ids).toEqual(["existing_u"]); // unchanged
+    expect(notUpdated!.confidence).toBe(0.70); // unchanged
+    expect(notUpdated!.source).toBe("semantic_match"); // unchanged
+  });
+
+  it("should cap confidence at 0.95", () => {
+    const evidence = [
+      { evidence_id: "e_000003", type: "quote" as const, time_range_ms: [0, 10000] as [number, number], utterance_ids: [], speaker: { cluster_id: null, person_id: null, display_name: null }, quote: "test", confidence: 0.90, source: "memo_text" as const },
+    ];
+    const perPerson = [{
+      person_key: "Tina",
+      display_name: "Tina",
+      dimensions: [{
+        dimension: "leadership",
+        strengths: [{ claim_id: "c1", text: "test", evidence_refs: ["e_000003"], confidence: 0.9, supporting_utterances: ["u1"] }],
+        risks: [],
+        actions: [],
+      }],
+      summary: { strengths: [], risks: [], actions: [] },
+    }];
+
+    const result = backfillSupportingUtterances(evidence, perPerson);
+    const updated = result.find(e => e.evidence_id === "e_000003");
+    expect(updated!.confidence).toBe(0.95); // 0.90 + 0.10 = 1.00, capped at 0.95
   });
 });
