@@ -23,7 +23,8 @@ import {
   InferenceFailoverClient,
   InferenceRequestError,
   type DependencyHealthSnapshot,
-  type InferenceBackendTimelineItem
+  type InferenceBackendTimelineItem,
+  type InferenceEndpointKey
 } from "./inference_client";
 import { analyzeEventsLocally } from "./local_events_analyzer";
 import { validateApiKey } from "./auth";
@@ -44,17 +45,26 @@ import {
   buildReconciledTranscript,
   resolveStudentBinding
 } from "./reconcile";
+import { EmbeddingCache } from "./embedding-cache";
+import { globalCluster, mapClustersToRoster } from "./global-cluster";
+import type { CachedEmbedding, GlobalClusterResult } from "./providers/types";
+import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
+import type { RosterParticipant } from "./global-cluster";
 import type {
+  CheckpointRequestPayload,
+  CheckpointResult,
   FinalizeV2Status,
   MemoItem,
   MemoSpeakerBinding,
+  MergeCheckpointsRequestPayload,
   PersonFeedbackItem,
   ReportQualityMeta,
   ResultV2,
   SpeakerStatItem,
   SpeakerLogs,
   SpeakerMapItem,
-  SynthesizeRequestPayload
+  SynthesizeRequestPayload,
+  Tier2Status
 } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
@@ -70,6 +80,7 @@ interface AudioPayload {
 interface RosterEntry {
   name: string;
   email?: string | null;
+  aliases?: string[];
 }
 
 interface ResolveRequest {
@@ -128,7 +139,7 @@ interface SessionState {
   bindings: Record<string, string>;
   roster?: RosterEntry[];
   capture_by_stream?: Record<StreamRole, CaptureState>;
-  config: Record<string, string | number | boolean>;
+  config: Record<string, unknown>;
   participant_profiles: ParticipantProfile[];
   cluster_binding_meta: Record<string, BindingMeta>;
   prebind_by_cluster: Record<string, BindingMeta>;
@@ -140,11 +151,13 @@ interface SessionConfigRequest {
   teams_participants?: Array<RosterEntry | string>;
   teams_interviewer_name?: string;
   interviewer_name?: string;
-  diarization_backend?: "cloud" | "edge";
+  diarization_backend?: "cloud" | "edge" | "local";
   mode?: "1v1" | "group";
   template_id?: string;
   booking_ref?: string;
   teams_join_url?: string;
+  stages?: string[];
+  free_form_notes?: string;
 }
 
 interface CaptureState {
@@ -320,7 +333,7 @@ interface UtteranceRaw {
   end_ms: number;
   duration_ms: number;
   asr_model: string;
-  asr_provider: "dashscope";
+  asr_provider: "dashscope" | "local-whisper";
   confidence?: number | null;
   created_at: string;
   latency_ms: number;
@@ -337,7 +350,7 @@ interface UtteranceMerged {
   end_ms: number;
   duration_ms: number;
   asr_model: string;
-  asr_provider: "dashscope";
+  asr_provider: "dashscope" | "local-whisper";
   created_at: string;
   source_utterance_ids: string[];
 }
@@ -461,6 +474,7 @@ interface AsrRealtimeRuntime {
   sentChunkTsBySeq: Map<number, number>;
   lastEmitAt: string | null;
   lastFinalTextNorm: string;
+  drainGeneration: number;
 }
 
 interface AudioChunkFrame {
@@ -491,6 +505,9 @@ interface Env {
   INFERENCE_REPORT_PATH?: string;
   INFERENCE_REGENERATE_CLAIM_PATH?: string;
   INFERENCE_SYNTHESIZE_PATH?: string;
+  INFERENCE_CHECKPOINT_PATH?: string;
+  INFERENCE_MERGE_CHECKPOINTS_PATH?: string;
+  INFERENCE_EXTRACT_EMBEDDING_PATH?: string;
   INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
   ASR_ENABLED?: string;
@@ -507,10 +524,17 @@ interface Env {
   FINALIZE_V2_ENABLED?: string;
   FINALIZE_TIMEOUT_MS?: string;
   FINALIZE_WATCHDOG_MS?: string;
-  DIARIZATION_BACKEND_DEFAULT?: "cloud" | "edge";
+  CHECKPOINT_INTERVAL_MS?: string;
+  DIARIZATION_BACKEND_DEFAULT?: "cloud" | "edge" | "local";
   AUDIO_RETENTION_HOURS?: string;
+  ASR_PROVIDER?: string;
+  ASR_ENDPOINT?: string;
+  ASR_LANGUAGE?: string;
   WORKER_API_KEY?: string;
   DEFAULT_LOCALE?: string;
+  TIER2_ENABLED?: string;
+  TIER2_AUTO_TRIGGER?: string;
+  TIER2_BATCH_ENDPOINT?: string;
   RESULT_BUCKET: R2Bucket;
   MEETING_SESSION: DurableObjectNamespace<MeetingSessionDO>;
 }
@@ -569,6 +593,7 @@ const SESSION_ROUTE_REGEX =
   /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|feedback-claim-evidence|export)$/;
 const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state)$/;
 const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
+const SESSION_TIER2_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/tier2-status$/;
 const SESSION_HISTORY_ROUTE_REGEX = /^\/v1\/sessions\/history$/;
 const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
 const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
@@ -581,6 +606,8 @@ const STORAGE_KEY_RESULT_KEY = "result_key";
 const STORAGE_KEY_RESULT_KEY_V2 = "result_key_v2";
 const STORAGE_KEY_FINALIZE_V2_STATUS = "finalize_v2_status";
 const STORAGE_KEY_FINALIZE_LOCK = "finalize_lock";
+const STORAGE_KEY_TIER2_STATUS = "tier2_status";
+const STORAGE_KEY_TIER2_ALARM_TAG = "tier2_alarm_tag";
 const STORAGE_KEY_MEMOS = "memos";
 const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
 const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
@@ -595,6 +622,8 @@ const STORAGE_KEY_INGEST_BY_STREAM = "ingest_by_stream";
 const STORAGE_KEY_ASR_BY_STREAM = "asr_by_stream";
 const STORAGE_KEY_UTTERANCES_RAW_BY_STREAM = "utterances_raw_by_stream";
 const STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM = "utterances_merged_by_stream";
+const STORAGE_KEY_CHECKPOINTS = "checkpoints";
+const STORAGE_KEY_LAST_CHECKPOINT_AT = "last_checkpoint_at";
 
 const TARGET_FORMAT = "pcm_s16le";
 const INFERENCE_MAX_AUDIO_SECONDS = 30;
@@ -610,6 +639,18 @@ const FEEDBACK_PERSIST_FETCH_BUDGET_MS = 500;
 const HISTORY_PREFIX = "history/";
 const HISTORY_MAX_LIMIT = 50;
 const HISTORY_REVERSE_EPOCH_MAX = 9_999_999_999_999;
+
+/**
+ * Report sources considered "ready" for feedback delivery.
+ * llm_enhanced       — legacy polish pipeline (inference /analysis/report)
+ * llm_synthesized    — new synthesis pipeline (inference /analysis/synthesize)
+ * llm_synthesized_truncated — synthesis succeeded but input was truncated
+ */
+const ACCEPTED_REPORT_SOURCES: ReadonlySet<string> = new Set([
+  "llm_enhanced",
+  "llm_synthesized",
+  "llm_synthesized_truncated"
+]);
 
 function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(payload), {
@@ -721,6 +762,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Compute Levenshtein edit distance between two strings. */
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  // Use a single-row DP approach for space efficiency.
+  let prev = new Array<number>(n + 1);
+  let curr = new Array<number>(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
 function toWebSocketHandshakeUrl(raw: string): string {
   if (raw.startsWith("wss://")) {
     return "https://" + raw.slice("wss://".length);
@@ -830,7 +892,9 @@ function extractNameFromText(text: string): string | null {
   const patterns = [
     /\bmy name is\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
     /\bi am\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
-    /\bi'm\s+([A-Za-z][A-Za-z .'-]{0,60})/i
+    /\bi'm\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
+    /\b(?:usually\s+)?go(?:es)?\s+by\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
+    /\b(?:(?:you\s+)?can\s+)?call me\s+([A-Za-z][A-Za-z .'-]{0,60})/i
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -862,7 +926,10 @@ function parseRosterEntries(value: unknown): RosterEntry[] {
     const name = valueAsString(obj.name);
     if (!name) continue;
     const email = valueAsString(obj.email);
-    out.push({ name, email });
+    const aliases = Array.isArray(obj.aliases)
+      ? (obj.aliases as unknown[]).filter((a): a is string => typeof a === "string" && a.trim().length > 0)
+      : undefined;
+    out.push({ name, email, aliases: aliases && aliases.length > 0 ? aliases : undefined });
   }
   return out;
 }
@@ -1209,7 +1276,7 @@ function normalizeSessionState(state: SessionState | null | undefined): SessionS
   merged.bindings = merged.bindings && typeof merged.bindings === "object" ? merged.bindings : {};
   merged.config = merged.config && typeof merged.config === "object" ? merged.config : {};
   if (merged.config.diarization_backend !== "edge" && merged.config.diarization_backend !== "cloud") {
-    merged.config.diarization_backend = "cloud";
+    merged.config.diarization_backend = "edge";
   }
   merged.participant_profiles = Array.isArray(merged.participant_profiles) ? merged.participant_profiles : [];
   merged.cluster_binding_meta =
@@ -1305,7 +1372,8 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     if (path === "/health" && request.method === "GET") {
-      const asrEnabled = parseBool(env.ASR_ENABLED, true) && Boolean((env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim());
+      const asrProvider = (env.ASR_PROVIDER ?? "funASR").toLowerCase();
+      const asrEnabled = parseBool(env.ASR_ENABLED, true) && (asrProvider === "local-whisper" || Boolean((env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim()));
       const asrRealtimeEnabled = parseBool(env.ASR_REALTIME_ENABLED, true);
       return jsonResponse({
         status: "ok",
@@ -1407,6 +1475,21 @@ export default {
         return jsonResponse({ detail: "method not allowed" }, 405);
       }
       return proxyToDO(request, env, sessionId, "finalize-status");
+    }
+
+    const tier2StatusMatch = path.match(SESSION_TIER2_STATUS_ROUTE_REGEX);
+    if (tier2StatusMatch) {
+      const [, rawSessionId] = tier2StatusMatch;
+      let sessionId: string;
+      try {
+        sessionId = safeSessionId(rawSessionId);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      if (request.method !== "GET") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      return proxyToDO(request, env, sessionId, "tier2-status");
     }
 
     if (SESSION_HISTORY_ROUTE_REGEX.test(path)) {
@@ -1523,6 +1606,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
   };
   private asrRealtimeByStream: Record<StreamRole, AsrRealtimeRuntime>;
   private inferenceClient: InferenceFailoverClient;
+  private localWhisperProvider: LocalWhisperASRProvider | null = null;
+  /** Embedding cache for global speaker clustering at finalization. */
+  readonly embeddingCache: EmbeddingCache = new EmbeddingCache();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1551,9 +1637,30 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.enqueueMutation(async () => {
+      // Check if this alarm is for Tier 2 background processing
+      const tier2Tag = await this.ctx.storage.get<string>(STORAGE_KEY_TIER2_ALARM_TAG);
+      if (tier2Tag) {
+        await this.ctx.storage.delete(STORAGE_KEY_TIER2_ALARM_TAG);
+        const tier2Status = await this.loadTier2Status();
+        if (tier2Status.status === "pending") {
+          const sessionId = await this.resolveSessionId();
+          await this.runTier2Job(sessionId);
+          return; // Don't run other alarm tasks after tier2
+        }
+      }
       await this.failStuckFinalizeIfNeeded("alarm");
       await this.cleanupExpiredAudioChunks();
     });
+  }
+
+  private async resolveSessionId(): Promise<string> {
+    // Derive session ID from the stored result key (set during Tier 1 finalization)
+    const resultKey = await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2);
+    if (resultKey) {
+      const match = resultKey.match(/sessions\/([^/]+)\//);
+      if (match) return match[1];
+    }
+    return "unknown-session";
   }
 
   private async cleanupExpiredAudioChunks(): Promise<void> {
@@ -1641,7 +1748,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private diarizationBackendDefault(): "cloud" | "edge" {
-    return this.env.DIARIZATION_BACKEND_DEFAULT === "edge" ? "edge" : "cloud";
+    const val = this.env.DIARIZATION_BACKEND_DEFAULT;
+    return val === "edge" || val === "local" ? "edge" : "cloud";
   }
 
   private scoreNumber(value: number | null | undefined): number {
@@ -1683,18 +1791,31 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const normalized = candidate.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
     if (!normalized) return null;
     const roster = state.roster ?? [];
-    let fuzzy: string | null = null;
+    let fuzzySubstring: string | null = null;
+    let fuzzyEdit: string | null = null;
+    let bestEditDist = Infinity;
     for (const item of roster) {
       const rosterNorm = item.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
       if (!rosterNorm) continue;
+      // 1. Exact match — return immediately.
       if (rosterNorm === normalized) {
         return item.name;
       }
+      // 2. Substring match (4+ chars).
       if (normalized.length >= 4 && (normalized.includes(rosterNorm) || rosterNorm.includes(normalized))) {
-        fuzzy = item.name;
+        fuzzySubstring = item.name;
+      }
+      // 3. Edit-distance match: both names >= 5 chars and distance <= 2.
+      if (normalized.length >= 5 && rosterNorm.length >= 5) {
+        const dist = levenshteinDistance(normalized, rosterNorm);
+        if (dist <= 2 && dist < bestEditDist) {
+          bestEditDist = dist;
+          fuzzyEdit = item.name;
+        }
       }
     }
-    return fuzzy;
+    // Prefer substring match over edit-distance match.
+    return fuzzySubstring ?? fuzzyEdit ?? null;
   }
 
   private inferParticipantFromText(state: SessionState, asrText: string): string | null {
@@ -1718,7 +1839,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async callInferenceWithFailover<T>(params: {
-    endpoint: "resolve" | "enroll" | "analysis_events" | "analysis_report" | "analysis_regenerate_claim" | "analysis_synthesize";
+    endpoint: InferenceEndpointKey;
     path: string;
     body: unknown;
     timeoutMs?: number;
@@ -1782,6 +1903,79 @@ export class MeetingSessionDO extends DurableObject<Env> {
     };
   }
 
+  /**
+   * Extract speaker embeddings for edge diarization turns and populate the cache.
+   *
+   * For each speaker turn with sufficient duration (>500ms), loads the corresponding
+   * PCM audio from R2, calls the inference service's /sv/extract_embedding endpoint,
+   * and stores the result in the EmbeddingCache for global clustering at finalization.
+   *
+   * Skips segments already in the cache (idempotent). Non-critical: failures are
+   * logged but do not block the pipeline.
+   */
+  async extractEmbeddingsForTurns(
+    sessionId: string,
+    speakerLogs: SpeakerLogs,
+    streamRole: "students" | "teacher" = "students"
+  ): Promise<{ extracted: number; skipped: number; failed: number }> {
+    const turns = speakerLogs.turns.filter(
+      (t) => t.stream_role === streamRole
+    );
+    let extracted = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const turn of turns) {
+      const durationMs = turn.end_ms - turn.start_ms;
+      if (durationMs < 500) { skipped++; continue; }
+
+      const segmentId = `${streamRole}_${turn.turn_id}`;
+      if (this.embeddingCache.getEmbedding(segmentId)) { skipped++; continue; }
+
+      try {
+        // Determine which R2 chunks cover this turn's time range
+        const startSeq = Math.max(0, Math.floor(turn.start_ms / 1000));
+        const endSeq = Math.ceil(turn.end_ms / 1000);
+        const chunks = await this.loadChunkRange(sessionId, streamRole, startSeq, endSeq);
+        if (chunks.length === 0) { skipped++; continue; }
+
+        const pcmData = concatUint8Arrays(chunks);
+        const wavBytes = pcm16ToWavBytes(pcmData, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+        const audioPayload: AudioPayload = {
+          content_b64: bytesToBase64(wavBytes),
+          format: "wav",
+          sample_rate: TARGET_SAMPLE_RATE,
+          channels: TARGET_CHANNELS
+        };
+
+        const response = await this.callInferenceWithFailover<{ embedding: number[] }>({
+          endpoint: "sv_extract_embedding",
+          path: this.env.INFERENCE_EXTRACT_EMBEDDING_PATH ?? "/sv/extract_embedding",
+          body: {
+            session_id: sessionId,
+            audio: audioPayload
+          },
+          timeoutMs: 10_000
+        });
+
+        const embedding = new Float32Array(response.data.embedding);
+        const added = this.embeddingCache.addEmbedding({
+          segment_id: segmentId,
+          embedding,
+          start_ms: turn.start_ms,
+          end_ms: turn.end_ms,
+          window_cluster_id: turn.cluster_id,
+          stream_role: streamRole
+        });
+        if (added) { extracted++; } else { skipped++; }
+      } catch {
+        failed++;
+      }
+    }
+
+    return { extracted, skipped, failed };
+  }
+
   private buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime {
     return {
       ws: null,
@@ -1803,7 +1997,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       currentStartTsMs: null,
       sentChunkTsBySeq: new Map(),
       lastEmitAt: null,
-      lastFinalTextNorm: ""
+      lastFinalTextNorm: "",
+      drainGeneration: 0
     };
   }
 
@@ -1819,8 +2014,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private asrEnabled(): boolean {
-    const hasKey = Boolean((this.env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim());
-    return parseBool(this.env.ASR_ENABLED, true) && hasKey;
+    if (!parseBool(this.env.ASR_ENABLED, true)) return false;
+    // local-whisper uses the inference service, not DashScope — no API key needed
+    if (this.getAsrProvider() === "local-whisper") return true;
+    return Boolean((this.env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim());
   }
 
   private buildDefaultAsrState(): AsrState {
@@ -2194,7 +2391,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       events,
       speakerLogs: speakerLogsStored,
       state,
-      diarizationBackend
+      diarizationBackend,
+      roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])])
     });
   }
 
@@ -2241,6 +2439,41 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const hasWeakEvidence = claim.evidence_refs.some((ref) => Boolean(evidenceById.get(ref)?.weak));
     const base = Number(claim.confidence || 0.72);
     claim.confidence = hasWeakEvidence ? Math.max(0.35, Math.min(0.95, base - 0.18)) : Math.max(0.35, Math.min(0.95, base));
+  }
+
+  /** Strip claims with empty or invalid evidence_refs so one bad claim doesn't kill the whole LLM report. */
+  private sanitizeClaimEvidenceRefs(
+    perPerson: PersonFeedbackItem[],
+    evidence: ResultV2["evidence"]
+  ): { sanitized: PersonFeedbackItem[]; strippedCount: number } {
+    const evidenceById = new Set(evidence.map((e) => e.evidence_id));
+    let strippedCount = 0;
+    const sanitized = perPerson.map((person) => ({
+      ...person,
+      dimensions: person.dimensions.map((dim) => {
+        const filterClaims = (claims: typeof dim.strengths) =>
+          claims.filter((claim) => {
+            const refs = Array.isArray(claim.evidence_refs)
+              ? claim.evidence_refs.map((r) => String(r || "").trim()).filter(Boolean)
+              : [];
+            // Remove refs that don't exist in evidence
+            const validRefs = refs.filter((r) => evidenceById.has(r));
+            if (validRefs.length === 0) {
+              strippedCount++;
+              return false;
+            }
+            claim.evidence_refs = validRefs;
+            return true;
+          });
+        return {
+          ...dim,
+          strengths: filterClaims(dim.strengths),
+          risks: filterClaims(dim.risks),
+          actions: filterClaims(dim.actions)
+        };
+      })
+    }));
+    return { sanitized, strippedCount };
   }
 
   private validateClaimEvidenceRefs(
@@ -2318,6 +2551,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         speaker_key: name,
         speaker_name: name,
         talk_time_ms: 0,
+        talk_time_pct: 0,
         turns: 0,
         silence_ms: 0,
         interruptions: 0,
@@ -2792,6 +3026,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     runtime.flushPromise = null;
     runtime.ws = null;
     runtime.taskId = null;
+    runtime.drainGeneration += 1;
   }
 
   private async hydrateRuntimeFromCursor(streamRole: StreamRole): Promise<void> {
@@ -2849,13 +3084,17 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const handshakeUrl = toWebSocketHandshakeUrl(wsUrl);
       const timeoutMs = parseTimeoutMs(this.env.ASR_TIMEOUT_MS ?? "45000");
 
+      const fetchAbort = new AbortController();
+      const fetchTimer = setTimeout(() => fetchAbort.abort(), Math.min(timeoutMs, 15_000));
       const response = await fetch(handshakeUrl, {
         method: "GET",
         headers: {
           Authorization: `bearer ${apiKey}`,
           Upgrade: "websocket"
-        }
+        },
+        signal: fetchAbort.signal
       });
+      clearTimeout(fetchTimer);
 
       if (response.status !== 101 || !response.webSocket) {
         throw new Error(`dashscope websocket handshake failed: HTTP ${response.status}`);
@@ -3106,6 +3345,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     } else if (streamRole === "teacher") {
       await this.appendTeacherSpeakerEvent(sessionId, utterance);
     }
+
+    // Schedule incremental checkpoint if interval has elapsed (non-blocking)
+    this.ctx.waitUntil(
+      this.maybeScheduleCheckpoint(sessionId, utterance.end_ms, streamRole)
+    );
   }
 
   private async handleRealtimeAsrMessage(
@@ -3217,16 +3461,18 @@ export class MeetingSessionDO extends DurableObject<Env> {
       return runtime.flushPromise;
     }
 
+    const startGen = runtime.drainGeneration;
     runtime.flushPromise = (async () => {
-      while (runtime.sendQueue.length > 0) {
+      while (runtime.sendQueue.length > 0 && runtime.drainGeneration === startGen) {
         try {
           let lastSentSeq = runtime.lastSentSeq;
           await this.ensureRealtimeAsrConnected(sessionId, streamRole);
+          if (runtime.drainGeneration !== startGen) break;
           if (!runtime.ws || runtime.ws.readyState !== WebSocket.OPEN) {
             throw new Error("dashscope websocket is not open");
           }
 
-          while (runtime.sendQueue.length > 0) {
+          while (runtime.sendQueue.length > 0 && runtime.drainGeneration === startGen) {
             const head = runtime.sendQueue[0];
             if (!runtime.ws || runtime.ws.readyState !== WebSocket.OPEN) {
               throw new Error("dashscope websocket closed while draining");
@@ -3247,11 +3493,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
           });
           await this.refreshAsrStreamMetrics(sessionId, streamRole);
         } catch (error) {
+          if (runtime.drainGeneration !== startGen) break;
           await this.refreshAsrStreamMetrics(sessionId, streamRole, {
             asr_ws_state: "error",
             last_error: (error as Error).message
           });
           await this.closeRealtimeAsrSession(streamRole, "reconnect", false, false);
+          if (runtime.drainGeneration !== startGen) break;
           const backoff = runtime.reconnectBackoffMs;
           runtime.reconnectBackoffMs = Math.min(10_000, runtime.reconnectBackoffMs * 2);
           await sleep(backoff);
@@ -3284,6 +3532,23 @@ export class MeetingSessionDO extends DurableObject<Env> {
       chunks.push(payload);
     }
     return chunks;
+  }
+
+  private getAsrProvider(): "funASR" | "local-whisper" {
+    const provider = (this.env.ASR_PROVIDER ?? "funASR").toLowerCase();
+    if (provider === "local-whisper") {
+      if (!this.localWhisperProvider) {
+        const endpoint = this.env.ASR_ENDPOINT ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "http://127.0.0.1:8000";
+        this.localWhisperProvider = new LocalWhisperASRProvider({
+          endpoint,
+          language: this.env.ASR_LANGUAGE ?? "auto",
+          timeout_ms: parseInt(this.env.ASR_TIMEOUT_MS ?? "30000", 10),
+          apiKey: (this.env.INFERENCE_API_KEY ?? "").trim(),
+        });
+      }
+      return "local-whisper";
+    }
+    return "funASR";
   }
 
   private async runFunAsrDashScope(wavBytes: Uint8Array, model: string): Promise<{ text: string; latencyMs: number }> {
@@ -3779,7 +4044,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const chunkRange = await this.loadChunkRange(sessionId, streamRole, startSeq, nextEndSeq);
         const pcm = concatUint8Arrays(chunkRange);
         const wavBytes = pcm16ToWavBytes(pcm);
-        const result = await this.runFunAsrDashScope(wavBytes, asrState.model);
+        let result: { text: string; latencyMs: number };
+        const asrProviderType = this.getAsrProvider();
+        if (asrProviderType === "local-whisper" && this.localWhisperProvider) {
+          result = await this.localWhisperProvider.transcribeWindow(wavBytes);
+        } else {
+          result = await this.runFunAsrDashScope(wavBytes, asrState.model);
+        }
 
         const createdAt = new Date().toISOString();
         const startMs = (startSeq - 1) * 1000;
@@ -3796,7 +4067,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           end_ms: endMs,
           duration_ms: endMs - startMs,
           asr_model: asrState.model,
-          asr_provider: "dashscope",
+          asr_provider: asrProviderType === "local-whisper" ? "local-whisper" : "dashscope",
           confidence: null,
           created_at: createdAt,
           latency_ms: result.latencyMs
@@ -3858,18 +4129,24 @@ export class MeetingSessionDO extends DurableObject<Env> {
           await this.appendTeacherSpeakerEvent(sessionId, utterance);
         }
 
+        // Persist state after every window to keep the DO I/O gate alive
+        // and prevent "Promise will never complete" in workerd runtime
+        asrByStream[streamRole] = asrState;
+        await this.storeAsrByStream(asrByStream);
+        utterancesByStream[streamRole] = utterances;
+        await this.storeUtterancesRawByStream(utterancesByStream);
+
+        if (generated % 5 === 0) {
+          console.log(`[asr] ${streamRole} progress: ${generated} windows, last_seq=${nextEndSeq}/${ingest.last_seq}`);
+        }
+
         nextEndSeq += asrState.hop_seconds;
       }
 
-      utterancesByStream[streamRole] = utterances;
-      await this.storeUtterancesRawByStream(utterancesByStream);
-
+      // Final merge after all windows
       const mergedByStream = await this.loadUtterancesMergedByStream();
       mergedByStream[streamRole] = mergeUtterances(utterances);
       await this.storeUtterancesMergedByStream(mergedByStream);
-
-      asrByStream[streamRole] = asrState;
-      await this.storeAsrByStream(asrByStream);
 
       return {
         generated,
@@ -3889,6 +4166,16 @@ export class MeetingSessionDO extends DurableObject<Env> {
       asrState.next_retry_after_ms = Date.now() + backoffMs;
       asrByStream[streamRole] = asrState;
       await this.storeAsrByStream(asrByStream);
+
+      // Persist any utterances successfully transcribed before the error
+      if (generated > 0) {
+        utterancesByStream[streamRole] = utterances;
+        await this.storeUtterancesRawByStream(utterancesByStream);
+        const mergedByStream = await this.loadUtterancesMergedByStream();
+        mergedByStream[streamRole] = mergeUtterances(utterances);
+        await this.storeUtterancesMergedByStream(mergedByStream);
+        console.log(`[asr] persisted ${generated} partial utterances for ${streamRole} despite error: ${(error as Error).message}`);
+      }
 
       return {
         generated,
@@ -4040,6 +4327,168 @@ export class MeetingSessionDO extends DurableObject<Env> {
       warnings: response.warnings,
       timeline: response.timeline
     };
+  }
+
+  private async invokeInferenceCheckpoint(payload: CheckpointRequestPayload): Promise<{
+    data: CheckpointResult;
+    backend_used: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
+    const path = this.env.INFERENCE_CHECKPOINT_PATH ?? "/analysis/checkpoint";
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "30000");
+    const response = await this.callInferenceWithFailover<CheckpointResult>({
+      endpoint: "analysis_checkpoint",
+      path,
+      timeoutMs,
+      body: payload
+    });
+    return {
+      data: response.data,
+      backend_used: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
+  }
+
+  private async invokeInferenceMergeCheckpoints(payload: MergeCheckpointsRequestPayload): Promise<{
+    data: Record<string, unknown>;
+    backend_used: "primary" | "secondary";
+    degraded: boolean;
+    warnings: string[];
+    timeline: InferenceBackendTimelineItem[];
+  }> {
+    const path = this.env.INFERENCE_MERGE_CHECKPOINTS_PATH ?? "/analysis/merge-checkpoints";
+    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "45000");
+    const response = await this.callInferenceWithFailover<Record<string, unknown>>({
+      endpoint: "analysis_merge_checkpoints",
+      path,
+      timeoutMs,
+      body: payload
+    });
+    return {
+      data: response.data,
+      backend_used: response.backend,
+      degraded: response.degraded,
+      warnings: response.warnings,
+      timeline: response.timeline
+    };
+  }
+
+  private async loadCheckpoints(): Promise<CheckpointResult[]> {
+    return (await this.ctx.storage.get<CheckpointResult[]>(STORAGE_KEY_CHECKPOINTS)) ?? [];
+  }
+
+  private async storeCheckpoints(checkpoints: CheckpointResult[]): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_CHECKPOINTS, checkpoints);
+  }
+
+  private async loadLastCheckpointAt(): Promise<number> {
+    return (await this.ctx.storage.get<number>(STORAGE_KEY_LAST_CHECKPOINT_AT)) ?? 0;
+  }
+
+  private async storeLastCheckpointAt(ms: number): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_LAST_CHECKPOINT_AT, ms);
+  }
+
+  private checkpointIntervalMs(): number {
+    return parseInt(this.env.CHECKPOINT_INTERVAL_MS ?? "300000", 10);
+  }
+
+  /**
+   * Schedule a checkpoint if enough time has elapsed since the last one.
+   * Runs asynchronously after each utterance — failures are logged but do not
+   * block the ASR pipeline.
+   */
+  private async maybeScheduleCheckpoint(
+    sessionId: string,
+    latestUtteranceEndMs: number,
+    streamRole: StreamRole
+  ): Promise<void> {
+    // Only schedule checkpoints for student utterances (the interview content)
+    if (streamRole !== "students") return;
+
+    const intervalMs = this.checkpointIntervalMs();
+    if (intervalMs <= 0) return; // disabled
+
+    const lastCheckpointAt = await this.loadLastCheckpointAt();
+    if (latestUtteranceEndMs - lastCheckpointAt < intervalMs) return;
+
+    try {
+      const checkpoints = await this.loadCheckpoints();
+      const checkpointIndex = checkpoints.length;
+
+      // Gather recent utterances (since last checkpoint)
+      const utterancesByStream = await this.loadUtterancesRawByStream();
+      const allUtterances = [
+        ...utterancesByStream.teacher,
+        ...utterancesByStream.students,
+      ].sort((a, b) => a.start_ms - b.start_ms);
+
+      const recentUtterances = allUtterances.filter(
+        (u) => u.end_ms > lastCheckpointAt
+      );
+
+      if (recentUtterances.length === 0) return;
+
+      // Gather recent memos
+      const memos = (await this.ctx.storage.get<MemoItem[]>(STORAGE_KEY_MEMOS)) ?? [];
+      const recentMemos = memos.filter(
+        (m) => m.created_at_ms > lastCheckpointAt
+      );
+
+      // Build stats from recent utterances
+      const transcript: TranscriptItem[] = recentUtterances.map((u) => ({
+        utterance_id: u.utterance_id,
+        stream_role: u.stream_role as TranscriptItem["stream_role"],
+        cluster_id: null,
+        speaker_name: null,
+        decision: null,
+        text: u.text,
+        start_ms: u.start_ms,
+        end_ms: u.end_ms,
+        duration_ms: u.duration_ms,
+      }));
+      const stats = computeSpeakerStats(transcript);
+
+      const locale = (this.env.DEFAULT_LOCALE ?? "zh-CN");
+
+      const payload: CheckpointRequestPayload = {
+        session_id: sessionId,
+        checkpoint_index: checkpointIndex,
+        utterances: transcript.map((t) => ({
+          utterance_id: t.utterance_id,
+          stream_role: t.stream_role,
+          speaker_name: t.speaker_name ?? null,
+          cluster_id: t.cluster_id ?? null,
+          decision: t.decision ?? null,
+          text: t.text,
+          start_ms: t.start_ms,
+          end_ms: t.end_ms,
+          duration_ms: t.duration_ms,
+        })),
+        memos: recentMemos,
+        stats,
+        locale,
+      };
+
+      const result = await this.invokeInferenceCheckpoint(payload);
+      checkpoints.push(result.data);
+      await this.storeCheckpoints(checkpoints);
+      await this.storeLastCheckpointAt(latestUtteranceEndMs);
+
+      console.log(
+        `[checkpoint] session=${sessionId} index=${checkpointIndex} utterances=${recentUtterances.length} stored OK`
+      );
+    } catch (error) {
+      // Checkpoint failures are non-fatal — log and continue
+      console.error(
+        `[checkpoint] session=${sessionId} failed:`,
+        (error as Error).message
+      );
+    }
   }
 
   private async invokeInferenceRegenerateClaim(payload: InferenceRegenerateClaimRequest): Promise<{
@@ -4204,15 +4653,6 @@ export class MeetingSessionDO extends DurableObject<Env> {
     try {
       await this.ensureFinalizeJobActive(jobId);
       const timeoutMs = this.finalizeTimeoutMs();
-      const drainWithTimeout = async (streamRole: StreamRole): Promise<void> => {
-        await Promise.race([
-          this.drainRealtimeQueue(sessionId, streamRole),
-          new Promise<void>((_, reject) => {
-            setTimeout(() => reject(new Error(`drain timeout stream=${streamRole}`)), timeoutMs);
-          })
-        ]);
-      };
-
       const ingestByStream = await this.loadIngestByStream(sessionId);
       const cutoff = {
         mixed: ingestByStream.mixed.last_seq,
@@ -4220,19 +4660,212 @@ export class MeetingSessionDO extends DurableObject<Env> {
         students: ingestByStream.students.last_seq
       };
 
+      // ── Drain ASR queues (non-fatal) ──
+      // Drain is best-effort: if DashScope ASR is unreachable, we continue with
+      // whatever transcript data we already have. This prevents external service
+      // outages from blocking the entire finalization pipeline.
       await this.updateFinalizeV2Status(jobId, { stage: "drain", progress: 18 });
       await this.ensureFinalizeJobActive(jobId);
-      await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
+      const drainTimeoutMs = Math.min(timeoutMs, 30_000); // cap drain at 30s
+      const drainWithTimeout = async (streamRole: StreamRole): Promise<void> => {
+        await Promise.race([
+          this.drainRealtimeQueue(sessionId, streamRole),
+          new Promise<void>((_, reject) => {
+            setTimeout(() => reject(new Error(`drain timeout stream=${streamRole}`)), drainTimeoutMs);
+          })
+        ]);
+      };
+      try {
+        await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
+      } catch (drainErr) {
+        console.warn(`[finalize-v2] drain failed (non-fatal), continuing: ${(drainErr as Error).message}`);
+        finalizeWarnings.push(`drain degraded: ${(drainErr as Error).message}`);
+        finalizeDegraded = true;
+      }
 
       await this.updateFinalizeV2Status(jobId, { stage: "replay_gap", progress: 30 });
       await this.ensureFinalizeJobActive(jobId);
-      await Promise.all([this.replayGapFromR2(sessionId, "teacher"), this.replayGapFromR2(sessionId, "students")]);
-      await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
+      try {
+        await Promise.all([this.replayGapFromR2(sessionId, "teacher"), this.replayGapFromR2(sessionId, "students")]);
+        await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
+      } catch (replayErr) {
+        console.warn(`[finalize-v2] replay/drain failed (non-fatal), continuing: ${(replayErr as Error).message}`);
+        finalizeWarnings.push(`replay degraded: ${(replayErr as Error).message}`);
+        finalizeDegraded = true;
+      }
 
-      await this.closeRealtimeAsrSession("teacher", "finalize-v2", false, true);
-      await this.closeRealtimeAsrSession("students", "finalize-v2", false, true);
+      // Force-close ASR sessions and clear queues to prevent orphaned drain loops
+      await this.closeRealtimeAsrSession("teacher", "finalize-v2", true, false);
+      await this.closeRealtimeAsrSession("students", "finalize-v2", true, false);
       await this.refreshAsrStreamMetrics(sessionId, "teacher");
       await this.refreshAsrStreamMetrics(sessionId, "students");
+
+      // ── Windowed ASR for local-whisper (drain/replay only applies to FunASR realtime) ──
+      // When using local-whisper, audio is NOT streamed to a realtime ASR WebSocket during
+      // recording. Instead, we must run windowed transcription on all stored audio now.
+      if (this.getAsrProvider() === "local-whisper") {
+        await this.updateFinalizeV2Status(jobId, { stage: "local_asr", progress: 25 });
+        await this.ensureFinalizeJobActive(jobId);
+        try {
+          // Log diagnostic info before running windowed ASR
+          const diagIngest = await this.loadIngestByStream(sessionId);
+          const diagAsr = await this.loadAsrByStream();
+          console.log(`[finalize-v2] local-whisper pre-check: teacher.last_seq=${diagIngest.teacher.last_seq} students.last_seq=${diagIngest.students.last_seq} asr_enabled=${diagAsr.students.enabled} window_seconds=${diagAsr.students.window_seconds}`);
+
+          // Process each stream sequentially, in small batches (BATCH_SIZE windows)
+          // with heartbeat updates between batches. This prevents the DO from being
+          // evicted during long ASR processing (each window takes ~10s).
+          const BATCH_SIZE = 5;
+          const MAX_CONSECUTIVE_FAILURES = 5;
+          let totalGenerated = 0;
+
+          for (const role of ["teacher", "students"] as const) {
+            const ingest = role === "teacher" ? diagIngest.teacher : diagIngest.students;
+            if (ingest.last_seq <= 0) {
+              console.log(`[finalize-v2] local-whisper skip ${role}: no audio (last_seq=${ingest.last_seq})`);
+              continue;
+            }
+
+            const estimatedWindows = Math.floor(ingest.last_seq / (diagAsr[role].hop_seconds || 10));
+            console.log(`[finalize-v2] local-whisper starting ${role}: ~${estimatedWindows} windows`);
+            let roleGenerated = 0;
+            let roleFailures = 0;
+
+            while (true) {
+              // Update heartbeat and progress before each batch
+              const progressPct = estimatedWindows > 0
+                ? Math.min(45, 25 + Math.round((roleGenerated / estimatedWindows) * 20))
+                : 25;
+              await this.updateFinalizeV2Status(jobId, { stage: "local_asr", progress: progressPct });
+              await this.ensureFinalizeJobActive(jobId);
+
+              // Reset failures before each batch so backoff guard doesn't block
+              const asrByStream = await this.loadAsrByStream();
+              asrByStream[role].consecutive_failures = 0;
+              asrByStream[role].next_retry_after_ms = 0;
+              await this.storeAsrByStream(asrByStream);
+
+              const result = await this.maybeRunAsrWindows(sessionId, role, true, BATCH_SIZE);
+
+              if (result.generated > 0) {
+                roleGenerated += result.generated;
+                totalGenerated += result.generated;
+                roleFailures = 0;
+                console.log(`[finalize-v2] local-whisper ${role} batch: +${result.generated} (total=${roleGenerated}/${estimatedWindows}, last_seq=${result.last_window_end_seq})`);
+              } else if (result.last_error) {
+                roleFailures += 1;
+                console.warn(`[finalize-v2] local-whisper ${role} error (${roleFailures}/${MAX_CONSECUTIVE_FAILURES}): ${result.last_error}`);
+                if (roleFailures >= MAX_CONSECUTIVE_FAILURES) {
+                  console.warn(`[finalize-v2] local-whisper ${role}: too many failures, stopping`);
+                  finalizeWarnings.push(`local-whisper ${role}: stopped after ${roleFailures} consecutive failures`);
+                  break;
+                }
+                await new Promise((r) => setTimeout(r, 3000));
+              } else {
+                // No error and no generated = all windows done for this stream
+                console.log(`[finalize-v2] local-whisper ${role} complete: ${roleGenerated} windows`);
+                break;
+              }
+            }
+          }
+
+          console.log(`[finalize-v2] local-whisper completed: ${totalGenerated} total windows transcribed`);
+          if (totalGenerated === 0) {
+            finalizeWarnings.push("local-whisper produced 0 utterances");
+          }
+        } catch (localAsrErr) {
+          console.warn(`[finalize-v2] local-whisper ASR failed (non-fatal): ${(localAsrErr as Error).message}`);
+          finalizeWarnings.push(`local-whisper degraded: ${(localAsrErr as Error).message}`);
+          finalizeDegraded = true;
+        }
+      }
+
+      // ── Merge finalize metadata into storage (memos, free_form_notes) ──
+      // Desktop may send memos/notes in finalize metadata as a convenience.
+      // Merge them into DO storage so the pipeline can read them uniformly.
+      if (Array.isArray((metadata as Record<string, unknown>)?.memos)) {
+        const incomingMemos = (metadata as Record<string, unknown>).memos as Array<Record<string, unknown>>;
+        const existingMemos = await this.loadMemos();
+        const existingIds = new Set(existingMemos.map((m) => m.memo_id));
+        for (const raw of incomingMemos) {
+          const memoId = typeof raw.memo_id === "string" ? raw.memo_id : `m_meta_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          if (existingIds.has(memoId)) continue;
+          existingMemos.push({
+            memo_id: memoId,
+            created_at_ms: typeof raw.created_at_ms === "number" ? raw.created_at_ms : Date.now(),
+            author_role: "teacher",
+            type: (["observation", "evidence", "question", "decision", "score"].includes(raw.type as string) ? raw.type : "observation") as MemoItem["type"],
+            tags: Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === "string") : [],
+            text: typeof raw.text === "string" ? raw.text : "",
+            stage: typeof raw.stage === "string" ? raw.stage : undefined,
+            stage_index: typeof raw.stage_index === "number" ? raw.stage_index : undefined,
+          });
+          existingIds.add(memoId);
+        }
+        await this.storeMemos(existingMemos);
+      }
+      if (typeof (metadata as Record<string, unknown>)?.free_form_notes === "string") {
+        const preState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const cfg = { ...(preState.config ?? {}) } as Record<string, unknown>;
+        cfg.free_form_notes = (metadata as Record<string, unknown>).free_form_notes;
+        preState.config = cfg;
+        await this.ctx.storage.put(STORAGE_KEY_STATE, preState);
+      }
+
+      // ── Global clustering stage ──
+      // If edge diarization is active, extract any missing embeddings from R2
+      // audio and run global agglomerative clustering to produce consistent
+      // speaker IDs across the entire session.
+      await this.updateFinalizeV2Status(jobId, { stage: "cluster", progress: 36 });
+      await this.ensureFinalizeJobActive(jobId);
+      let globalClusterResult: GlobalClusterResult | null = null;
+      let clusterRosterMapping: Map<string, string> | null = null;
+      {
+        const preState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const preDiarizationBackend = preState.config?.diarization_backend === "edge" ? "edge" : "cloud";
+        if (preDiarizationBackend === "edge") {
+          try {
+            // Extract missing embeddings for any turns not yet in the cache
+            const preSpeakerLogs = await this.loadSpeakerLogs();
+            if (this.embeddingCache.size === 0 && preSpeakerLogs.turns.length > 0) {
+              await this.extractEmbeddingsForTurns(sessionId, preSpeakerLogs, "students");
+            }
+
+            const embeddings = this.embeddingCache.getAllEmbeddings();
+            if (embeddings.length >= 2) {
+              globalClusterResult = globalCluster(embeddings, {
+                distance_threshold: 0.3,
+                linkage: "average",
+                min_cluster_size: 1
+              });
+
+              // Build roster participants with enrollment embeddings for mapping
+              const rosterParticipants: RosterParticipant[] = (preState.roster ?? []).map((r) => {
+                const profile = (preState.participant_profiles ?? []).find(
+                  (p) => p.name === r.name
+                );
+                return {
+                  name: r.name,
+                  enrollment_embedding: profile?.centroid?.length
+                    ? new Float32Array(profile.centroid)
+                    : undefined
+                };
+              });
+
+              clusterRosterMapping = mapClustersToRoster(globalClusterResult, rosterParticipants, 0.65);
+              console.log(
+                `[finalize-v2] global clustering: ${embeddings.length} embeddings → ${globalClusterResult.clusters.size} clusters, confidence=${globalClusterResult.confidence.toFixed(2)}`
+              );
+            } else if (embeddings.length > 0) {
+              console.log(`[finalize-v2] only ${embeddings.length} embedding(s), skipping clustering`);
+            }
+          } catch (clusterErr) {
+            console.warn(`[finalize-v2] clustering failed (non-fatal): ${(clusterErr as Error).message}`);
+            finalizeWarnings.push(`clustering degraded: ${(clusterErr as Error).message}`);
+            finalizeDegraded = true;
+          }
+        }
+      }
 
       await this.updateFinalizeV2Status(jobId, { stage: "reconcile", progress: 42 });
       const [stateRaw, events, rawByStream, mergedByStream, memos, speakerLogsStored, asrByStream] = await Promise.all([
@@ -4255,7 +4888,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         events,
         speakerLogs: speakerLogsStored,
         state,
-        diarizationBackend
+        diarizationBackend,
+        roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
+        globalClusterResult,
+        clusterRosterMapping,
+        cachedEmbeddings: this.embeddingCache.getAllEmbeddings()
       });
 
       mergedByStream.teacher = mergeUtterances(rawByStream.teacher);
@@ -4320,9 +4957,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const memoFirstValidation = validatePersonFeedbackEvidence(memoFirstReport.per_person);
       const validationMs = Date.now() - validationStart;
       if (!memoFirstValidation.valid || !memoFirstStrictValidation.valid) {
-        throw new Error(
-          `report evidence validation failed: claim_count=${memoFirstStrictValidation.claimCount} invalid_claim_count=${memoFirstStrictValidation.invalidCount}`
+        // Non-fatal: memo-first baseline has invalid evidence refs (common when drain
+        // was degraded). Continue to LLM synthesis which may produce valid refs.
+        console.warn(
+          `[finalize-v2] memo-first evidence validation failed (non-fatal): claims=${memoFirstStrictValidation.claimCount} invalid=${memoFirstStrictValidation.invalidCount}`
         );
+        finalizeWarnings.push(`memo-first evidence invalid: ${memoFirstStrictValidation.invalidCount}/${memoFirstStrictValidation.claimCount} claims`);
+        finalizeDegraded = true;
       }
 
       await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 70 });
@@ -4369,68 +5010,122 @@ export class MeetingSessionDO extends DurableObject<Env> {
       let llmElapsedMs: number | null = null;
       let pipelineMode: "memo_first_with_llm_polish" | "llm_core_synthesis" = "memo_first_with_llm_polish";
 
-      // ── LLM-Core Synthesis Pipeline ──
+      // ── LLM-Core Synthesis Pipeline (with checkpoint merge support) ──
+      const storedCheckpoints = await this.loadCheckpoints();
+      const useCheckpointMerge = storedCheckpoints.length > 0;
       try {
         llmAttempted = true;
+        const fullConfig = (state.config ?? {}) as Record<string, unknown>;
         const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
           sessionConfig: {
-            mode: (state.config as Record<string, unknown>)?.mode as "1v1" | "group" | undefined,
-            interviewer_name: (state.config as Record<string, unknown>)?.interviewer_name as string | undefined,
+            mode: fullConfig.mode as "1v1" | "group" | undefined,
+            interviewer_name: fullConfig.interviewer_name as string | undefined,
+            position_title: fullConfig.position_title as string | undefined,
+            company_name: fullConfig.company_name as string | undefined,
             stages: configStages,
+            free_form_notes: fullConfig.free_form_notes as string | undefined,
+            rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
           },
         });
 
-        const synthPayload = buildSynthesizePayload({
-          sessionId,
-          transcript,
-          memos: enrichedMemos,
-          evidence,
-          stats,
-          events: analysisEvents.map((evt: Record<string, unknown>) => ({
-            event_id: String(evt.event_id ?? ""),
-            event_type: String(evt.event_type ?? ""),
-            actor: evt.actor != null ? String(evt.actor) : null,
-            target: evt.target != null ? String(evt.target) : null,
-            time_range_ms: Array.isArray(evt.time_range_ms) ? (evt.time_range_ms as number[]) : [],
-            utterance_ids: Array.isArray(evt.utterance_ids) ? (evt.utterance_ids as string[]) : [],
-            quote: evt.quote != null ? String(evt.quote) : null,
-            confidence: typeof evt.confidence === "number" ? evt.confidence : 0.5,
-            rationale: evt.rationale != null ? String(evt.rationale) : null,
-          })),
-          bindings: memoBindings,
-          rubric,
-          sessionContext,
-          freeFormNotes,
-          historical: [],
-          stages: contextStages.length > 0 ? contextStages : configStages,
-          locale,
-        });
-
+        let synthData: Record<string, unknown>;
         const synthStart = Date.now();
-        const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
-        llmElapsedMs = Date.now() - synthStart;
-        reportTimeline = synthResult.timeline;
 
-        if (synthResult.warnings.length > 0) {
-          finalizeWarnings.push(...synthResult.warnings);
-        }
-        if (synthResult.degraded) {
-          finalizeDegraded = true;
+        if (useCheckpointMerge) {
+          // ── Checkpoint merge path: merge pre-computed checkpoint summaries ──
+          console.log(
+            `[finalize] session=${sessionId} using checkpoint merge: ${storedCheckpoints.length} checkpoints`
+          );
+          const mergePayload: MergeCheckpointsRequestPayload = {
+            session_id: sessionId,
+            checkpoints: storedCheckpoints,
+            final_stats: stats,
+            final_memos: enrichedMemos,
+            evidence: evidence.map((e) => {
+              let sk = e.speaker?.person_id ?? e.speaker?.display_name ?? e.speaker?.cluster_id ?? null;
+              if ((!sk || /^c\d+$/.test(sk) || sk === "unknown") && e.quote) {
+                const quoteLower = e.quote.toLowerCase();
+                for (const stat of stats) {
+                  const name = stat.speaker_name?.trim();
+                  if (name && name !== "unknown" && name !== "teacher" && quoteLower.includes(name.toLowerCase())) {
+                    sk = name;
+                    break;
+                  }
+                }
+              }
+              return { ...e, speaker_key: sk };
+            }),
+            locale,
+          };
+          const mergeResult = await this.invokeInferenceMergeCheckpoints(mergePayload);
+          llmElapsedMs = Date.now() - synthStart;
+          reportTimeline = mergeResult.timeline;
+          synthData = mergeResult.data;
+          if (mergeResult.warnings.length > 0) {
+            finalizeWarnings.push(...mergeResult.warnings);
+          }
+          if (mergeResult.degraded) {
+            finalizeDegraded = true;
+          }
+        } else {
+          // ── Direct synthesis path: short interviews without checkpoints ──
+          const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
+          const synthPayload = buildSynthesizePayload({
+            sessionId,
+            transcript,
+            memos: enrichedMemos,
+            evidence,
+            stats,
+            events: analysisEvents.map((evt: Record<string, unknown>) => ({
+              event_id: String(evt.event_id ?? ""),
+              event_type: String(evt.event_type ?? ""),
+              actor: evt.actor != null ? String(evt.actor) : null,
+              target: evt.target != null ? String(evt.target) : null,
+              time_range_ms: Array.isArray(evt.time_range_ms) ? (evt.time_range_ms as number[]) : [],
+              utterance_ids: Array.isArray(evt.utterance_ids) ? (evt.utterance_ids as string[]) : [],
+              quote: evt.quote != null ? String(evt.quote) : null,
+              confidence: typeof evt.confidence === "number" ? evt.confidence : 0.5,
+              rationale: evt.rationale != null ? String(evt.rationale) : null,
+            })),
+            bindings: memoBindings,
+            rubric,
+            sessionContext,
+            freeFormNotes,
+            historical: [],
+            stages: contextStages.length > 0 ? contextStages : configStages,
+            locale,
+            nameAliases: configNameAliases,
+          });
+
+          const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
+          llmElapsedMs = Date.now() - synthStart;
+          reportTimeline = synthResult.timeline;
+          synthData = synthResult.data;
+          if (synthResult.warnings.length > 0) {
+            finalizeWarnings.push(...synthResult.warnings);
+          }
+          if (synthResult.degraded) {
+            finalizeDegraded = true;
+          }
         }
 
-        const synthData = synthResult.data;
         const candidatePerPerson = Array.isArray(synthData?.per_person) ? (synthData.per_person as PersonFeedbackItem[]) : [];
         const candidateOverall = (synthData?.overall ?? memoFirstReport.overall) as unknown;
         const candidateQuality =
           synthData?.quality && typeof synthData.quality === "object" ? (synthData.quality as Partial<ReportQualityMeta>) : null;
 
         if (candidatePerPerson.length > 0) {
+          // Strip claims with empty/invalid evidence_refs before validation
+          const { sanitized: sanitizedPerPerson, strippedCount } = this.sanitizeClaimEvidenceRefs(candidatePerPerson, evidence);
+          if (strippedCount > 0) {
+            finalizeWarnings.push(`sanitized ${strippedCount} claims with empty/invalid evidence_refs`);
+          }
           const candidateValidation = this.validateClaimEvidenceRefs({
             evidence,
-            per_person: candidatePerPerson
+            per_person: sanitizedPerPerson
           } as ResultV2);
           if (candidateValidation.valid) {
-            finalPerPerson = candidatePerPerson;
+            finalPerPerson = sanitizedPerPerson;
             finalOverall = candidateOverall;
             llmSuccess = true;
             pipelineMode = "llm_core_synthesis";
@@ -4542,7 +5237,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         claimValidationFailures: [
           ...(finalStrictValidation.failures ?? []),
           ...synthQualityGate.failures,
-          ...((reportSource as string) === "llm_enhanced" || (reportSource as string) === "llm_synthesized" || (reportSource as string) === "llm_synthesized_truncated" ? [] : [reportBlockingReason || "llm report unavailable"])
+          ...(ACCEPTED_REPORT_SOURCES.has(reportSource) ? [] : [reportBlockingReason || "llm report unavailable"])
         ]
       });
       const finalTentative = unresolvedClusterCount > 0 || !qualityGateEvaluation.passed;
@@ -4556,7 +5251,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         needs_evidence_count: finalStrictValidation.needsEvidenceCount,
         report_source: reportSource,
         report_model: reportModel,
-        report_degraded: (reportSource as string) !== "llm_enhanced" && (reportSource as string) !== "llm_synthesized",
+        report_degraded: !ACCEPTED_REPORT_SOURCES.has(reportSource),
         report_error: reportError
       };
       const qualityGateSnapshot = {
@@ -4631,7 +5326,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         tentative: Boolean(resultV2.session.tentative),
         unresolved_cluster_count: Number(resultV2.session.unresolved_cluster_count || 0),
         ready: Boolean(
-          (resultV2.quality.report_source === "llm_enhanced" || resultV2.quality.report_source === "llm_synthesized")
+          ACCEPTED_REPORT_SOURCES.has(resultV2.quality.report_source ?? "")
           && resultV2.quality.needs_evidence_count === 0
         ),
         needs_evidence_count: Number(resultV2.quality.needs_evidence_count || 0),
@@ -4660,11 +5355,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
         total_ms: 0
       };
       cache.report_source = resultV2.quality.report_source ?? "memo_first";
-      cache.quality_gate_passed = (
-        cache.report_source === "llm_enhanced"
-        || cache.report_source === "llm_synthesized"
-        || cache.report_source === "llm_synthesized_truncated"
-      ) && resultV2.quality.needs_evidence_count === 0;
+      cache.quality_gate_passed =
+        ACCEPTED_REPORT_SOURCES.has(cache.report_source)
+        && resultV2.quality.needs_evidence_count === 0;
       cache.blocking_reason = cache.quality_gate_passed
         ? null
         : (resultV2.trace.quality_gate_failures?.[0] ?? "feedback quality gate failed");
@@ -4681,6 +5374,34 @@ export class MeetingSessionDO extends DurableObject<Env> {
         degraded: finalizeDegraded,
         backend_used: finalizeBackendUsed
       });
+
+      // ── Tier 2 background trigger ──
+      // After Tier 1 succeeds, check if Tier 2 batch re-processing is enabled.
+      // If so, schedule a DO alarm to run the Tier 2 job asynchronously.
+      if (this.tier2Enabled() && this.tier2AutoTrigger()) {
+        try {
+          const tier2: Tier2Status = {
+            enabled: true,
+            status: "pending",
+            started_at: null,
+            completed_at: null,
+            error: null,
+            report_version: "tier1_instant",
+            progress: 0,
+            warnings: []
+          };
+          await this.storeTier2Status(tier2);
+          // Schedule alarm for 2 seconds from now to start Tier 2
+          const tag = `tier2_${sessionId}_${Date.now()}`;
+          await this.ctx.storage.put(STORAGE_KEY_TIER2_ALARM_TAG, tag);
+          await this.ctx.storage.setAlarm(Date.now() + 2_000);
+          console.log(`[finalize-v2] tier2 scheduled for session=${sessionId}`);
+        } catch (tier2ScheduleErr) {
+          console.warn(
+            `[finalize-v2] failed to schedule tier2 (non-fatal): ${(tier2ScheduleErr as Error).message}`
+          );
+        }
+      }
     } catch (error) {
       const message = (error as Error).message;
       const current = await this.loadFinalizeV2Status();
@@ -4698,6 +5419,369 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
     } finally {
       await this.setFinalizeLock(false);
+    }
+  }
+
+  // ── Tier 2 Status Management ───────────────────────────────────────────
+
+  private tier2Enabled(): boolean {
+    return parseBool(this.env.TIER2_ENABLED, false);
+  }
+
+  private tier2AutoTrigger(): boolean {
+    return parseBool(this.env.TIER2_AUTO_TRIGGER, false);
+  }
+
+  private tier2BatchEndpoint(): string {
+    return (this.env.TIER2_BATCH_ENDPOINT ?? "").trim() || `${this.env.INFERENCE_BASE_URL}/batch/process`;
+  }
+
+  private defaultTier2Status(): Tier2Status {
+    return {
+      enabled: this.tier2Enabled(),
+      status: "idle",
+      started_at: null,
+      completed_at: null,
+      error: null,
+      report_version: "tier1_instant",
+      progress: 0,
+      warnings: []
+    };
+  }
+
+  private async loadTier2Status(): Promise<Tier2Status> {
+    const stored = await this.ctx.storage.get<Tier2Status>(STORAGE_KEY_TIER2_STATUS);
+    if (!stored) return this.defaultTier2Status();
+    return {
+      ...stored,
+      enabled: stored.enabled ?? this.tier2Enabled(),
+      warnings: Array.isArray(stored.warnings) ? stored.warnings : []
+    };
+  }
+
+  private async storeTier2Status(status: Tier2Status): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_TIER2_STATUS, status);
+  }
+
+  private async updateTier2Status(patch: Partial<Tier2Status>): Promise<Tier2Status> {
+    const current = await this.loadTier2Status();
+    const next: Tier2Status = { ...current, ...patch };
+    await this.storeTier2Status(next);
+    return next;
+  }
+
+  private isTier2Terminal(status: Tier2Status["status"]): boolean {
+    return status === "succeeded" || status === "failed" || status === "idle";
+  }
+
+  // ── Tier 2 Background Job ────────────────────────────────────────────
+
+  private async runTier2Job(sessionId: string): Promise<void> {
+    const tier2 = await this.loadTier2Status();
+    if (this.isTier2Terminal(tier2.status)) {
+      return; // Already completed or not pending
+    }
+
+    await this.updateTier2Status({
+      status: "downloading",
+      started_at: this.currentIsoTs(),
+      progress: 5
+    });
+
+    try {
+      // 1. Gather the audio chunks from R2 into a single PCM blob
+      const resultKey = await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2);
+      if (!resultKey) {
+        throw new Error("no result key found — tier1 may not have completed");
+      }
+      const sessionPrefix = resultKey.replace(/\/result_v2\.json$/, "");
+      const chunksPrefix = `${sessionPrefix}/chunks/`;
+
+      // Collect all PCM chunk keys sorted by name (sequential order)
+      const chunkKeys: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({
+          prefix: chunksPrefix,
+          cursor,
+          limit: 500
+        });
+        for (const obj of listing.objects) {
+          chunkKeys.push(obj.key);
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      if (chunkKeys.length === 0) {
+        throw new Error("no audio chunks found in R2 for tier2 processing");
+      }
+
+      chunkKeys.sort();
+
+      await this.updateTier2Status({ progress: 15 });
+
+      // Concatenate PCM chunks
+      const pcmParts: Uint8Array[] = [];
+      for (const key of chunkKeys) {
+        const obj = await this.env.RESULT_BUCKET.get(key);
+        if (obj) {
+          pcmParts.push(new Uint8Array(await obj.arrayBuffer()));
+        }
+      }
+      const fullPcm = concatUint8Arrays(pcmParts);
+      const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+
+      await this.updateTier2Status({
+        status: "transcribing",
+        progress: 25
+      });
+
+      // 2. Send to batch processor endpoint (/batch/process)
+      const endpoint = this.tier2BatchEndpoint();
+      const state = normalizeSessionState(
+        await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)
+      );
+      const numSpeakers = (state.roster ?? []).length || undefined;
+
+      // Upload as WAV via R2 presigned URL or direct POST
+      // For simplicity, we POST the audio directly as a base64 payload
+      const audioB64 = bytesToBase64(wavBytes);
+
+      const batchResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.env.INFERENCE_API_KEY
+            ? { "x-api-key": this.env.INFERENCE_API_KEY }
+            : {})
+        },
+        body: JSON.stringify({
+          audio_url: `data:audio/wav;base64,${audioB64}`,
+          num_speakers: numSpeakers,
+          language: getSessionLocale(state, this.env)
+        }),
+        signal: AbortSignal.timeout(180_000) // 3 min timeout
+      });
+
+      await this.updateTier2Status({
+        status: "diarizing",
+        progress: 50
+      });
+
+      if (!batchResponse.ok) {
+        const errText = await batchResponse.text().catch(() => "unknown");
+        throw new Error(`batch/process returned ${batchResponse.status}: ${errText}`);
+      }
+
+      const batchResult = (await batchResponse.json()) as {
+        transcript?: Array<{
+          utterance_id?: string;
+          speaker?: string;
+          text?: string;
+          start_ms?: number;
+          end_ms?: number;
+        }>;
+        speaker_stats?: Record<string, unknown>;
+        diarization?: Record<string, unknown>;
+      };
+
+      await this.updateTier2Status({
+        status: "reconciling",
+        progress: 65
+      });
+
+      // 3. Re-reconcile: merge batch transcript with manual bindings
+      const existingResult = await this.env.RESULT_BUCKET.get(resultKey);
+      if (!existingResult) {
+        throw new Error("could not load tier1 result for re-reconciliation");
+      }
+      const tier1Result = (await existingResult.json()) as ResultV2;
+
+      // Build enhanced transcript from batch result
+      const batchTranscript = (batchResult.transcript ?? []).map((item, idx) => ({
+        utterance_id: item.utterance_id ?? `tier2_utt_${idx}`,
+        stream_role: "students" as const,
+        cluster_id: null,
+        speaker_name: item.speaker ?? null,
+        decision: "auto" as const,
+        text: item.text ?? "",
+        start_ms: item.start_ms ?? 0,
+        end_ms: item.end_ms ?? 0,
+        duration_ms: (item.end_ms ?? 0) - (item.start_ms ?? 0)
+      }));
+
+      // Use batch transcript if it has data, otherwise keep tier1 transcript
+      const finalTranscript = batchTranscript.length > 0
+        ? batchTranscript
+        : tier1Result.transcript;
+
+      await this.updateTier2Status({
+        status: "reporting",
+        progress: 75
+      });
+
+      // 4. Re-generate stats
+      const tier2Stats = computeSpeakerStats(finalTranscript as TranscriptItem[]);
+      const mergedStats = this.mergeStatsWithRoster(tier2Stats, state);
+
+      // 5. Re-run LLM report synthesis with improved transcript
+      const tier2Warnings: string[] = [];
+      const memos = await this.loadMemos();
+      const enrichedMemos = addStageMetadata(memos, (state.config as Record<string, unknown>)?.stages as string[] ?? []);
+      const knownSpeakers = mergedStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
+      const memoBindings = extractMemoNames(enrichedMemos, knownSpeakers);
+      const evidence = buildMultiEvidence({
+        memos: enrichedMemos,
+        transcript: finalTranscript as TranscriptItem[],
+        bindings: memoBindings
+      });
+
+      const locale = getSessionLocale(state, this.env);
+      const fullConfig = (state.config ?? {}) as Record<string, unknown>;
+      const configStages: string[] = fullConfig.stages as string[] ?? [];
+      const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
+        sessionConfig: {
+          mode: fullConfig.mode as "1v1" | "group" | undefined,
+          interviewer_name: fullConfig.interviewer_name as string | undefined,
+          position_title: fullConfig.position_title as string | undefined,
+          company_name: fullConfig.company_name as string | undefined,
+          stages: configStages,
+          free_form_notes: fullConfig.free_form_notes as string | undefined,
+          rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
+        },
+      });
+      const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
+      const synthPayload = buildSynthesizePayload({
+        sessionId,
+        transcript: finalTranscript as TranscriptItem[],
+        memos: enrichedMemos,
+        evidence,
+        stats: mergedStats,
+        events: [],
+        bindings: memoBindings,
+        rubric,
+        sessionContext,
+        freeFormNotes,
+        historical: [],
+        stages: contextStages.length > 0 ? contextStages : configStages,
+        locale,
+        nameAliases: configNameAliases,
+      });
+      const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
+      if (synthResult.warnings.length > 0) {
+        tier2Warnings.push(...synthResult.warnings);
+      }
+
+      let finalPerPerson = tier1Result.per_person;
+      let finalOverall = tier1Result.overall;
+      let reportSource: ReportQualityMeta["report_source"] = "llm_synthesized";
+      let reportModel: string | null = null;
+
+      const synthData = synthResult.data;
+      const candidatePerPerson = Array.isArray(synthData?.per_person)
+        ? (synthData.per_person as PersonFeedbackItem[])
+        : [];
+      if (candidatePerPerson.length > 0) {
+        const { sanitized, strippedCount } = this.sanitizeClaimEvidenceRefs(candidatePerPerson, evidence);
+        if (strippedCount > 0) {
+          tier2Warnings.push(`tier2 sanitized ${strippedCount} claims with empty/invalid evidence_refs`);
+        }
+        const validation = this.validateClaimEvidenceRefs({
+          evidence,
+          per_person: sanitized
+        } as ResultV2);
+        if (validation.valid) {
+          finalPerPerson = sanitized;
+          finalOverall = (synthData?.overall ?? tier1Result.overall) as unknown;
+          const candidateQuality = synthData?.quality && typeof synthData.quality === "object"
+            ? (synthData.quality as Partial<ReportQualityMeta>)
+            : null;
+          reportSource = (candidateQuality?.report_source as typeof reportSource) ?? "llm_synthesized";
+          reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
+        } else {
+          tier2Warnings.push("tier2 LLM report had invalid evidence refs, keeping tier1 report content");
+          reportSource = tier1Result.quality.report_source ?? "memo_first";
+        }
+      } else {
+        tier2Warnings.push("tier2 LLM returned empty per_person, keeping tier1 report");
+        reportSource = tier1Result.quality.report_source ?? "memo_first";
+      }
+
+      await this.updateTier2Status({
+        status: "persisting",
+        progress: 90
+      });
+
+      // 6. Build and persist the tier2-refined result
+      const tier2FinalizedAt = this.currentIsoTs();
+      const tier2Quality: ReportQualityMeta = {
+        ...tier1Result.quality,
+        generated_at: tier2FinalizedAt,
+        report_source: reportSource,
+        report_model: reportModel,
+        report_degraded: false
+      };
+      const tier2ResultV2: ResultV2 = {
+        ...tier1Result,
+        transcript: finalTranscript,
+        stats: mergedStats,
+        evidence,
+        overall: finalOverall,
+        per_person: finalPerPerson,
+        quality: tier2Quality,
+        session: {
+          ...tier1Result.session,
+          finalized_at: tier2FinalizedAt
+        },
+        trace: {
+          ...tier1Result.trace,
+          generated_at: tier2FinalizedAt,
+          report_pipeline: {
+            mode: "llm_core_synthesis",
+            source: reportSource as "llm_synthesized",
+            llm_attempted: true,
+            llm_success: candidatePerPerson.length > 0,
+            llm_elapsed_ms: null,
+            blocking_reason: null
+          }
+        }
+      };
+
+      // Overwrite the result in R2
+      await this.env.RESULT_BUCKET.put(resultKey, JSON.stringify(tier2ResultV2), {
+        httpMetadata: { contentType: "application/json" }
+      });
+
+      // Update feedback cache
+      const cache = await this.loadFeedbackCache(sessionId);
+      cache.updated_at = tier2FinalizedAt;
+      cache.report = tier2ResultV2;
+      cache.person_summary_cache = tier2ResultV2.per_person;
+      cache.overall_summary_cache = tier2ResultV2.overall;
+      cache.evidence_index_cache = this.buildEvidenceIndex(tier2ResultV2.per_person);
+      cache.quality = tier2ResultV2.quality;
+      cache.report_source = reportSource ?? "llm_synthesized";
+      cache.ready = true;
+      await this.storeFeedbackCache(cache);
+
+      await this.updateTier2Status({
+        status: "succeeded",
+        completed_at: tier2FinalizedAt,
+        report_version: "tier2_refined",
+        progress: 100,
+        warnings: tier2Warnings
+      });
+
+      console.log(`[tier2] completed for session=${sessionId}`);
+    } catch (err) {
+      const message = (err as Error).message;
+      console.error(`[tier2] failed for session=${sessionId}: ${message}`);
+      await this.updateTier2Status({
+        status: "failed",
+        completed_at: this.currentIsoTs(),
+        error: message,
+        progress: 100
+      });
     }
   }
 
@@ -4807,11 +5891,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
     }
 
-    this.ctx.waitUntil(
-      this.maybeRefreshFeedbackCache(sessionId, false).catch((error) => {
-        console.error(`feedback cache refresh failed session=${sessionId}:`, error);
-      })
-    );
+    // NOTE: feedback cache refresh removed from audio chunk handler.
+    // The cache is refreshed on-demand when feedback endpoints are called
+    // (feedback-ready, feedback-open, etc.) — NOT on every audio chunk.
+    // Previously, ctx.waitUntil races caused hundreds of concurrent
+    // events+report LLM calls during recording, exhausting the thread pool
+    // and preventing the synthesize call from succeeding at finalization.
   }
 
   private deriveMixedCaptureState(captureByStream: Record<StreamRole, CaptureState>): CaptureState["capture_state"] {
@@ -5037,7 +6122,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
 
     if (action === "state" && request.method === "GET") {
-      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream, feedbackCache, dependencyHealth] =
+      const [state, events, updatedAt, ingestByStream, utterancesByStream, asrByStream, memos, finalizeV2Status, speakerLogs, asrCursorByStream, feedbackCache, dependencyHealth, tier2Status] =
         await Promise.all([
         this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
         this.loadSpeakerEvents(),
@@ -5050,7 +6135,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         this.loadSpeakerLogs(),
         this.loadAsrCursorByStream(),
         this.loadFeedbackCache(sessionId),
-        this.loadDependencyHealth()
+        this.loadDependencyHealth(),
+        this.loadTier2Status()
       ]);
 
       const utteranceCountByStream = {
@@ -5065,7 +6151,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         events,
         speakerLogs,
         state: normalizedState,
-        diarizationBackend
+        diarizationBackend,
+        roster: (normalizedState.roster ?? []).flatMap((r: RosterEntry) => [r.name, ...(r.aliases ?? [])])
       });
       const qualityMetrics = this.buildQualityMetrics(metricsTranscript, normalizedState.capture_by_stream ?? defaultCaptureByStream());
       const speechBackendMode = this.speechBackendMode(normalizedState, dependencyHealth);
@@ -5087,6 +6174,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         utterance_count_by_stream: utteranceCountByStream,
         memo_count: memos.length,
         finalize_v2: finalizeV2Status,
+        tier2: tier2Status,
         speaker_logs: speakerLogs,
         asr_cursor_by_stream: asrCursorByStream,
         dependency_health: dependencyHealth,
@@ -5128,7 +6216,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
           }
         }
         if (payload.diarization_backend) {
-          config.diarization_backend = payload.diarization_backend === "edge" ? "edge" : "cloud";
+          const db = payload.diarization_backend;
+          config.diarization_backend = db === "edge" || db === "local" ? "edge" : "cloud";
         } else if (config.diarization_backend !== "edge" && config.diarization_backend !== "cloud") {
           config.diarization_backend = this.diarizationBackendDefault();
         }
@@ -5148,10 +6237,27 @@ export class MeetingSessionDO extends DurableObject<Env> {
         if (teamsJoinUrl) {
           config.teams_join_url = teamsJoinUrl;
         }
+        if (Array.isArray(payload.stages)) {
+          config.stages = payload.stages.filter((s): s is string => typeof s === "string");
+        }
+        const freeFormNotes = valueAsString(payload.free_form_notes);
+        if (freeFormNotes) {
+          config.free_form_notes = freeFormNotes;
+        }
 
         const roster = parseRosterEntries(payload.participants ?? payload.teams_participants);
         if (roster.length > 0) {
           state.roster = roster;
+          // Extract name_aliases from roster entries that have aliases
+          const nameAliases: Record<string, string[]> = {};
+          for (const entry of roster) {
+            if (entry.aliases && entry.aliases.length > 0) {
+              nameAliases[entry.name] = entry.aliases;
+            }
+          }
+          if (Object.keys(nameAliases).length > 0) {
+            config.name_aliases = nameAliases;
+          }
         }
 
         state.config = config;
@@ -5280,11 +6386,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
         memos.push(item);
         await this.storeMemos(memos);
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
-        this.ctx.waitUntil(
-          this.maybeRefreshFeedbackCache(sessionId, true).catch((error) => {
-            console.error(`feedback cache refresh after memo failed session=${sessionId}:`, error);
-          })
-        );
+        // NOTE: Do NOT force-refresh feedback cache on every memo POST.
+        // Memos are stored in DO and included during finalization.
+        // Forcing refresh here wastes LLM tokens (12+ memos = 12+ LLM calls).
         return jsonResponse({
           session_id: sessionId,
           memo: item,
@@ -5341,18 +6445,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const openBlockingReason =
         cache.blocking_reason ??
         (withinBudget ? null : `feedback-open exceeded budget: opened_in_ms=${elapsedMs} target<=${FEEDBACK_TOTAL_BUDGET_MS}`);
+      const isReady = (cache.ready ?? false) && withinBudget && ACCEPTED_REPORT_SOURCES.has(cache.report_source ?? "");
       return jsonResponse({
         session_id: sessionId,
-        ready: cache.ready && withinBudget && cache.report_source === "llm_enhanced",
+        ready: isReady,
         within_budget: withinBudget,
         opened_in_ms: elapsedMs,
         budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
         timings: cache.timings,
         quality: cache.quality,
         report_source: cache.report_source,
-        blocking_reason: openBlockingReason,
+        blocking_reason: isReady ? null : openBlockingReason,
         quality_gate_passed: cache.quality_gate_passed,
-        report: cache.report
+        report: isReady ? cache.report : null
       });
     }
 
@@ -5582,11 +6687,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       cache.evidence_index_cache = this.buildEvidenceIndex(report.per_person);
       cache.quality = report.quality;
       cache.blocking_reason = null;
-      cache.ready = cache.quality_gate_passed && strictValidation.valid && (
-        cache.report_source === "llm_enhanced"
-        || cache.report_source === "llm_synthesized"
-        || cache.report_source === "llm_synthesized_truncated"
-      );
+      cache.ready = cache.quality_gate_passed && strictValidation.valid
+        && ACCEPTED_REPORT_SOURCES.has(cache.report_source);
       await this.storeFeedbackCache(cache);
       return jsonResponse({
         session_id: sessionId,
@@ -5665,12 +6767,26 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const merged = mergeSpeakerLogs(current, parsed);
         await this.storeSpeakerLogs(merged);
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, now);
+
+        // Async embedding extraction — non-blocking background work.
+        // Populates the EmbeddingCache for global clustering at finalization.
+        if (merged.source === "edge" && merged.turns.length > 0) {
+          const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+          if (state.config?.diarization_backend === "edge") {
+            this.ctx.waitUntil(
+              this.extractEmbeddingsForTurns(sessionId, merged, "students")
+                .catch(() => { /* non-critical: clustering works with partial embeddings */ })
+            );
+          }
+        }
+
         return jsonResponse({
           session_id: sessionId,
           source: merged.source,
           turns: merged.turns.length,
           clusters: merged.clusters.length,
           speaker_map: merged.speaker_map.length,
+          embedding_cache_size: this.embeddingCache.size,
           updated_at: merged.updated_at
         });
       });
@@ -5968,6 +7084,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
           removed_events: removedEvents,
           message: "asr state and utterances reset; chunks kept in R2"
         });
+      });
+    }
+
+    if (action === "tier2-status" && request.method === "GET") {
+      const tier2 = await this.loadTier2Status();
+      return jsonResponse({
+        session_id: sessionId,
+        ...tier2
       });
     }
 

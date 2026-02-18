@@ -9,7 +9,7 @@ import {
   type ReconcileUtterance,
   type ReconcileSpeakerEvent,
 } from "../src/reconcile";
-import { buildMultiEvidence, enrichEvidencePack } from "../src/finalize_v2";
+import { buildMultiEvidence, enrichEvidencePack, computeSpeakerStats } from "../src/finalize_v2";
 import type { SpeakerLogs, SpeakerMapItem } from "../src/types_v2";
 import type { GlobalClusterResult, CachedEmbedding } from "../src/providers/types";
 
@@ -758,5 +758,42 @@ describe("enrichEvidencePack", () => {
     // Rice's "I agree" should be detected
     const agreeEvidence = interactions.find(e => e.quote.toLowerCase().includes("agree"));
     expect(agreeEvidence).toBeDefined();
+  });
+});
+
+/* ── computeSpeakerStats global dedup ────────── */
+
+describe("computeSpeakerStats global dedup", () => {
+  it("should not exceed audio duration in total talk time", () => {
+    const transcript = [
+      { utterance_id: "u1", stream_role: "students" as const, cluster_id: "A", speaker_name: "A", text: "hello", start_ms: 0, end_ms: 10000, duration_ms: 10000 },
+      { utterance_id: "u2", stream_role: "students" as const, cluster_id: "B", speaker_name: "B", text: "world", start_ms: 5000, end_ms: 15000, duration_ms: 10000 },
+      { utterance_id: "u3", stream_role: "students" as const, cluster_id: "A", speaker_name: "A", text: "test", start_ms: 15000, end_ms: 20000, duration_ms: 5000 },
+    ];
+    // Audio is 0-20000ms = 20s. Naive sum = 25s. Should be <= 20s.
+    const stats = computeSpeakerStats(transcript);
+    const total = stats.reduce((s, item) => s + item.talk_time_ms, 0);
+    expect(total).toBeLessThanOrEqual(20000);
+  });
+
+  it("should split overlapping time equally between speakers", () => {
+    const transcript = [
+      { utterance_id: "u1", stream_role: "students" as const, cluster_id: "A", speaker_name: "A", text: "hello", start_ms: 0, end_ms: 10000, duration_ms: 10000 },
+      { utterance_id: "u2", stream_role: "students" as const, cluster_id: "B", speaker_name: "B", text: "world", start_ms: 0, end_ms: 10000, duration_ms: 10000 },
+    ];
+    // Both speak for 10s at exact same time. Each should get ~5s.
+    const stats = computeSpeakerStats(transcript);
+    const a = stats.find(s => s.speaker_key === "A");
+    const b = stats.find(s => s.speaker_key === "B");
+    expect(a!.talk_time_ms).toBe(5000);
+    expect(b!.talk_time_ms).toBe(5000);
+  });
+
+  it("should include talk_time_pct field", () => {
+    const transcript = [
+      { utterance_id: "u1", stream_role: "students" as const, cluster_id: "A", speaker_name: "A", text: "hello world this is a test", start_ms: 0, end_ms: 10000, duration_ms: 10000 },
+    ];
+    const stats = computeSpeakerStats(transcript);
+    expect(stats[0].talk_time_pct).toBeCloseTo(1.0);
   });
 });

@@ -95,6 +95,7 @@ export function computeSpeakerStats(transcript: TranscriptItem[]): SpeakerStatIt
       speaker_key: key,
       speaker_name: item.speaker_name ?? null,
       talk_time_ms: 0,
+      talk_time_pct: 0,
       turns: 0,
       silence_ms: 0,
       interruptions: 0,
@@ -106,7 +107,8 @@ export function computeSpeakerStats(transcript: TranscriptItem[]): SpeakerStatIt
     segmentsBySpeaker.get(key)!.push({ start_ms: item.start_ms, end_ms: item.end_ms });
   }
 
-  // Merge overlapping segments per speaker, then sum non-overlapping durations
+  // Merge overlapping segments per speaker, then sum non-overlapping durations.
+  // These values are used as a fallback; the global dedup phase below replaces them.
   for (const [key, segments] of segmentsBySpeaker) {
     segments.sort((a, b) => a.start_ms - b.start_ms);
     let totalMs = 0;
@@ -121,6 +123,91 @@ export function computeSpeakerStats(transcript: TranscriptItem[]): SpeakerStatIt
     }
     totalMs += Math.max(0, cur.end_ms - cur.start_ms);
     statMap.get(key)!.talk_time_ms = totalMs;
+  }
+
+  // ── Global timeline dedup: split cross-speaker overlaps fairly ──────
+  // Build merged (non-overlapping) segments per speaker for the timeline sweep.
+  const mergedBySpeaker = new Map<string, Array<{ start_ms: number; end_ms: number }>>();
+  for (const [key, segments] of segmentsBySpeaker) {
+    const sorted = [...segments].sort((a, b) => a.start_ms - b.start_ms);
+    const merged: Array<{ start_ms: number; end_ms: number }> = [];
+    let cur = { ...sorted[0] };
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].start_ms <= cur.end_ms) {
+        cur.end_ms = Math.max(cur.end_ms, sorted[i].end_ms);
+      } else {
+        merged.push(cur);
+        cur = { ...sorted[i] };
+      }
+    }
+    merged.push(cur);
+    mergedBySpeaker.set(key, merged);
+  }
+
+  // Build event timeline: for each speaker's merged segment, create start/end events.
+  // Event kind: 1 = start (speaker becomes active), -1 = end (speaker becomes inactive).
+  const events: Array<{ ms: number; kind: 1 | -1; speaker: string }> = [];
+  for (const [key, segments] of mergedBySpeaker) {
+    for (const seg of segments) {
+      events.push({ ms: seg.start_ms, kind: 1, speaker: key });
+      events.push({ ms: seg.end_ms, kind: -1, speaker: key });
+    }
+  }
+  // Sort: by ms ascending; at same ms, ends (-1) before starts (1) to close intervals first.
+  events.sort((a, b) => a.ms - b.ms || a.kind - b.kind);
+
+  // Walk timeline: for each interval between events, split time among active speakers.
+  const dedupedTime = new Map<string, number>();
+  for (const key of statMap.keys()) dedupedTime.set(key, 0);
+
+  const activeSpeakers = new Set<string>();
+  let prevMs = events.length > 0 ? events[0].ms : 0;
+
+  for (const ev of events) {
+    const dt = ev.ms - prevMs;
+    if (dt > 0 && activeSpeakers.size > 0) {
+      const share = dt / activeSpeakers.size;
+      for (const spk of activeSpeakers) {
+        dedupedTime.set(spk, (dedupedTime.get(spk) ?? 0) + share);
+      }
+    }
+    prevMs = ev.ms;
+    if (ev.kind === 1) {
+      activeSpeakers.add(ev.speaker);
+    } else {
+      activeSpeakers.delete(ev.speaker);
+    }
+  }
+
+  // Compute audio duration from the global extent of all utterances.
+  let globalMinMs = Infinity;
+  let globalMaxMs = -Infinity;
+  for (const item of items) {
+    if (item.start_ms < globalMinMs) globalMinMs = item.start_ms;
+    if (item.end_ms > globalMaxMs) globalMaxMs = item.end_ms;
+  }
+  const audioDurationMs = items.length > 0 ? Math.max(0, globalMaxMs - globalMinMs) : 0;
+
+  // Upper-bound clamp: if sum still exceeds audioDurationMs, scale proportionally.
+  let totalDeduped = 0;
+  for (const v of dedupedTime.values()) totalDeduped += v;
+  if (audioDurationMs > 0 && totalDeduped > audioDurationMs) {
+    const scale = audioDurationMs / totalDeduped;
+    for (const [key, val] of dedupedTime) {
+      dedupedTime.set(key, val * scale);
+    }
+    totalDeduped = audioDurationMs;
+  }
+
+  // Replace per-speaker talk_time_ms with deduped values, round to integer.
+  for (const [key, val] of dedupedTime) {
+    const stat = statMap.get(key);
+    if (stat) stat.talk_time_ms = Math.round(val);
+  }
+
+  // Set talk_time_pct for every stat item.
+  for (const stat of statMap.values()) {
+    stat.talk_time_pct = audioDurationMs > 0 ? stat.talk_time_ms / audioDurationMs : 0;
   }
 
   for (let i = 1; i < items.length; i += 1) {
@@ -906,6 +993,7 @@ export function buildMemoFirstReport(options: {
           speaker_key: "unknown",
           speaker_name: "unknown",
           talk_time_ms: 0,
+          talk_time_pct: 0,
           turns: 0,
           silence_ms: 0,
           interruptions: 0,
