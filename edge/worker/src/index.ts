@@ -53,6 +53,8 @@ import { EmbeddingCache } from "./embedding-cache";
 import { globalCluster, mapClustersToRoster } from "./global-cluster";
 import type { CachedEmbedding, GlobalClusterResult, CaptionEvent } from "./providers/types";
 import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
+import { ACSCaptionASRProvider } from "./providers/asr-acs-caption";
+import { ACSCaptionDiarizationProvider } from "./providers/diarization-acs-caption";
 import type { RosterParticipant } from "./global-cluster";
 import type {
   CheckpointRequestPayload,
@@ -4691,6 +4693,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         students: ingestByStream.students.last_seq
       };
 
+      // ── Caption mode: skip audio-dependent stages ──
+      const useCaptions = this.captionSource === 'acs-teams' && this.captionBuffer.length > 0;
+
+      if (!useCaptions) {
       // ── Drain ASR queues (non-fatal) ──
       // Drain is best-effort: if DashScope ASR is unreachable, we continue with
       // whatever transcript data we already have. This prevents external service
@@ -4730,11 +4736,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.closeRealtimeAsrSession("students", "finalize-v2", true, false);
       await this.refreshAsrStreamMetrics(sessionId, "teacher");
       await this.refreshAsrStreamMetrics(sessionId, "students");
+      } // end if (!useCaptions) — drain/replay/close
 
       // ── Windowed ASR for local-whisper (drain/replay only applies to FunASR realtime) ──
       // When using local-whisper, audio is NOT streamed to a realtime ASR WebSocket during
       // recording. Instead, we must run windowed transcription on all stored audio now.
-      if (this.getAsrProvider() === "local-whisper") {
+      if (!useCaptions && this.getAsrProvider() === "local-whisper") {
         await this.updateFinalizeV2Status(jobId, { stage: "local_asr", progress: 25 });
         await this.ensureFinalizeJobActive(jobId);
         try {
@@ -4847,10 +4854,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // If edge diarization is active, extract any missing embeddings from R2
       // audio and run global agglomerative clustering to produce consistent
       // speaker IDs across the entire session.
-      await this.updateFinalizeV2Status(jobId, { stage: "cluster", progress: 36 });
-      await this.ensureFinalizeJobActive(jobId);
+      // Caption mode skips clustering: Teams provides speaker identity directly.
       let globalClusterResult: GlobalClusterResult | null = null;
       let clusterRosterMapping: Map<string, string> | null = null;
+      if (!useCaptions) {
+      await this.updateFinalizeV2Status(jobId, { stage: "cluster", progress: 36 });
+      await this.ensureFinalizeJobActive(jobId);
       {
         const preState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
         const preDiarizationBackend = preState.config?.diarization_backend === "edge" ? "edge" : "cloud";
@@ -4897,83 +4906,69 @@ export class MeetingSessionDO extends DurableObject<Env> {
           }
         }
       }
+      } // end if (!useCaptions) — clustering
 
       await this.updateFinalizeV2Status(jobId, { stage: "reconcile", progress: 42 });
-      const [stateRaw, events, rawByStream, mergedByStream, memos, speakerLogsStored, asrByStream] = await Promise.all([
-        this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
-        this.loadSpeakerEvents(),
-        this.loadUtterancesRawByStream(),
-        this.loadUtterancesMergedByStream(),
-        this.loadMemos(),
-        this.loadSpeakerLogs(),
-        this.loadAsrByStream()
-      ]);
-      const state = normalizeSessionState(stateRaw);
-      const locale = getSessionLocale(state, this.env);
-      const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
+      await this.ensureFinalizeJobActive(jobId);
 
-      const cutoffUtterances = [...rawByStream.teacher, ...rawByStream.students]
-        .filter((item) => item.end_seq <= cutoff[item.stream_role]);
-      const transcript = buildReconciledTranscript({
-        utterances: cutoffUtterances,
-        events,
-        speakerLogs: speakerLogsStored,
-        state,
-        diarizationBackend,
-        roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
-        globalClusterResult,
-        clusterRosterMapping,
-        cachedEmbeddings: this.embeddingCache.getAllEmbeddings()
-      });
-
-      mergedByStream.teacher = mergeUtterances(rawByStream.teacher);
-      mergedByStream.students = mergeUtterances(rawByStream.students);
-      await this.storeUtterancesMergedByStream(mergedByStream);
-
-      // ── Memo-assisted binding: resolve unidentified clusters using teacher notes ──
-      const rosterNames = (state.roster ?? []).map(r => r.name).filter(Boolean);
-      const memoBindResult = memoAssistedBinding({
-        clusters: state.clusters.map(c => ({ cluster_id: c.cluster_id, turn_ids: [] })),
-        bindings: state.bindings,
-        bindingMeta: state.cluster_binding_meta,
-        transcript,
-        memos,
-        roster: rosterNames,
-      });
-      for (const [clusterId, name] of Object.entries(memoBindResult.newBindings)) {
-        state.bindings[clusterId] = name;
-        state.cluster_binding_meta[clusterId] = {
-          participant_name: name,
-          source: "name_extract",
-          confidence: 0.7,
-          locked: false,
-          updated_at: new Date().toISOString(),
-        };
-      }
-
-      const unresolvedClusterCount = state.clusters.filter((cluster) => {
-        const bound = state.bindings[cluster.cluster_id];
-        const meta = state.cluster_binding_meta[cluster.cluster_id];
-        return !bound || !meta || !meta.locked;
-      }).length;
-      const totalClusters = state.clusters.length;
-      const unresolvedRatio = totalClusters > 0 ? unresolvedClusterCount / totalClusters : 0;
-      const confidenceLevel: "high" | "medium" | "low" =
-        unresolvedRatio === 0 ? "high" :
-        unresolvedRatio <= 0.25 ? "medium" : "low";
-      const tentative = confidenceLevel === "low";
-
-      const hasStudentTranscript = transcript.some((item) => item.stream_role === "students");
+      let transcript: TranscriptItem[];
+      let state: SessionState;
+      let memos: MemoItem[];
+      let locale: string;
+      let diarizationBackend: "cloud" | "edge";
+      let speakerLogsStored: SpeakerLogs;
+      let confidenceLevel: "high" | "medium" | "low";
+      let tentative: boolean;
       let speakerLogs: SpeakerLogs;
-      if (diarizationBackend === "edge") {
-        if (hasStudentTranscript && speakerLogsStored.source !== "edge") {
-          throw new Error("diarization_backend=edge requires edge speaker-logs source");
+      let unresolvedClusterCount: number;
+      let asrByStream: Record<StreamRole, AsrState>;
+
+      if (useCaptions) {
+        // ── Caption mode: build transcript from captionBuffer ──
+        const captionAsr = new ACSCaptionASRProvider();
+        const captionDia = new ACSCaptionDiarizationProvider();
+        const utterances = captionAsr.convertToUtterances(this.captionBuffer);
+        const resolved = captionDia.resolveCaptions(this.captionBuffer);
+        const speakerMap = captionDia.getSpeakerMap();
+
+        state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        memos = await this.loadMemos();
+        speakerLogsStored = await this.loadSpeakerLogs();
+        locale = getSessionLocale(state, this.env);
+        diarizationBackend = "cloud"; // caption mode doesn't use edge diarization
+
+        // Build transcript from caption utterances
+        transcript = utterances.map((u, i) => ({
+          utterance_id: u.id,
+          stream_role: "students" as const, // captions are from remote participants
+          cluster_id: resolved[i]?.speaker_id ?? null,
+          speaker_name: resolved[i]?.speaker_name ?? null,
+          decision: "auto" as const,
+          text: u.text,
+          start_ms: u.start_ms,
+          end_ms: u.end_ms,
+          duration_ms: u.end_ms - u.start_ms,
+        }));
+
+        // Update state with caption speaker bindings
+        for (const [displayName, speakerId] of Object.entries(speakerMap)) {
+          state.bindings[speakerId] = displayName;
+          state.cluster_binding_meta[speakerId] = {
+            participant_name: displayName,
+            source: "name_extract",
+            confidence: 0.95,
+            locked: true,
+            updated_at: new Date().toISOString(),
+          };
         }
-        if (hasStudentTranscript && speakerLogsStored.turns.length === 0) {
-          throw new Error("diarization_backend=edge requires non-empty edge speaker-logs turns");
-        }
-        speakerLogs = this.buildEdgeSpeakerLogsForFinalize(this.currentIsoTs(), speakerLogsStored, state);
-      } else {
+
+        // Caption mode: all speakers are identified by Teams, so confidence is always high
+        confidenceLevel = "high";
+        tentative = false;
+        unresolvedClusterCount = 0;
+        asrByStream = await this.loadAsrByStream();
+
+        // Build speaker logs from caption transcript
         const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
         speakerLogs = this.deriveSpeakerLogsFromTranscript(
           this.currentIsoTs(),
@@ -4982,8 +4977,99 @@ export class MeetingSessionDO extends DurableObject<Env> {
           cloudBase,
           "cloud"
         );
-      }
-      await this.storeSpeakerLogs(speakerLogs);
+        await this.storeSpeakerLogs(speakerLogs);
+
+        console.log(`[finalize-v2] caption mode: ${utterances.length} utterances from ${Object.keys(speakerMap).length} speakers`);
+      } else {
+        // ── Original audio-based reconciliation path ──
+        const [stateRaw, events, rawByStream, mergedByStream, memosLoaded, speakerLogsLoaded, asrByStreamLoaded] = await Promise.all([
+          this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
+          this.loadSpeakerEvents(),
+          this.loadUtterancesRawByStream(),
+          this.loadUtterancesMergedByStream(),
+          this.loadMemos(),
+          this.loadSpeakerLogs(),
+          this.loadAsrByStream()
+        ]);
+        state = normalizeSessionState(stateRaw);
+        memos = memosLoaded;
+        speakerLogsStored = speakerLogsLoaded;
+        asrByStream = asrByStreamLoaded;
+        locale = getSessionLocale(state, this.env);
+        diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
+
+        const cutoffUtterances = [...rawByStream.teacher, ...rawByStream.students]
+          .filter((item) => item.end_seq <= cutoff[item.stream_role]);
+        transcript = buildReconciledTranscript({
+          utterances: cutoffUtterances,
+          events,
+          speakerLogs: speakerLogsStored,
+          state,
+          diarizationBackend,
+          roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
+          globalClusterResult,
+          clusterRosterMapping,
+          cachedEmbeddings: this.embeddingCache.getAllEmbeddings()
+        });
+
+        mergedByStream.teacher = mergeUtterances(rawByStream.teacher);
+        mergedByStream.students = mergeUtterances(rawByStream.students);
+        await this.storeUtterancesMergedByStream(mergedByStream);
+
+        // ── Memo-assisted binding: resolve unidentified clusters using teacher notes ──
+        const rosterNames = (state.roster ?? []).map(r => r.name).filter(Boolean);
+        const memoBindResult = memoAssistedBinding({
+          clusters: state.clusters.map(c => ({ cluster_id: c.cluster_id, turn_ids: [] })),
+          bindings: state.bindings,
+          bindingMeta: state.cluster_binding_meta,
+          transcript,
+          memos,
+          roster: rosterNames,
+        });
+        for (const [clusterId, name] of Object.entries(memoBindResult.newBindings)) {
+          state.bindings[clusterId] = name;
+          state.cluster_binding_meta[clusterId] = {
+            participant_name: name,
+            source: "name_extract",
+            confidence: 0.7,
+            locked: false,
+            updated_at: new Date().toISOString(),
+          };
+        }
+
+        unresolvedClusterCount = state.clusters.filter((cluster) => {
+          const bound = state.bindings[cluster.cluster_id];
+          const meta = state.cluster_binding_meta[cluster.cluster_id];
+          return !bound || !meta || !meta.locked;
+        }).length;
+        const totalClusters = state.clusters.length;
+        const unresolvedRatio = totalClusters > 0 ? unresolvedClusterCount / totalClusters : 0;
+        confidenceLevel =
+          unresolvedRatio === 0 ? "high" :
+          unresolvedRatio <= 0.25 ? "medium" : "low";
+        tentative = confidenceLevel === "low";
+
+        const hasStudentTranscript = transcript.some((item) => item.stream_role === "students");
+        if (diarizationBackend === "edge") {
+          if (hasStudentTranscript && speakerLogsStored.source !== "edge") {
+            throw new Error("diarization_backend=edge requires edge speaker-logs source");
+          }
+          if (hasStudentTranscript && speakerLogsStored.turns.length === 0) {
+            throw new Error("diarization_backend=edge requires non-empty edge speaker-logs turns");
+          }
+          speakerLogs = this.buildEdgeSpeakerLogsForFinalize(this.currentIsoTs(), speakerLogsStored, state);
+        } else {
+          const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
+          speakerLogs = this.deriveSpeakerLogsFromTranscript(
+            this.currentIsoTs(),
+            transcript,
+            state,
+            cloudBase,
+            "cloud"
+          );
+        }
+        await this.storeSpeakerLogs(speakerLogs);
+      } // end if/else useCaptions reconcile
 
       await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
       const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
