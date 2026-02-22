@@ -142,8 +142,9 @@ export function useSessionOrchestrator() {
       localStorage.setItem(key, JSON.stringify(sessionData));
     } catch { /* ignore storage errors */ }
 
-    // Disconnect ACS caption service if connected
-    if (acsCaptionService.getStatus() === 'connected') {
+    // Disconnect ACS caption service if connected or still connecting
+    const acsStatus = acsCaptionService.getStatus();
+    if (acsStatus === 'connected' || acsStatus === 'connecting') {
       acsCaptionService.disconnect().catch(() => {});
     }
 
