@@ -82,22 +82,22 @@ def test_select_backend_openai_whisper_fallback():
         assert select_backend("mps") == "openai-whisper"
 
 
-def test_select_backend_rocm_prefers_openai_whisper():
-    """ROCm should prefer openai-whisper (full PyTorch GPU) over faster-whisper (CPU only)."""
+def test_select_backend_rocm_prefers_faster_whisper():
+    """ROCm still prefers faster-whisper (CTranslate2 CPU int8 is fast enough)."""
     with (
         patch("app.services.whisper_batch._check_faster_whisper", return_value=True),
         patch("app.services.whisper_batch._check_openai_whisper", return_value=True),
     ):
-        assert select_backend("rocm") == "openai-whisper"
+        assert select_backend("rocm") == "faster-whisper"
 
 
-def test_select_backend_mps_prefers_openai_whisper():
-    """MPS should prefer openai-whisper (full PyTorch GPU) over faster-whisper (CPU only)."""
+def test_select_backend_mps_prefers_faster_whisper():
+    """MPS still prefers faster-whisper (CTranslate2 CPU int8 is fast enough)."""
     with (
         patch("app.services.whisper_batch._check_faster_whisper", return_value=True),
         patch("app.services.whisper_batch._check_openai_whisper", return_value=True),
     ):
-        assert select_backend("mps") == "openai-whisper"
+        assert select_backend("mps") == "faster-whisper"
 
 
 def test_select_backend_rocm_falls_back_to_faster_whisper():
