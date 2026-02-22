@@ -49,6 +49,7 @@ interface DesktopAPI {
   clearPreferredCaptureSource(): Promise<unknown>;
   getPreferredCaptureSource(): Promise<unknown>;
   getWorkerApiKey(): Promise<string | undefined>;
+  copyToClipboard(text: string): Promise<{ ok: boolean }>;
   enrollSpeaker?(payload: { sessionId: string; speakerName: string }): Promise<{ success: boolean; confidence?: number }>;
   onDeepLinkStart(listener: (payload: unknown) => void): () => void;
 

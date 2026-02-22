@@ -972,6 +972,14 @@ function registerIpcHandlers() {
     return { ok: true, url: target };
   });
 
+  // ── Clipboard IPC ──────────────────────────────
+  ipcMain.handle('clipboard:write', async (_event, payload) => {
+    const { clipboard } = require('electron');
+    const text = String(payload?.text || '');
+    clipboard.writeText(text);
+    return { ok: true };
+  });
+
   // ── ACS Caption IPC ──────────────────────────
   ipcMain.handle('acs:getEnabled', () => {
     return !!process.env.ACS_CONNECTION_STRING && process.env.ACS_ENABLED === 'true';
