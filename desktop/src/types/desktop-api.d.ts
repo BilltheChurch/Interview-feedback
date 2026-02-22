@@ -33,7 +33,22 @@ interface DesktopAPI {
   calendarGetStatus(): Promise<unknown>;
   calendarConnectMicrosoft(): Promise<unknown>;
   calendarGetUpcomingMeetings(payload?: { days?: number }): Promise<unknown>;
-  calendarCreateOnlineMeeting(payload: { subject: string; startAt: string; endAt: string; participants?: unknown[] }): Promise<unknown>;
+  calendarCreateOnlineMeeting(payload: {
+    subject: string;
+    startAt?: string;
+    endAt?: string;
+    participants?: { name: string; email?: string }[];
+  }): Promise<{
+    source: string;
+    meeting_id: string;
+    title: string;
+    start_at: string;
+    end_at: string;
+    join_url: string;
+    meeting_code: string;
+    passcode: string;
+    participants: { name: string; email?: string }[];
+  }>;
   calendarDisconnectMicrosoft(): Promise<unknown>;
   authGetState(): Promise<{
     microsoft: { connected: boolean; account: { username?: string; home_account_id?: string; tenant_id?: string } | null };

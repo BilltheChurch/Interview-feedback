@@ -48,10 +48,15 @@ export function useGraphCalendar(): UseGraphCalendarReturn {
     (async () => {
       try {
         const result = (await window.desktopAPI.calendarGetStatus()) as {
-          status?: string;
+          configured?: boolean;
+          connected?: boolean;
         };
-        if (mountedRef.current && result?.status) {
-          setStatus(result.status as GraphStatus);
+        if (mountedRef.current) {
+          if (result?.connected) {
+            setStatus('connected');
+          } else if (result?.configured) {
+            setStatus('disconnected');
+          }
         }
       } catch {
         if (mountedRef.current) setStatus('error');
@@ -105,8 +110,12 @@ export function useGraphCalendar(): UseGraphCalendarReturn {
       participants?: string[];
     }): Promise<CalendarMeeting | null> => {
       try {
+        const payload = {
+          ...opts,
+          participants: opts.participants?.map((p) => ({ name: p })),
+        };
         const result =
-          (await window.desktopAPI.calendarCreateOnlineMeeting(opts)) as Record<
+          (await window.desktopAPI.calendarCreateOnlineMeeting(payload)) as Record<
             string,
             unknown
           > | null;
