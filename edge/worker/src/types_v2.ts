@@ -385,3 +385,7 @@ export interface MergeCheckpointsRequestPayload {
   evidence: Array<EvidenceItem & { speaker_key?: string | null }>;
   locale: string;
 }
+
+// ── Caption Source ──────────────────────────────────────────────────────
+/** Caption data source. 'none' = use audio ASR, 'acs-teams' = use ACS captions. */
+export type CaptionSource = 'none' | 'acs-teams';

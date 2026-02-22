@@ -595,7 +595,7 @@ function emptyFeedbackCache(sessionId: string, nowIso: string): FeedbackCache {
 
 const SESSION_ROUTE_REGEX =
   /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|feedback-claim-evidence|export)$/;
-const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state)$/;
+const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state|profiles)$/;
 const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
 const SESSION_TIER2_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/tier2-status$/;
 const SESSION_HISTORY_ROUTE_REGEX = /^\/v1\/sessions\/history$/;
@@ -1463,6 +1463,9 @@ export default {
       if (action === "enrollment-state" && request.method !== "GET") {
         return jsonResponse({ detail: "method not allowed" }, 405);
       }
+      if (action === "enrollment-profiles" && request.method !== "POST") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
       return proxyToDO(request, env, sessionId, action);
     }
 
@@ -1613,6 +1616,22 @@ export class MeetingSessionDO extends DurableObject<Env> {
   private localWhisperProvider: LocalWhisperASRProvider | null = null;
   /** Embedding cache for global speaker clustering at finalization. */
   readonly embeddingCache: EmbeddingCache = new EmbeddingCache();
+  /** Buffer for ACS Teams caption events. */
+  private captionBuffer: import('./providers/types').CaptionEvent[] = [];
+  /** Caption data source for this session. */
+  private captionSource: import('./types_v2').CaptionSource = 'none';
+  /** Session start time in epoch ms, set on first "hello". 0 = not yet initialized. */
+  private sessionStartMs: number = 0;
+
+  /** Get the caption buffer for finalization. */
+  getCaptionBuffer(): import('./providers/types').CaptionEvent[] {
+    return this.captionBuffer;
+  }
+
+  /** Get the current caption source mode. */
+  getCaptionSource(): import('./types_v2').CaptionSource {
+    return this.captionSource;
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -6073,6 +6092,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
             if (helloRole !== connectionRole) {
               throw new Error(`hello.stream_role mismatch: expected ${connectionRole}, got ${helloRole}`);
             }
+            // Record session start time on first hello for caption timestamp normalization
+            if (this.sessionStartMs === 0) {
+              this.sessionStartMs = Date.now();
+            }
             await this.updateSessionConfigFromHello(message);
 
             const ingestByStream = await this.loadIngestByStream(sessionId);
@@ -6115,6 +6138,28 @@ export class MeetingSessionDO extends DurableObject<Env> {
               stream_role: frameRole,
               payload: stored
             });
+            return;
+          }
+
+          if (type === "caption") {
+            const resultType = String(message.resultType ?? "");
+            if (resultType === "Final") {
+              this.captionBuffer.push({
+                speaker: String(message.speaker ?? ""),
+                text: String(message.text ?? ""),
+                language: String(message.language ?? ""),
+                timestamp_ms: Number(message.timestamp ?? 0) - (this.sessionStartMs ?? 0),
+                teamsUserId: message.teamsUserId ? String(message.teamsUserId) : undefined,
+              });
+            }
+            return;
+          }
+
+          if (type === "session_config") {
+            const src = String(message.captionSource ?? "");
+            if (src === "acs-teams" || src === "none") {
+              this.captionSource = src;
+            }
             return;
           }
 
@@ -6419,6 +6464,57 @@ export class MeetingSessionDO extends DurableObject<Env> {
         session_id: sessionId,
         enrollment_state: enrollment,
         participant_profiles: state.participant_profiles
+      });
+    }
+
+    if (action === "enrollment-profiles" && request.method === "POST") {
+      let payload: { participant_profiles: Array<{ name: string; centroid: number[]; sample_count?: number; sample_seconds?: number; status?: string }> };
+      try {
+        payload = await readJson<typeof payload>(request);
+      } catch (error) {
+        return badRequest((error as Error).message);
+      }
+      if (!Array.isArray(payload.participant_profiles) || payload.participant_profiles.length === 0) {
+        return badRequest("participant_profiles must be a non-empty array");
+      }
+      return this.enqueueMutation(async () => {
+        const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const profiles: ParticipantProfile[] = [];
+        for (const p of payload.participant_profiles) {
+          if (!p.name || !Array.isArray(p.centroid) || p.centroid.length === 0) continue;
+          profiles.push({
+            name: p.name,
+            email: null,
+            centroid: p.centroid,
+            sample_count: p.sample_count ?? 1,
+            sample_seconds: p.sample_seconds ?? 5,
+            status: "ready"
+          });
+        }
+        state.participant_profiles = profiles;
+        const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
+        const participants: Record<string, EnrollmentParticipantProgress> = {};
+        for (const profile of profiles) {
+          const key = profile.name.trim().toLowerCase();
+          if (!key) continue;
+          participants[key] = {
+            name: profile.name,
+            sample_seconds: profile.sample_seconds,
+            sample_count: profile.sample_count,
+            status: "ready"
+          };
+        }
+        enrollment.mode = "ready";
+        enrollment.participants = participants;
+        enrollment.updated_at = this.currentIsoTs();
+        state.enrollment_state = enrollment;
+        await this.ctx.storage.put(STORAGE_KEY_STATE, state);
+        await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
+        return jsonResponse({
+          session_id: sessionId,
+          profiles_count: profiles.length,
+          enrollment_state: state.enrollment_state
+        });
       });
     }
 
