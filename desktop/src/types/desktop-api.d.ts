@@ -82,6 +82,32 @@ interface DesktopAPI {
     userId?: string;
     error?: string;
   }>;
+
+  // ── DualSync Integration (预留接口，Phase 2 实现) ──
+  // getUpcomingGroupSessions?(): Promise<GroupSession[]>;
+  // importGroupSession?(sessionId: string): Promise<SessionImport>;
+}
+
+/** DualSync group session (Phase 2 integration) */
+export interface GroupSession {
+  id: string;
+  name: string;
+  startAt: string;
+  endAt: string;
+  participants: { name: string; email?: string }[];
+  teamsJoinUrl?: string;
+  status: 'confirmed' | 'pending';
+  source: 'dualsync' | 'manual';
+}
+
+/** Session import payload from DualSync (Phase 2 integration) */
+export interface SessionImport {
+  sessionName: string;
+  mode: '1v1' | 'group';
+  participants: { name: string; email?: string }[];
+  teamsJoinUrl: string;
+  meetingCode?: string;
+  passcode?: string;
 }
 
 declare global {
