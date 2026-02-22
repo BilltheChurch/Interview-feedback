@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
@@ -374,8 +374,16 @@ function MeetingConnector({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   const handleCreateMeeting = async () => {
+    if (creating) return;
     setCreating(true);
     setError(null);
     try {
@@ -399,7 +407,7 @@ function MeetingConnector({
 
       await window.desktopAPI.copyToClipboard(inviteText);
       setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
+      copiedTimerRef.current = setTimeout(() => setCopied(false), 3000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create meeting');
     } finally {
@@ -412,7 +420,7 @@ function MeetingConnector({
     try {
       await window.desktopAPI.copyToClipboard(teamsUrl);
       setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
+      copiedTimerRef.current = setTimeout(() => setCopied(false), 3000);
     } catch {
       // silently ignore clipboard errors
     }
@@ -476,13 +484,20 @@ function SetupSummary({
   stages: string[];
 }) {
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   const handleCopyInvite = async () => {
     if (!teamsUrl) return;
     try {
       await window.desktopAPI.copyToClipboard(teamsUrl);
       setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
+      copiedTimerRef.current = setTimeout(() => setCopied(false), 3000);
     } catch {
       // silently ignore clipboard errors
     }
