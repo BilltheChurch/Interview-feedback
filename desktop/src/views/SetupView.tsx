@@ -16,6 +16,7 @@ import {
   ClipboardList,
   Pencil,
   Check,
+  Loader2,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -124,7 +125,7 @@ function ModeSelector({
             type="button"
             onClick={() => onModeChange(value)}
             className={`
-              flex flex-col items-center gap-2 p-4 rounded-[--radius-card] border-2 transition-all cursor-pointer
+              flex flex-col items-center gap-1.5 p-3 rounded-[--radius-card] border-2 transition-all cursor-pointer
               ${
                 mode === value
                   ? 'border-accent bg-accent-soft'
@@ -360,40 +361,99 @@ function FlowEditor({
 /* ─── MeetingConnector ──────────────────────── */
 
 function MeetingConnector({
-  mode,
   teamsUrl,
   onTeamsUrlChange,
+  sessionName,
+  participants,
 }: {
-  mode: SessionMode;
   teamsUrl: string;
   onTeamsUrlChange: (v: string) => void;
+  sessionName: string;
+  participants: Participant[];
 }) {
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleCreateMeeting = async () => {
+    setCreating(true);
+    setError(null);
+    try {
+      const result = await window.desktopAPI.calendarCreateOnlineMeeting({
+        subject: sessionName || 'Mock Interview Session',
+        participants: participants
+          .filter((p) => p.name.trim())
+          .map((p) => ({ name: p.name })),
+      });
+      onTeamsUrlChange(result.join_url);
+
+      // Build invite text
+      const lines = [`Mock Interview: ${result.title}`];
+      lines.push(
+        `Time: ${new Date(result.start_at).toLocaleString()} - ${new Date(result.end_at).toLocaleString()}`
+      );
+      lines.push(`Join: ${result.join_url}`);
+      if (result.meeting_code) lines.push(`Meeting ID: ${result.meeting_code}`);
+      if (result.passcode) lines.push(`Passcode: ${result.passcode}`);
+      const inviteText = lines.join('\n');
+
+      await window.desktopAPI.copyToClipboard(inviteText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create meeting');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleCopyInvite = async () => {
+    if (!teamsUrl) return;
+    try {
+      await window.desktopAPI.copyToClipboard(teamsUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } catch {
+      // silently ignore clipboard errors
+    }
+  };
+
   return (
     <div>
       <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
         Meeting Link
       </h3>
-      {mode === '1v1' ? (
+      <div className="space-y-2">
         <TextField
           label="Teams join URL"
-          placeholder="Paste Teams meeting link..."
+          placeholder="Paste Teams meeting link or create new below..."
           value={teamsUrl}
           onChange={(e) => onTeamsUrlChange(e.target.value)}
         />
-      ) : (
-        <div className="space-y-2">
-          <TextField
-            label="Teams meeting URL (optional)"
-            placeholder="Paste link or create new below"
-            value={teamsUrl}
-            onChange={(e) => onTeamsUrlChange(e.target.value)}
-          />
-          <Button variant="secondary" size="sm">
-            <LinkIcon className="w-3.5 h-3.5" />
-            Create Meeting via Graph
+        <div className="flex gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleCreateMeeting}
+            disabled={creating}
+          >
+            {creating ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <LinkIcon className="w-3.5 h-3.5" />
+            )}
+            {creating ? 'Creating...' : 'Create Meeting'}
           </Button>
+          {teamsUrl && (
+            <Button variant="ghost" size="sm" onClick={handleCopyInvite}>
+              <ClipboardPaste className="w-3.5 h-3.5" />
+              Copy Invite
+            </Button>
+          )}
         </div>
-      )}
+        {error && <p className="text-error text-xs">{error}</p>}
+        {copied && <p className="text-accent text-xs">Invite copied to clipboard!</p>}
+      </div>
     </div>
   );
 }
@@ -571,7 +631,7 @@ export function SetupView() {
     const sessionId = `sess_${Date.now()}`;
     const displayName = sessionName || 'Untitled Session';
 
-    // Save to localStorage for History
+    // Save to localStorage for History (deduplicate by session ID)
     const sessionRecord = {
       id: sessionId,
       name: displayName,
@@ -582,23 +642,14 @@ export function SetupView() {
       template,
       status: 'in_progress',
     };
-    const existing = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
-    existing.unshift(sessionRecord);
-    localStorage.setItem('ifb_sessions', JSON.stringify(existing));
+    const existing = JSON.parse(localStorage.getItem('ifb_sessions') || '[]') as { id: string }[];
+    const alreadyExists = existing.some((s) => s.id === sessionId);
+    if (!alreadyExists) {
+      existing.unshift(sessionRecord);
+      localStorage.setItem('ifb_sessions', JSON.stringify(existing));
+    }
 
-    // Orchestrator handles: audio init, WS connect, timer start, store update
-    await startSession({
-      sessionId,
-      sessionName: displayName,
-      mode,
-      participants: participants.map(p => ({ name: p.name })),
-      stages,
-      baseApiUrl: '', // Will be configured from environment
-      interviewerName: '',
-      teamsJoinUrl: teamsUrl,
-      templateId: template,
-    });
-
+    // Navigate first to prevent PiP flash (status will change before we leave /setup)
     navigate('/session', {
       state: {
         sessionId,
@@ -609,6 +660,19 @@ export function SetupView() {
         teamsUrl,
         stages,
       },
+    });
+
+    // Orchestrator handles: audio init, WS connect, timer start, store update (non-blocking)
+    startSession({
+      sessionId,
+      sessionName: displayName,
+      mode,
+      participants: participants.map(p => ({ name: p.name })),
+      stages,
+      baseApiUrl: import.meta.env.VITE_EDGE_BASE_URL || '',
+      interviewerName: '',
+      teamsJoinUrl: teamsUrl,
+      templateId: template,
     });
   }, [sessionName, mode, participants, template, stages, teamsUrl, startSession, navigate]);
 
@@ -624,50 +688,55 @@ export function SetupView() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      <div className="max-w-2xl mx-auto px-6 py-6 flex-1 flex flex-col overflow-auto">
-        {/* Header */}
-        <div className="flex items-center gap-3 mb-5">
-          <button
-            onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
-            className="text-ink-tertiary hover:text-ink transition-colors cursor-pointer"
-            aria-label={step > 0 ? 'Previous step' : 'Back to home'}
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <div className="flex-1">
-            <h1 className="text-xl font-semibold text-ink">Session Setup</h1>
-            <p className="text-sm text-ink-secondary">Step {step + 1} of {stepLabels.length}</p>
+      {/* ── Fixed Header: Title + Stepper ── */}
+      <div className="shrink-0 border-b border-border bg-background">
+        <div className="max-w-xl w-full mx-auto px-6 pt-4 pb-3">
+          {/* Title row */}
+          <div className="flex items-center gap-3 mb-3">
+            <button
+              onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
+              className="text-ink-tertiary hover:text-ink transition-colors cursor-pointer"
+              aria-label={step > 0 ? 'Previous step' : 'Back to home'}
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="flex-1">
+              <h1 className="text-xl font-semibold text-ink">Session Setup</h1>
+              <p className="text-sm text-ink-secondary">Step {step + 1} of {stepLabels.length}</p>
+            </div>
+          </div>
+
+          {/* Step Indicator */}
+          <div className="flex items-center gap-2">
+            {stepLabels.map((label, i) => (
+              <div key={label} className="flex items-center gap-2 flex-1">
+                <button
+                  onClick={() => i < step && setStep(i)}
+                  className={`flex items-center gap-2 ${i <= step ? 'cursor-pointer' : 'cursor-default'}`}
+                  disabled={i > step}
+                >
+                  <div className={`
+                    w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-colors
+                    ${i < step ? 'bg-accent text-white' : i === step ? 'bg-accent text-white' : 'bg-border text-ink-tertiary'}
+                  `}>
+                    {i < step ? <Check className="w-3.5 h-3.5" /> : i + 1}
+                  </div>
+                  <span className={`text-sm font-medium hidden sm:inline ${i <= step ? 'text-ink' : 'text-ink-tertiary'}`}>
+                    {label}
+                  </span>
+                </button>
+                {i < stepLabels.length - 1 && (
+                  <div className={`flex-1 h-0.5 rounded-full ${i < step ? 'bg-accent' : 'bg-border'}`} />
+                )}
+              </div>
+            ))}
           </div>
         </div>
+      </div>
 
-        {/* Step Indicator */}
-        <div className="flex items-center gap-2 mb-6">
-          {stepLabels.map((label, i) => (
-            <div key={label} className="flex items-center gap-2 flex-1">
-              <button
-                onClick={() => i < step && setStep(i)}
-                className={`flex items-center gap-2 ${i <= step ? 'cursor-pointer' : 'cursor-default'}`}
-                disabled={i > step}
-              >
-                <div className={`
-                  w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-colors
-                  ${i < step ? 'bg-accent text-white' : i === step ? 'bg-accent text-white' : 'bg-border text-ink-tertiary'}
-                `}>
-                  {i < step ? <Check className="w-3.5 h-3.5" /> : i + 1}
-                </div>
-                <span className={`text-sm font-medium hidden sm:inline ${i <= step ? 'text-ink' : 'text-ink-tertiary'}`}>
-                  {label}
-                </span>
-              </button>
-              {i < stepLabels.length - 1 && (
-                <div className={`flex-1 h-0.5 rounded-full ${i < step ? 'bg-accent' : 'bg-border'}`} />
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Step Content */}
-        <div className="flex-1">
+      {/* ── Scrollable Content Area ── */}
+      <div className="flex-1 overflow-y-auto scroll-smooth min-h-0">
+        <div className="max-w-xl w-full mx-auto px-6 py-4">
           <AnimatePresence mode="wait">
             {step === 0 && (
               <motion.div
@@ -676,13 +745,13 @@ export function SetupView() {
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -40 }}
                 transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-                className="space-y-4"
+                className="space-y-3"
               >
-                <Card className="p-5">
+                <Card className="p-4">
                   <ModeSelector mode={mode} onModeChange={setMode} />
                 </Card>
 
-                <Card className="p-5 space-y-4">
+                <Card className="p-4">
                   <TextField
                     label="Session name"
                     placeholder={mode === '1v1' ? 'e.g. John Doe Interview' : 'e.g. Panel Round 2'}
@@ -691,7 +760,7 @@ export function SetupView() {
                   />
                 </Card>
 
-                <Card className="p-5">
+                <Card className="p-4">
                   <ParticipantEditor
                     participants={participants}
                     onAdd={addParticipant}
@@ -700,11 +769,12 @@ export function SetupView() {
                   />
                 </Card>
 
-                <Card className="p-5">
+                <Card className="p-4">
                   <MeetingConnector
-                    mode={mode}
                     teamsUrl={teamsUrl}
                     onTeamsUrlChange={setTeamsUrl}
+                    sessionName={sessionName}
+                    participants={participants}
                   />
                 </Card>
               </motion.div>
@@ -717,13 +787,13 @@ export function SetupView() {
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -40 }}
                 transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-                className="space-y-4"
+                className="space-y-3"
               >
-                <Card className="p-5">
-                  <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
+                <Card className="p-4">
+                  <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
                     Rubric Template
                   </h3>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-2 gap-2.5">
                     {BUILTIN_TEMPLATES.map((t) => (
                       <motion.div
                         key={t.value}
@@ -735,17 +805,17 @@ export function SetupView() {
                         <Card
                           hoverable
                           className={`
-                            p-3 relative cursor-pointer transition-all
+                            p-2.5 relative cursor-pointer transition-all
                             ${template === t.value ? 'border-accent border-2' : ''}
                           `}
                           onClick={() => setTemplate(t.value)}
                         >
-                          <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-ink-tertiary" />
+                          <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-ink-tertiary" />
                           <div className="pr-6">
                             <p className={`text-sm font-medium ${template === t.value ? 'text-accent' : 'text-ink'}`}>
                               {t.label}
                             </p>
-                            <p className="text-xs text-ink-tertiary mt-1">
+                            <p className="text-xs text-ink-tertiary mt-0.5">
                               {t.dimensions.length} dimensions
                             </p>
                           </div>
@@ -755,7 +825,7 @@ export function SetupView() {
                               e.stopPropagation();
                               handleEditTemplate(t.value);
                             }}
-                            className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
                             aria-label={`Edit ${t.label}`}
                           >
                             <Pencil className="w-3 h-3" />
@@ -776,17 +846,17 @@ export function SetupView() {
                         <Card
                           hoverable
                           className={`
-                            p-3 relative cursor-pointer transition-all
+                            p-2.5 relative cursor-pointer transition-all
                             ${template === t.id ? 'border-accent border-2' : ''}
                           `}
                           onClick={() => setTemplate(t.id)}
                         >
-                          <ClipboardList className="absolute top-3 right-3 w-4 h-4 text-accent" />
+                          <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-accent" />
                           <div className="pr-6">
                             <p className={`text-sm font-medium ${template === t.id ? 'text-accent' : 'text-ink'}`}>
                               {t.name}
                             </p>
-                            <p className="text-xs text-ink-tertiary mt-1">
+                            <p className="text-xs text-ink-tertiary mt-0.5">
                               {t.dimensions.length} dimensions
                             </p>
                           </div>
@@ -796,7 +866,7 @@ export function SetupView() {
                               e.stopPropagation();
                               handleEditTemplate(t.id);
                             }}
-                            className="mt-2 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
                             aria-label={`Edit ${t.name}`}
                           >
                             <Pencil className="w-3 h-3" />
@@ -815,10 +885,10 @@ export function SetupView() {
                         type="button"
                         onClick={handleCreateTemplate}
                         className="
-                          w-full flex flex-col items-center justify-center gap-2 p-3
+                          w-full flex flex-col items-center justify-center gap-2 p-2.5
                           border-dashed border-2 border-border rounded-[--radius-card]
                           text-ink-secondary hover:border-accent hover:text-accent
-                          transition-all cursor-pointer min-h-[88px]
+                          transition-all cursor-pointer min-h-[76px]
                         "
                       >
                         <Plus className="w-5 h-5" />
@@ -828,7 +898,7 @@ export function SetupView() {
                   </div>
                 </Card>
 
-                <Card className="p-5">
+                <Card className="p-4">
                   <FlowEditor stages={stages} onStagesChange={setStages} />
                 </Card>
               </motion.div>
@@ -841,7 +911,7 @@ export function SetupView() {
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -40 }}
                 transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-                className="space-y-4"
+                className="space-y-3"
               >
                 <SetupSummary
                   mode={mode}
@@ -857,9 +927,9 @@ export function SetupView() {
         </div>
       </div>
 
-      {/* Sticky bottom navigation */}
-      <div className="border-t border-border bg-surface px-6 py-3">
-        <div className="max-w-2xl mx-auto flex items-center justify-between">
+      {/* ── Fixed Bottom Navigation ── */}
+      <div className="shrink-0 border-t border-border bg-surface px-6 py-3">
+        <div className="max-w-xl mx-auto flex items-center justify-between">
           <Button
             variant="ghost"
             onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
