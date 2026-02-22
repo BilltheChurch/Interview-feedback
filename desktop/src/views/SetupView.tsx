@@ -475,6 +475,19 @@ function SetupSummary({
   teamsUrl: string;
   stages: string[];
 }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyInvite = async () => {
+    if (!teamsUrl) return;
+    try {
+      await window.desktopAPI.copyToClipboard(teamsUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } catch {
+      // silently ignore clipboard errors
+    }
+  };
+
   return (
     <div className="border border-border rounded-[--radius-card] bg-surface-hover p-4">
       <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-3">
@@ -506,7 +519,16 @@ function SetupSummary({
         {teamsUrl && (
           <div className="col-span-2">
             <span className="text-ink-tertiary text-xs">Teams URL</span>
-            <p className="text-ink mt-0.5 text-xs truncate">{teamsUrl}</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <p className="text-ink text-xs truncate flex-1">{teamsUrl}</p>
+              <button
+                onClick={handleCopyInvite}
+                className="inline-flex items-center gap-1 text-xs text-accent hover:underline cursor-pointer shrink-0"
+              >
+                <ClipboardPaste className="w-3 h-3" />
+                {copied ? 'Copied!' : 'Copy Invite'}
+              </button>
+            </div>
           </div>
         )}
       </div>
