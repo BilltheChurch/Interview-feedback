@@ -1400,6 +1400,11 @@ export default {
       });
     }
 
+    // ── Scheduling webhook placeholder (Phase 2: DualSync integration) ──
+    if (path === "/api/scheduling/webhook" && request.method === "POST") {
+      return jsonResponse({ detail: "not implemented", phase: 2 }, 501);
+    }
+
     // ── Auth gate (skipped for /health, skipped when WORKER_API_KEY is empty) ──
     const authError = validateApiKey(request, env as unknown as Record<string, unknown>);
     if (authError) return authError;
