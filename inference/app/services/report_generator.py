@@ -368,7 +368,7 @@ class ReportGenerator:
         refs = evidence_by_person.get(person_key, [])
         if refs:
             return refs[:2]
-        return all_refs[:2]
+        return []
 
     def _ensure_dimensions(
         self,
@@ -532,7 +532,27 @@ class ReportGenerator:
                 all_refs=all_refs,
             )
             if not fallback_refs:
-                raise ValueError(f"person '{person_key}' has no evidence refs; report generation aborted")
+                # Person was resolved by name but has no evidence attributed yet.
+                # Include them with empty dimensions so the report stays complete
+                # without crashing — this is the fallback path and must be resilient.
+                empty_dimensions = [
+                    DimensionFeedback(
+                        dimension=dimension,  # type: ignore[arg-type]
+                        strengths=[],
+                        risks=[],
+                        actions=[],
+                    )
+                    for dimension in DIMENSIONS
+                ]
+                per_person.append(
+                    PersonFeedbackItem(
+                        person_key=person_key,
+                        display_name=display_name,
+                        dimensions=empty_dimensions,
+                        summary=PersonSummary(strengths=[], risks=[], actions=[]),
+                    )
+                )
+                continue
             dimensions = self._ensure_dimensions(
                 person_key=person_key,
                 stat=stat,

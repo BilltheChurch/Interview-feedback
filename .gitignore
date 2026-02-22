@@ -16,6 +16,7 @@ artifacts/
 # Secrets / local config
 inference/.env
 desktop/.env
+edge/worker/.dev.vars
 cloudflare/tunnel/config.yml
 cloudflare/tunnel/*.log
 cloudflare/tunnel/*.pid

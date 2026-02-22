@@ -92,6 +92,23 @@ class InferenceOrchestrator:
                     tokens.add(token[idx : idx + 2])
         return tokens
 
+    @staticmethod
+    def _levenshtein_distance(a: str, b: str) -> int:
+        """Compute Levenshtein edit distance between two strings."""
+        m, n = len(a), len(b)
+        if m == 0:
+            return n
+        if n == 0:
+            return m
+        prev = list(range(n + 1))
+        for i in range(1, m + 1):
+            curr = [i] + [0] * n
+            for j in range(1, n + 1):
+                cost = 0 if a[i - 1] == b[j - 1] else 1
+                curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+            prev = curr
+        return prev[n]
+
     def _roster_exact_name(self, state: SessionState, raw_name: str) -> str | None:
         roster = state.roster or []
         if not roster:
@@ -122,6 +139,9 @@ class InferenceOrchestrator:
 
         best_name: str | None = None
         best_score = -1.0
+        # Track best edit-distance match as a separate fallback.
+        best_edit_name: str | None = None
+        best_edit_dist = 3  # only accept distance <= 2
         src_tokens = self._tokenize_name(raw_name)
         for item in roster:
             roster_norm = self._normalize_text_key(item.name)
@@ -135,6 +155,13 @@ class InferenceOrchestrator:
                 and (normalized in roster_norm or roster_norm in normalized)
             ):
                 return item.name
+
+            # Edit-distance fuzzy match: both names >= 5 chars and distance <= 2.
+            if len(normalized) >= 5 and len(roster_norm) >= 5:
+                dist = self._levenshtein_distance(normalized, roster_norm)
+                if dist <= 2 and dist < best_edit_dist:
+                    best_edit_dist = dist
+                    best_edit_name = item.name
 
             roster_tokens = self._tokenize_name(item.name)
             if not src_tokens or not roster_tokens:
@@ -163,10 +190,11 @@ class InferenceOrchestrator:
         if re.search(r"[\u4e00-\u9fff]", normalized):
             if best_score >= 0.5:
                 return best_name
-            return None
+            return best_edit_name
         if best_score >= 0.6:
             return best_name
-        return None
+        # Fall back to edit-distance match if token-based matching failed.
+        return best_edit_name
 
     def _resolve_name_from_roster(self, state: SessionState, asr_text: str | None) -> str | None:
         if not asr_text:
@@ -394,13 +422,15 @@ class InferenceOrchestrator:
         bind_result.evidence.segment_count = len(segments)
         now_iso = self._now_iso()
 
-        # Stabilize confirm/unknown outputs within a short time window so the
+        # Stabilize confirm/unknown outputs within a time window so the
         # same cluster does not bounce between different candidate names.
+        # 300s window covers group interviews where same speaker may not
+        # speak again for minutes.
         if (
             binding_meta
             and not binding_meta.locked
             and binding_meta.participant_name
-            and self._is_recent_binding(binding_meta.updated_at, window_seconds=30)
+            and self._is_recent_binding(binding_meta.updated_at, window_seconds=300)
         ):
             if bind_result.decision == "unknown":
                 bind_result.speaker_name = binding_meta.participant_name
@@ -416,6 +446,16 @@ class InferenceOrchestrator:
             source = bind_result.evidence.binding_source
             if source not in {"enrollment_match", "name_extract", "manual_map"}:
                 source = "name_extract"
+            # Persist both cluster_binding_meta AND state.bindings so subsequent
+            # resolves immediately find the existing binding
+            state.bindings[cluster_id] = bind_result.speaker_name
+            cluster_obj = None
+            for c in state.clusters:
+                if c.cluster_id == cluster_id:
+                    cluster_obj = c
+                    break
+            if cluster_obj:
+                cluster_obj.bound_name = bind_result.speaker_name
             state.cluster_binding_meta[cluster_id] = BindingMeta(
                 participant_name=bind_result.speaker_name,
                 source=source,  # type: ignore[arg-type]

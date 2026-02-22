@@ -10,6 +10,7 @@ import {
   LogOut,
   Loader2,
   UserCircle,
+  Cpu,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -375,6 +376,83 @@ function Preferences() {
   );
 }
 
+/* --- ProviderSettings ---------------------------------- */
+
+function ProviderSettings() {
+  const [tier2Enabled, setTier2Enabled] = useState(false);
+  const [batchEndpoint, setBatchEndpoint] = useState('');
+  const [asrProvider, setAsrProvider] = useState('funASR');
+  const [llmProvider, setLlmProvider] = useState('dashscope');
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <Cpu className="w-5 h-5 text-accent" />
+        <h2 className="text-base font-semibold text-ink">Processing Providers</h2>
+      </div>
+
+      <div className="space-y-4">
+        <Select
+          label="ASR Provider (streaming)"
+          options={[
+            { value: 'funASR', label: 'FunASR (Aliyun DashScope)' },
+            { value: 'groq-whisper', label: 'Groq Whisper' },
+            { value: 'openai-whisper', label: 'OpenAI Whisper' },
+          ]}
+          value={asrProvider}
+          onChange={(e) => setAsrProvider(e.target.value)}
+        />
+
+        <Select
+          label="LLM Provider (report synthesis)"
+          options={[
+            { value: 'dashscope', label: 'DashScope (Qwen)' },
+            { value: 'openai', label: 'OpenAI (GPT-4o)' },
+            { value: 'ollama', label: 'Ollama (Local)' },
+          ]}
+          value={llmProvider}
+          onChange={(e) => setLlmProvider(e.target.value)}
+        />
+
+        <div className="pt-3 border-t border-border">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <p className="text-sm text-ink font-medium">Tier 2 Enhanced Processing</p>
+              <p className="text-xs text-ink-tertiary">
+                Re-process audio with Whisper + pyannote after initial report
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={tier2Enabled}
+              onClick={() => setTier2Enabled(!tier2Enabled)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                tier2Enabled ? 'bg-accent' : 'bg-border'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                  tier2Enabled ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+
+          {tier2Enabled && (
+            <TextField
+              label="Batch Processor Endpoint"
+              placeholder="http://localhost:8000/batch/process"
+              value={batchEndpoint}
+              onChange={(e) => setBatchEndpoint(e.target.value)}
+            />
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 /* --- SettingsView (main export) ------------------------ */
 
 export function SettingsView() {
@@ -390,6 +468,7 @@ export function SettingsView() {
         <div className="space-y-4">
           <AccountSection />
           <AudioSetup />
+          <ProviderSettings />
           <TemplateManager />
           <Preferences />
         </div>

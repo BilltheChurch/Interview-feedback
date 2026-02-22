@@ -10,13 +10,14 @@ import {
   CheckCircle,
   ArrowRight,
   CalendarPlus,
+  Loader2,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { TextField } from '../components/ui/TextField';
 import { EmptyState } from '../components/ui/EmptyState';
-import { NumberTicker } from '../components/magicui/number-ticker';
 import { staggerContainer, staggerItem } from '../lib/animations';
+import { useCalendar } from '../hooks/useCalendar';
 
 type SessionMode = '1v1' | 'group';
 
@@ -155,7 +156,7 @@ function PendingFeedbackCard({
 
   if (pending.length === 0) {
     return (
-      <Card className="p-5">
+      <Card className="p-5 h-full">
         <h3 className="text-sm font-semibold text-ink-secondary mb-2">
           Pending Feedback
         </h3>
@@ -169,24 +170,24 @@ function PendingFeedbackCard({
   }
 
   return (
-    <Card className="p-5">
+    <Card className="p-5 h-full flex flex-col">
       <h3 className="text-sm font-semibold text-ink-secondary mb-3">
         Pending Feedback
       </h3>
       <div className="flex items-baseline gap-1 mb-3">
-        <NumberTicker value={pending.length} className="text-lg font-bold text-accent" />
+        <span className="text-lg font-bold text-accent">{pending.length}</span>
         <span className="text-sm text-ink-secondary">
-          {pending.length === 1 ? 'session' : 'sessions'} pending
+          {pending.length === 1 ? 'session' : 'sessions'} awaiting report
         </span>
       </div>
-      <ul className="space-y-2">
+      <ul className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {pending.map((s) => (
           <li
             key={s.id}
             className="flex items-center justify-between border border-border rounded-[--radius-button] px-3 py-2"
           >
-            <div>
-              <p className="text-sm text-ink">{s.name}</p>
+            <div className="min-w-0 mr-2">
+              <p className="text-sm text-ink truncate">{s.name}</p>
               <p className="text-xs text-ink-tertiary">
                 {s.date} &middot; {s.participantCount ?? s.participants?.length ?? 0} participants
               </p>
@@ -194,16 +195,21 @@ function PendingFeedbackCard({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() =>
-                navigate(`/feedback/${s.id}`, {
-                  state: {
-                    sessionName: s.name,
-                    participants: s.participants ?? [],
-                  },
-                })
-              }
+              className="shrink-0"
+              onClick={() => {
+                // Load full session data from localStorage (includes memos/notes/stages)
+                let sessionData: Record<string, unknown> = {
+                  sessionName: s.name,
+                  participants: s.participants ?? [],
+                };
+                try {
+                  const stored = localStorage.getItem(`ifb_session_data_${s.id}`);
+                  if (stored) sessionData = JSON.parse(stored);
+                } catch { /* use minimal data */ }
+                navigate(`/feedback/${s.id}`, { state: sessionData });
+              }}
             >
-              Finalize
+              View Draft
             </Button>
           </li>
         ))}
@@ -215,11 +221,36 @@ function PendingFeedbackCard({
 /* --- UpcomingMeetings --------------------- */
 
 function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject: string }) => void }) {
-  const connected = false;
-  const meetings: { id: string; subject: string; time: string; organizer: string }[] = [];
-  const navigate = useNavigate();
+  const { status, meetings, connectMicrosoft, connectGoogle } = useCalendar();
+  const [connecting, setConnecting] = useState(false);
 
-  if (!connected) {
+  const handleConnect = async (provider: 'microsoft' | 'google') => {
+    setConnecting(true);
+    try {
+      if (provider === 'microsoft') {
+        await connectMicrosoft();
+      } else {
+        await connectGoogle();
+      }
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  if (status === 'loading') {
+    return (
+      <Card className="p-5 h-full">
+        <h3 className="text-sm font-semibold text-ink-secondary mb-2">
+          Upcoming Meetings
+        </h3>
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="w-5 h-5 animate-spin text-accent" />
+        </div>
+      </Card>
+    );
+  }
+
+  if (status !== 'connected') {
     return (
       <Card className="p-5 h-full">
         <h3 className="text-sm font-semibold text-ink-secondary mb-2">
@@ -230,10 +261,34 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
           title="Calendar not connected"
           description="Connect your calendar to see upcoming meetings and quick-start sessions"
           action={
-            <Button variant="secondary" size="sm" onClick={() => navigate('/settings')}>
-              <CalendarPlus className="w-3.5 h-3.5" />
-              Connect Calendar
-            </Button>
+            <div className="flex flex-col gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => handleConnect('microsoft')}
+                disabled={connecting}
+              >
+                {connecting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <CalendarPlus className="w-3.5 h-3.5" />
+                )}
+                {connecting ? 'Connecting...' : 'Connect Microsoft'}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => handleConnect('google')}
+                disabled={connecting}
+              >
+                {connecting ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <CalendarPlus className="w-3.5 h-3.5" />
+                )}
+                {connecting ? 'Connecting...' : 'Connect Google'}
+              </Button>
+            </div>
           }
         />
       </Card>
@@ -249,32 +304,36 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
         <EmptyState
           icon={Calendar}
           title="No upcoming meetings"
-          description="Your calendar is clear for today"
+          description="Your calendar is clear for the next few days"
         />
       </Card>
     );
   }
 
   return (
-    <Card className="p-5 h-full">
+    <Card className="p-5 h-full flex flex-col">
       <h3 className="text-sm font-semibold text-ink-secondary mb-3">
         Upcoming Meetings
       </h3>
-      <ul className="space-y-2">
+      <ul className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {meetings.map((m) => (
           <li
             key={m.id}
             className="flex items-center justify-between border border-border rounded-[--radius-button] px-3 py-2"
           >
-            <div>
-              <p className="text-sm text-ink">{m.subject}</p>
+            <div className="min-w-0 mr-2">
+              <p className="text-sm text-ink truncate">{m.subject}</p>
               <p className="text-xs text-ink-tertiary">
-                {m.time} &middot; {m.organizer}
+                {new Date(m.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {' — '}
+                {new Date(m.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {m.organizer ? ` · ${m.organizer}` : ''}
               </p>
             </div>
             <Button
               variant="ghost"
               size="sm"
+              className="shrink-0"
               onClick={() => onQuickStart({ subject: m.subject })}
             >
               Quick Start
@@ -331,12 +390,12 @@ export function HomeView() {
         <span className="text-sm font-semibold text-ink">Chorus</span>
       </motion.div>
 
-      {/* Main grid */}
-      <div className="flex-1 px-6 py-4 overflow-auto">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {/* Main grid — no page-level scroll; each card handles its own overflow */}
+      <div className="flex-1 min-h-0 px-6 py-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full">
           {/* Left column: session controls */}
           <motion.div
-            className="flex flex-col gap-4"
+            className="flex flex-col gap-4 min-h-0"
             variants={staggerContainer}
             initial="hidden"
             animate="visible"
@@ -357,13 +416,14 @@ export function HomeView() {
               </motion.div>
             )}
 
-            <motion.div variants={staggerItem}>
+            <motion.div variants={staggerItem} className="flex-1 min-h-0">
               <PendingFeedbackCard navigate={navigate} />
             </motion.div>
           </motion.div>
 
           {/* Right column: calendar */}
           <motion.div
+            className="min-h-0"
             variants={staggerItem}
             initial="hidden"
             animate="visible"

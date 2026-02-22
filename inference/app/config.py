@@ -22,9 +22,9 @@ class Settings(BaseSettings):
         alias="SV_MODEL_ID",
     )
     sv_model_revision: str = Field(default="master", alias="SV_MODEL_REVISION")
-    sv_t_low: float = Field(default=0.45, alias="SV_T_LOW")
+    sv_t_low: float = Field(default=0.60, alias="SV_T_LOW")
     sv_t_high: float = Field(default=0.70, alias="SV_T_HIGH")
-    cluster_match_threshold: float = Field(default=0.45, alias="CLUSTER_MATCH_THRESHOLD")
+    cluster_match_threshold: float = Field(default=0.60, alias="CLUSTER_MATCH_THRESHOLD")
     profile_auto_threshold: float = Field(default=0.72, alias="PROFILE_AUTO_THRESHOLD")
     profile_confirm_threshold: float = Field(default=0.60, alias="PROFILE_CONFIRM_THRESHOLD")
     profile_margin_threshold: float = Field(default=0.08, alias="PROFILE_MARGIN_THRESHOLD")
@@ -46,12 +46,25 @@ class Settings(BaseSettings):
 
     enable_diarization: bool = Field(default=False, alias="ENABLE_DIARIZATION")
     segmenter_backend: Literal["vad", "diarization"] = Field(default="vad", alias="SEGMENTER_BACKEND")
-    modelscope_cache: str = Field(default="/modelscope-cache", alias="MODELSCOPE_CACHE")
+    modelscope_cache: str = Field(default="~/.cache/modelscope", alias="MODELSCOPE_CACHE")
+    sv_device: str = Field(default="auto", alias="SV_DEVICE")
 
     vad_mode: int = Field(default=2, alias="VAD_MODE")
     vad_frame_ms: int = Field(default=30, alias="VAD_FRAME_MS")
     vad_min_speech_ms: int = Field(default=300, alias="VAD_MIN_SPEECH_MS")
     vad_min_silence_ms: int = Field(default=250, alias="VAD_MIN_SILENCE_MS")
+
+    # Tier 2 batch processing
+    whisper_model_size: str = Field(default="large-v3", alias="WHISPER_MODEL_SIZE")
+    whisper_device: str = Field(default="auto", alias="WHISPER_DEVICE")
+    pyannote_model_id: str = Field(
+        default="pyannote/speaker-diarization-3.1", alias="PYANNOTE_MODEL_ID"
+    )
+    pyannote_embedding_model_id: str = Field(
+        default="pyannote/wespeaker-voxceleb-resnet34-LM", alias="PYANNOTE_EMBEDDING_MODEL_ID"
+    )
+    pyannote_device: str = Field(default="auto", alias="PYANNOTE_DEVICE")
+    hf_token: str = Field(default="", alias="HF_TOKEN")
 
 
 @lru_cache(maxsize=1)

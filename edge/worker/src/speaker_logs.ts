@@ -18,6 +18,11 @@ function parseStreamRole(value: unknown): StreamRole {
   if (raw === "teacher" || raw === "students" || raw === "mixed") {
     return raw;
   }
+  if (raw) {
+    console.warn(`[speaker-logs] unrecognized stream_role "${raw}", defaulting to "students"`);
+  } else {
+    console.warn('[speaker-logs] missing stream_role, defaulting to "students"');
+  }
   return "students";
 }
 

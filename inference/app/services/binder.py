@@ -165,7 +165,7 @@ class BinderPolicy:
             and existing_name is None
             and candidate_name is not None
             and speaker_name == candidate_name
-            and candidate_confidence >= 0.93
+            and candidate_confidence >= 0.80
         )
         if should_persist_binding and speaker_name:
             self._set_cluster_binding(
@@ -265,7 +265,8 @@ class BinderPolicy:
         if name_candidates:
             top = name_candidates[0]
             if self._roster_hit(top.name, state) is True and self._looks_like_person_name(top.name):
-                if top.confidence >= 0.93:
+                # Persist binding at 0.80+ (was 0.93) so "I am X" (0.90) also sticks
+                if top.confidence >= 0.80:
                     self._set_cluster_binding(
                         state=state,
                         cluster_id=cluster_id,
@@ -278,12 +279,12 @@ class BinderPolicy:
                 evidence.binding_source = "name_extract"
                 evidence.reason = (
                     "roster name extracted from ASR (binding persisted)"
-                    if top.confidence >= 0.93
+                    if top.confidence >= 0.80
                     else "roster name extracted from ASR"
                 )
                 return BindResult(
                     speaker_name=top.name,
-                    decision="confirm",
+                    decision="auto" if top.confidence >= 0.80 else "confirm",
                     evidence=evidence,
                 )
 

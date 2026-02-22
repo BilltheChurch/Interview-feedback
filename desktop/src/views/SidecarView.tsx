@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, forwardRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -26,12 +26,12 @@ import { MeterBar } from '../components/ui/MeterBar';
 import { ConfidenceBadge } from '../components/ui/ConfidenceBadge';
 import { RichNoteEditor, type RichNoteEditorRef } from '../components/RichNoteEditor';
 import { useSessionStore } from '../stores/sessionStore';
-import type { MemoType } from '../stores/sessionStore';
+import type { MemoType, StageArchive } from '../stores/sessionStore';
 import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
 
 /* ─── Types ─────────────────────────────────── */
 
-type ParticipantStatus = 'pending' | 'capturing' | 'matched' | 'needs_confirm' | 'unknown';
+type ParticipantStatus = 'pending' | 'capturing' | 'matched' | 'needs_confirm' | 'not_enrolled' | 'unknown';
 
 type Participant = {
   name: string;
@@ -53,13 +53,6 @@ const memoConfig: Record<MemoType, { icon: typeof Star; label: string; chipVaria
 };
 
 const memoShortcutOrder: MemoType[] = ['highlight', 'issue', 'question', 'evidence'];
-
-const mockParticipants: Participant[] = [
-  { name: 'John Doe', status: 'matched', confidence: 0.92, talkTimePct: 45, turnCount: 12 },
-  { name: 'Jane Smith', status: 'capturing', confidence: 0.78, talkTimePct: 35, turnCount: 8 },
-  { name: 'Alex Chen', status: 'needs_confirm', confidence: 0.54, talkTimePct: 15, turnCount: 4 },
-  { name: 'Interviewer', status: 'pending', talkTimePct: 5, turnCount: 1 },
-];
 
 /* ─── Helpers ────────────────────────────────── */
 
@@ -199,11 +192,15 @@ function QuickMarkBar({
   memoCount,
   onToggleMemos,
   memosVisible,
+  buttonRefsMap,
+  pulsingType,
 }: {
-  onMark: (type: MemoType) => void;
+  onMark: (type: MemoType, buttonRect?: DOMRect) => void;
   memoCount: number;
   onToggleMemos: () => void;
   memosVisible: boolean;
+  buttonRefsMap?: React.MutableRefObject<Map<MemoType, HTMLElement>>;
+  pulsingType?: MemoType | null;
 }) {
   const buttons: { type: MemoType; icon: typeof Star; color: string; shortcut: string }[] = [
     { type: 'highlight', icon: Star, color: 'text-accent hover:bg-accent-soft', shortcut: '1' },
@@ -217,11 +214,20 @@ function QuickMarkBar({
       {buttons.map(({ type, icon: Icon, color, shortcut }) => (
         <motion.button
           key={type}
+          ref={(el) => {
+            if (el && buttonRefsMap) {
+              buttonRefsMap.current.set(type, el);
+            }
+          }}
           whileHover={{ scale: 1.08 }}
           whileTap={{ scale: 0.92 }}
           transition={{ type: 'spring', stiffness: 400, damping: 17 }}
-          onClick={() => onMark(type)}
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            onMark(type, rect);
+          }}
           className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors duration-150 relative group ${color}`}
+          style={pulsingType === type ? { animation: 'memo-pulse 0.4s ease-out' } : undefined}
           title={`${memoConfig[type].label} (Cmd+${shortcut})`}
           aria-label={`${memoConfig[type].label} (Cmd+${shortcut})`}
         >
@@ -256,6 +262,56 @@ const flashcardStyle: Record<MemoType, { topBorder: string; bg: string; iconColo
   question:  { topBorder: 'border-t-blue-400',    bg: 'bg-blue-50/60',    iconColor: 'text-blue-600' },
   evidence:  { topBorder: 'border-t-purple-400',  bg: 'bg-purple-50/60',  iconColor: 'text-purple-600' },
 };
+
+/* ─── FlyingMemo (parabolic arc animation) ──── */
+
+function FlyingMemo({
+  type,
+  startRect,
+  endRect,
+  onComplete,
+}: {
+  type: MemoType;
+  startRect: DOMRect;
+  endRect: DOMRect;
+  onComplete: () => void;
+}) {
+  const cfg = memoConfig[type];
+  const style = flashcardStyle[type];
+  const Icon = cfg.icon;
+
+  // Calculate parabolic path control point (higher than midpoint)
+  const midX = (startRect.left + endRect.left) / 2;
+  const midY = Math.min(startRect.top, endRect.top) - 60; // Arc peak
+
+  return (
+    <motion.div
+      className="fixed z-50 pointer-events-none"
+      initial={{
+        left: startRect.left,
+        top: startRect.top,
+        scale: 1,
+        opacity: 1,
+      }}
+      animate={{
+        left: [startRect.left, midX, endRect.left],
+        top: [startRect.top, midY, endRect.top],
+        scale: [1, 1.2, 0.8],
+        opacity: [1, 1, 0],
+      }}
+      transition={{
+        duration: 0.5,
+        ease: [0.22, 1, 0.36, 1],
+      }}
+      onAnimationComplete={onComplete}
+    >
+      <div className={`flex items-center gap-1 px-2 py-1 rounded-lg border border-border ${style.bg} shadow-lg`}>
+        <Icon className={`w-3 h-3 ${style.iconColor}`} />
+        <span className={`text-xs font-medium ${style.iconColor}`}>{cfg.label}</span>
+      </div>
+    </motion.div>
+  );
+}
 
 /* ─── MemoFlashcard (single card) ────────────── */
 
@@ -421,13 +477,13 @@ function MemoNotepadOverlay({
 
 /* ─── Compact MemoTray (collapsible from bottom bar) ── */
 
-function MemoTray({
-  memos,
-  onOpenMemo,
-}: {
-  memos: DisplayMemo[];
-  onOpenMemo: (id: string) => void;
-}) {
+const MemoTray = forwardRef<
+  HTMLDivElement,
+  {
+    memos: DisplayMemo[];
+    onOpenMemo: (id: string) => void;
+  }
+>(({ memos, onOpenMemo }, ref) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -438,6 +494,7 @@ function MemoTray({
 
   return (
     <motion.div
+      ref={ref}
       initial={{ height: 0, opacity: 0 }}
       animate={{ height: 'auto', opacity: 1 }}
       exit={{ height: 0, opacity: 0 }}
@@ -468,7 +525,9 @@ function MemoTray({
       </div>
     </motion.div>
   );
-}
+});
+
+MemoTray.displayName = 'MemoTray';
 
 /* ─── FlowControl ────────────────────────────── */
 
@@ -521,6 +580,114 @@ function FlowControl({
   );
 }
 
+/* ─── StageTimeline (archived notes per stage) ── */
+
+function StageTimelineEntry({
+  archive,
+  stageMemos,
+}: {
+  archive: StageArchive;
+  stageMemos: DisplayMemo[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const hasFreeform = !!(archive.freeformHtml || archive.freeformText.trim());
+  const noteCount = stageMemos.length + (hasFreeform ? 1 : 0);
+
+  return (
+    <div className="border-b border-border/30 last:border-b-0">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-surface-hover/50 transition-colors duration-150"
+      >
+        <motion.div
+          animate={{ rotate: expanded ? 90 : 0 }}
+          transition={{ duration: 0.15 }}
+        >
+          <ChevronRight className="w-3 h-3 text-ink-tertiary" />
+        </motion.div>
+        <span className="text-xs font-semibold text-ink-tertiary">
+          {archive.stageName}
+        </span>
+        <span className="text-xs text-ink-tertiary/70 tabular-nums">
+          ({noteCount} note{noteCount !== 1 ? 's' : ''})
+        </span>
+        <span className="text-xs text-ink-tertiary/50 tabular-nums font-mono ml-auto">
+          {new Date(archive.archivedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        </span>
+      </button>
+
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="px-4 pb-2 flex flex-col gap-1.5">
+              {/* Freeform text — prefer HTML with highlights, fall back to plain text */}
+              {archive.freeformHtml ? (
+                <div
+                  className="text-sm text-ink-secondary bg-surface/50 rounded-lg px-2.5 py-1.5 leading-relaxed prose prose-sm max-w-none memo-highlight-view"
+                  dangerouslySetInnerHTML={{ __html: archive.freeformHtml }}
+                />
+              ) : archive.freeformText.trim() ? (
+                <p className="text-sm text-ink-secondary bg-surface/50 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap leading-relaxed">
+                  {archive.freeformText}
+                </p>
+              ) : null}
+
+              {/* Categorized memos from this stage */}
+              {stageMemos.map((m) => {
+                const cfg = memoConfig[m.type];
+                const style = flashcardStyle[m.type];
+                const Icon = cfg.icon;
+                return (
+                  <div
+                    key={m.id}
+                    className={`flex items-start gap-1.5 px-2.5 py-1 rounded-lg text-xs ${style.bg}`}
+                  >
+                    <Icon className={`w-3 h-3 mt-0.5 shrink-0 ${style.iconColor}`} />
+                    <span className="text-ink-secondary leading-snug">{m.text}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function StageTimeline({
+  archives,
+  allMemos,
+}: {
+  archives: StageArchive[];
+  allMemos: DisplayMemo[];
+}) {
+  if (archives.length === 0) return null;
+
+  return (
+    <div className="border-t border-border/50 bg-ink/[0.015] shrink-0 max-h-[200px] overflow-y-auto">
+      {archives.map((archive) => {
+        const stageMemos = allMemos.filter(
+          (m) => archive.memoIds.includes(m.id),
+        );
+        return (
+          <StageTimelineEntry
+            key={`${archive.stageIndex}-${archive.archivedAt}`}
+            archive={archive}
+            stageMemos={stageMemos}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 /* ─── AudioMeters ────────────────────────────── */
 
 function AudioMeters({ mic, system, mixed }: { mic: number; system: number; mixed: number }) {
@@ -545,6 +712,8 @@ function EnrollmentStatusIndicator({ status }: { status: ParticipantStatus }) {
       return <Check className="w-3 h-3 text-success" />;
     case 'needs_confirm':
       return <AlertTriangle className="w-3 h-3 text-warning" />;
+    case 'not_enrolled':
+      return <X className="w-3 h-3 text-ink-tertiary" />;
     case 'unknown':
       return <X className="w-3 h-3 text-error" />;
   }
@@ -596,12 +765,12 @@ function EnrollmentPanel({
               Confirm
             </button>
           )}
-          {p.status === 'pending' && (
+          {(p.status === 'pending' || p.status === 'not_enrolled') && (
             <button
               onClick={(e) => { e.stopPropagation(); onEnroll(p.name); }}
               className="text-xs text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
             >
-              Enroll
+              {p.status === 'not_enrolled' ? 'Retry' : 'Enroll'}
             </button>
           )}
         </div>
@@ -616,19 +785,21 @@ function ParticipationSignals({ participants }: { participants: Participant[] })
   return (
     <>
       {participants.map((p) => (
-        <div key={p.name} className="flex items-center gap-2">
-          <span className="text-xs text-ink-secondary w-14 truncate shrink-0">
-            {p.name.split(' ')[0]}
-          </span>
-          <div className="flex-1 h-2 rounded-full bg-surface-hover overflow-hidden">
+        <div key={p.name} className="flex flex-col gap-0.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-ink-secondary truncate overflow-hidden whitespace-nowrap max-w-[100px]" title={p.name}>
+              {p.name}
+            </span>
+            <span className="text-xs text-ink-tertiary tabular-nums shrink-0 ml-1">
+              {p.talkTimePct}% / {p.turnCount}t
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-surface-hover overflow-hidden">
             <div
               className="h-full rounded-full bg-accent transition-all duration-300"
               style={{ width: `${p.talkTimePct}%` }}
             />
           </div>
-          <span className="text-xs text-ink-tertiary tabular-nums w-14 text-right shrink-0">
-            {p.talkTimePct}% / {p.turnCount}t
-          </span>
         </div>
       ))}
     </>
@@ -692,10 +863,10 @@ function ContextDrawer({
           <CollapsibleSection title="Flow">
             <FlowControl currentStage={currentStage} onAdvance={onAdvanceStage} stages={stages} />
           </CollapsibleSection>
-          <CollapsibleSection title="Speakers" defaultOpen={false}>
+          <CollapsibleSection title="Speakers" defaultOpen>
             <EnrollmentPanel participants={participants} onEnroll={onEnroll} onConfirm={onConfirm} />
           </CollapsibleSection>
-          <CollapsibleSection title="Talk Time" defaultOpen={false}>
+          <CollapsibleSection title="Speaker Activity" defaultOpen>
             <ParticipationSignals participants={participants} />
           </CollapsibleSection>
         </div>
@@ -734,6 +905,8 @@ export function SidecarView() {
   const audioLevels = useSessionStore((s) => s.audioLevels);
   const storeAddMemo = useSessionStore((s) => s.addMemo);
   const advanceStage = useSessionStore((s) => s.advanceStage);
+  const storeAddStageArchive = useSessionStore((s) => s.addStageArchive);
+  const storeStageArchives = useSessionStore((s) => s.stageArchives);
   const storeSetNotes = useSessionStore((s) => s.setNotes);
   const storeStages = useSessionStore((s) => s.stages);
   const storeSessionName = useSessionStore((s) => s.sessionName);
@@ -748,18 +921,18 @@ export function SidecarView() {
     ? storeStages
     : (locationState?.stages && locationState.stages.length > 0 ? locationState.stages : defaultStages);
 
-  // Build participant list
-  const initialParticipants: Participant[] = locationState
-    ? [
-        ...(locationState.participants || []).map(name => ({
-          name,
-          status: 'pending' as ParticipantStatus,
-          talkTimePct: 0,
-          turnCount: 0,
-        })),
-        { name: 'Interviewer', status: 'matched' as ParticipantStatus, confidence: 1.0, talkTimePct: 0, turnCount: 0 },
-      ]
-    : mockParticipants;
+  // Build participant list from locationState only (no mock data)
+  const initialParticipants: Participant[] = [
+    ...(locationState?.participants || []).map(name => ({
+      name,
+      status: 'pending' as ParticipantStatus,
+      talkTimePct: 0,
+      turnCount: 0,
+    })),
+    ...(locationState?.participants && locationState.participants.length > 0
+      ? [{ name: 'Interviewer', status: 'matched' as ParticipantStatus, confidence: 1.0, talkTimePct: 0, turnCount: 0 }]
+      : []),
+  ];
 
   // ── UI-only local state ──
   const [notes, setNotes] = useState('');
@@ -768,11 +941,72 @@ export function SidecarView() {
   const [memosVisible, setMemosVisible] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>(initialParticipants);
   const [openMemoId, setOpenMemoId] = useState<string | null>(null);
+  const [flyingMemo, setFlyingMemo] = useState<{
+    type: MemoType;
+    startRect: DOMRect;
+  } | null>(null);
+  const [pulsingMemoType, setPulsingMemoType] = useState<MemoType | null>(null);
+  const [showMemoHint, setShowMemoHint] = useState(false);
 
   const editorRef = useRef<RichNoteEditorRef>(null);
+  const memoTrayRef = useRef<HTMLDivElement>(null);
+  const quickMarkButtonRefs = useRef<Map<MemoType, HTMLElement>>(new Map());
+  const enrollTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Audio activity indicator
   const audioActive = audioLevels.mic > 0.05 || audioLevels.system > 0.05;
+
+  // Cleanup enrollment timers on unmount
+  useEffect(() => {
+    return () => {
+      enrollTimersRef.current.forEach(timer => clearTimeout(timer));
+      enrollTimersRef.current.clear();
+    };
+  }, []);
+
+  // ── Local audio-level-based talk time accumulation ──
+  // Uses real audio levels (not chunk counts which are always ~50/50)
+  const storeStatus = useSessionStore((s) => s.status);
+  const micTimeRef = useRef(0);
+  const sysTimeRef = useRef(0);
+
+  useEffect(() => {
+    if (storeStatus !== 'recording') {
+      micTimeRef.current = 0;
+      sysTimeRef.current = 0;
+      return;
+    }
+
+    const THRESHOLD = 1; // minimum RMS level (0-100 scale) to count as active
+
+    const interval = setInterval(() => {
+      const levels = useSessionStore.getState().audioLevels;
+      if (levels.mic > THRESHOLD) micTimeRef.current++;
+      if (levels.system > THRESHOLD) sysTimeRef.current++;
+
+      const micT = micTimeRef.current;
+      const sysT = sysTimeRef.current;
+      const total = micT + sysT;
+      if (total === 0) return;
+
+      setParticipants(prev => {
+        if (prev.length === 0) return prev;
+        const others = prev.filter(pp => pp.name !== 'Interviewer').length;
+        return prev.map(p => {
+          if (p.name === 'Interviewer') {
+            return { ...p, talkTimePct: Math.round((micT / total) * 100), turnCount: micT };
+          }
+          if (sysT === 0 || others === 0) {
+            return { ...p, talkTimePct: 0, turnCount: 0 };
+          }
+          const share = Math.round((sysT / total / others) * 100);
+          return { ...p, talkTimePct: share, turnCount: Math.round(sysT / others) };
+        });
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [storeStatus]);
 
   // Enrich store memos with stage name for display
   const memos: DisplayMemo[] = useMemo(
@@ -781,23 +1015,72 @@ export function SidecarView() {
       type: m.type,
       text: m.text,
       timestamp: m.timestamp,
-      stage: stages[currentStage] ?? 'Unknown',
+      stage: stages[m.stageIndex] ?? 'Unknown',
       createdAt: m.createdAt,
     })),
-    [storeMemos, stages, currentStage],
+    [storeMemos, stages],
   );
 
-  // Save memo
+  // Save memo — applies colored highlight to text, keeps text in editor
   const addMemo = useCallback(
-    (type: MemoType) => {
-      const text = plainText.trim();
+    (type: MemoType, buttonRect?: DOMRect) => {
+      const selectedText = editorRef.current?.getSelectedText()?.trim() ?? '';
+      const text = selectedText || plainText.trim();
       if (!text) return;
+
+      // Generate memo ID before adding to store
+      const memoId = `memo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      if (buttonRect) {
+        setFlyingMemo({ type, startRect: buttonRect });
+      }
+      setMemosVisible(true);
+
+      // Add memo to store
       storeAddMemo(type, text.slice(0, 200));
-      editorRef.current?.clearContent();
-      setPlainText('');
+
+      // Apply colored highlight to text in editor (text stays, just gets highlighted)
+      editorRef.current?.applyMemoMark(type, memoId);
+
+      // Sync HTML to store since we added a mark
+      const html = editorRef.current?.getHTML() ?? '';
+      storeSetNotes(html);
     },
-    [plainText, storeAddMemo],
+    [plainText, storeAddMemo, storeSetNotes],
   );
+
+  // Auto-archive on stage advance: capture editor text + HTML + stage memos → archive → clear
+  const handleAdvanceStage = useCallback(() => {
+    const store = useSessionStore.getState();
+    const freeformText = editorRef.current?.getText()?.trim() ?? '';
+    const freeformHtml = editorRef.current?.getHTML() ?? store.notes; // Prefer fresh HTML from editor
+
+    // Collect memo IDs created during this stage
+    const stageMemoIds = store.memos
+      .filter((m) => m.stageIndex === store.currentStage)
+      .map((m) => m.id);
+
+    // Only archive if there's content to archive
+    if (freeformText || stageMemoIds.length > 0) {
+      storeAddStageArchive({
+        stageIndex: store.currentStage,
+        stageName: stages[store.currentStage] ?? `Stage ${store.currentStage + 1}`,
+        archivedAt: new Date().toISOString(),
+        freeformText,
+        freeformHtml: freeformHtml || undefined,
+        memoIds: stageMemoIds,
+      });
+    }
+
+    // Clear editor for the new stage
+    editorRef.current?.clearContent();
+    setPlainText('');
+    setNotes('');
+    storeSetNotes('');
+
+    // Advance the stage
+    advanceStage();
+  }, [advanceStage, storeAddStageArchive, stages, storeSetNotes]);
 
   // Sync notes to store
   const handleNotesChange = useCallback(
@@ -815,24 +1098,69 @@ export function SidecarView() {
       const idx = parseInt(e.key, 10) - 1;
       if (idx >= 0 && idx < memoShortcutOrder.length) {
         e.preventDefault();
-        addMemo(memoShortcutOrder[idx]);
+        const type = memoShortcutOrder[idx];
+
+        // Always pulse the button for visual feedback
+        setPulsingMemoType(type);
+        setTimeout(() => setPulsingMemoType(null), 400);
+
+        // Get fresh rect from the HTMLElement ref (not stale DOMRect)
+        const el = quickMarkButtonRefs.current.get(type);
+        const buttonRect = el?.getBoundingClientRect();
+
+        // Check if there's selected text OR any editor content
+        const hasSelection = !!(editorRef.current?.getSelectedText()?.trim());
+        if (hasSelection || plainText.trim()) {
+          addMemo(type, buttonRect);
+        } else {
+          // Show hint toast when text is empty
+          setShowMemoHint(true);
+          setTimeout(() => setShowMemoHint(false), 1500);
+        }
       }
     }
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [addMemo]);
+  }, [addMemo, plainText]);
 
   // Enrollment handlers
-  const handleEnroll = useCallback((name: string) => {
+  const handleEnroll = useCallback(async (name: string) => {
     setParticipants(prev => prev.map(p =>
       p.name === name ? { ...p, status: 'capturing' as ParticipantStatus } : p
     ));
-    setTimeout(() => {
+
+    try {
+      // Check if desktopAPI enrollment is available
+      if (window.desktopAPI?.enrollSpeaker) {
+        const result = await window.desktopAPI.enrollSpeaker({
+          sessionId,
+          speakerName: name,
+        });
+        setParticipants(prev => prev.map(p =>
+          p.name === name ? {
+            ...p,
+            status: result.success ? 'needs_confirm' as ParticipantStatus : 'not_enrolled' as ParticipantStatus,
+            confidence: result.confidence ?? 0,
+          } : p
+        ));
+      } else {
+        // Fallback: mark as enrolled without verification (dev mode)
+        // Use a timeout that we properly clean up
+        const timer = setTimeout(() => {
+          setParticipants(prev => prev.map(p =>
+            p.name === name ? { ...p, status: 'needs_confirm' as ParticipantStatus, confidence: 0.85 } : p
+          ));
+        }, 2000);
+        // Store timer for cleanup
+        enrollTimersRef.current.set(name, timer);
+      }
+    } catch (error) {
+      console.error('Enrollment failed:', error);
       setParticipants(prev => prev.map(p =>
-        p.name === name ? { ...p, status: 'needs_confirm' as ParticipantStatus, confidence: 0.7 + Math.random() * 0.25 } : p
+        p.name === name ? { ...p, status: 'not_enrolled' as ParticipantStatus } : p
       ));
-    }, 3000);
-  }, []);
+    }
+  }, [sessionId]);
 
   const handleConfirm = useCallback((name: string) => {
     setParticipants(prev => prev.map(p =>
@@ -840,18 +1168,36 @@ export function SidecarView() {
     ));
   }, []);
 
-  // End session
+  // End session — archive current stage first to preserve freeform notes
   const handleEndSession = useCallback(() => {
+    // Archive current stage's content before ending (same logic as handleAdvanceStage)
+    const store = useSessionStore.getState();
+    const freeformText = editorRef.current?.getText()?.trim() ?? '';
+    const freeformHtml = editorRef.current?.getHTML() ?? store.notes;
+    const stageMemoIds = store.memos
+      .filter((m) => m.stageIndex === store.currentStage)
+      .map((m) => m.id);
+    if (freeformText || stageMemoIds.length > 0) {
+      store.addStageArchive({
+        stageIndex: store.currentStage,
+        stageName: stages[store.currentStage] ?? `Stage ${store.currentStage + 1}`,
+        archivedAt: new Date().toISOString(),
+        freeformText,
+        freeformHtml: freeformHtml || undefined,
+        memoIds: stageMemoIds,
+      });
+    }
+
     try {
       const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
       const updated = sessions.map((s: Record<string, unknown>) =>
-        s.id === sessionId ? { ...s, status: 'completed' } : s
+        s.id === sessionId ? { ...s, status: 'draft' } : s
       );
       localStorage.setItem('ifb_sessions', JSON.stringify(updated));
     } catch { /* ignore parse errors */ }
 
     end();
-  }, [end, sessionId]);
+  }, [end, sessionId, stages]);
 
   return (
     <div className="flex flex-col h-full bg-bg">
@@ -883,10 +1229,27 @@ export function SidecarView() {
             autoFocus
           />
 
+          {/* Stage timeline — archived notes from previous stages */}
+          <StageTimeline archives={storeStageArchives} allMemos={memos} />
+
           {/* Collapsible memo tray */}
           <AnimatePresence>
             {memosVisible && (
-              <MemoTray memos={memos} onOpenMemo={(id) => setOpenMemoId(id)} />
+              <MemoTray ref={memoTrayRef} memos={memos} onOpenMemo={(id) => setOpenMemoId(id)} />
+            )}
+          </AnimatePresence>
+
+          {/* Memo hint toast */}
+          <AnimatePresence>
+            {showMemoHint && (
+              <motion.div
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 4 }}
+                className="px-3 py-1.5 text-xs text-ink-secondary bg-surface-hover border-t border-border text-center"
+              >
+                Type notes first, then use Cmd+1-4 to capture
+              </motion.div>
             )}
           </AnimatePresence>
 
@@ -896,6 +1259,8 @@ export function SidecarView() {
             memoCount={memos.length}
             onToggleMemos={() => setMemosVisible(v => !v)}
             memosVisible={memosVisible}
+            buttonRefsMap={quickMarkButtonRefs}
+            pulsingType={pulsingMemoType}
           />
         </div>
 
@@ -904,7 +1269,7 @@ export function SidecarView() {
           open={drawerOpen}
           onToggle={() => setDrawerOpen((v) => !v)}
           currentStage={currentStage}
-          onAdvanceStage={advanceStage}
+          onAdvanceStage={handleAdvanceStage}
           participants={participants}
           onEnroll={handleEnroll}
           onConfirm={handleConfirm}
@@ -923,6 +1288,38 @@ export function SidecarView() {
                 memos={memos}
                 onClose={() => setOpenMemoId(null)}
                 onNavigate={(id) => setOpenMemoId(id)}
+              />
+            );
+          })()}
+        </AnimatePresence>
+
+        {/* Flying memo animation */}
+        <AnimatePresence>
+          {flyingMemo && (() => {
+            const trayRect = memoTrayRef.current?.getBoundingClientRect();
+            if (!trayRect) {
+              // Fallback: use a default position if tray is not yet mounted
+              const fallbackRect = new DOMRect(
+                window.innerWidth - 200,
+                window.innerHeight - 150,
+                100,
+                100
+              );
+              return (
+                <FlyingMemo
+                  type={flyingMemo.type}
+                  startRect={flyingMemo.startRect}
+                  endRect={fallbackRect}
+                  onComplete={() => setFlyingMemo(null)}
+                />
+              );
+            }
+            return (
+              <FlyingMemo
+                type={flyingMemo.type}
+                startRect={flyingMemo.startRect}
+                endRect={trayRect}
+                onComplete={() => setFlyingMemo(null)}
               />
             );
           })()}

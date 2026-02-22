@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   Clock,
   User,
@@ -9,9 +9,11 @@ import {
   Search,
   ChevronRight,
   ArrowLeft,
+  Trash2,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Chip } from '../components/ui/Chip';
+import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { staggerContainer, staggerItem } from '../lib/animations';
 
@@ -23,12 +25,12 @@ type SessionRecord = {
   date: string;
   mode: '1v1' | 'group';
   participantCount: number;
-  status: 'completed' | 'draft' | 'failed';
+  status: 'completed' | 'finalized' | 'draft' | 'failed';
 };
 
-type FilterStatus = 'all' | 'completed' | 'draft' | 'failed';
+type FilterStatus = 'all' | 'completed' | 'finalized' | 'draft' | 'failed';
 
-/* ─── localStorage reader ──────────────────── */
+/* ─── localStorage helpers ──────────────────── */
 
 function getStoredSessions(): SessionRecord[] {
   try {
@@ -39,10 +41,35 @@ function getStoredSessions(): SessionRecord[] {
       date: s.date,
       mode: s.mode || '1v1',
       participantCount: s.participantCount || 0,
-      status: s.status === 'in_progress' ? 'draft' as const : (s.status || 'completed') as SessionRecord['status'],
+      status: s.status === 'in_progress' ? 'draft' as const
+        : (s.status === 'finalized' || s.status === 'completed' || s.status === 'draft' || s.status === 'failed')
+          ? s.status as SessionRecord['status']
+          : 'completed' as const,
     }));
   } catch {
     return [];
+  }
+}
+
+function removeSessionFromStorage(sessionId: string): void {
+  try {
+    const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
+    const updated = sessions.filter((s: any) => s.id !== sessionId);
+    localStorage.setItem('ifb_sessions', JSON.stringify(updated));
+  } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(`ifb_session_data_${sessionId}`);
+  } catch { /* ignore */ }
+}
+
+function clearAllSessionsFromStorage(sessionIds: string[]): void {
+  try {
+    localStorage.setItem('ifb_sessions', '[]');
+  } catch { /* ignore */ }
+  for (const id of sessionIds) {
+    try {
+      localStorage.removeItem(`ifb_session_data_${id}`);
+    } catch { /* ignore */ }
   }
 }
 
@@ -83,6 +110,7 @@ function groupByDate(sessions: SessionRecord[]): { label: string; sessions: Sess
 
 const statusConfig: Record<SessionRecord['status'], { label: string; variant: 'success' | 'warning' | 'error' | 'default' }> = {
   completed: { label: 'Completed', variant: 'default' },
+  finalized: { label: 'Finalized', variant: 'success' },
   draft: { label: 'Draft', variant: 'warning' },
   failed: { label: 'Failed', variant: 'error' },
 };
@@ -91,6 +119,7 @@ const statusConfig: Record<SessionRecord['status'], { label: string; variant: 's
 
 const filterOptions: { value: FilterStatus; label: string }[] = [
   { value: 'all', label: 'All' },
+  { value: 'finalized', label: 'Finalized' },
   { value: 'completed', label: 'Completed' },
   { value: 'draft', label: 'Draft' },
   { value: 'failed', label: 'Failed' },
@@ -131,9 +160,59 @@ function FilterChips({
   );
 }
 
+/* ─── Confirm Delete Dialog ────────────────── */
+
+function ConfirmDeleteDialog({
+  title,
+  message,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  message: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      onClick={onCancel}
+    >
+      <motion.div
+        className="bg-surface rounded-[--radius-card] border border-border shadow-lg p-6 max-w-sm w-full mx-4"
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.95, opacity: 0 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-base font-semibold text-ink mb-2">{title}</h3>
+        <p className="text-sm text-ink-secondary mb-5">{message}</p>
+        <div className="flex gap-3 justify-end">
+          <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>
+          <Button variant="danger" size="sm" onClick={onConfirm}>
+            <Trash2 className="w-3.5 h-3.5" />
+            Delete
+          </Button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 /* ─── SessionRow ────────────────────────────── */
 
-function SessionRow({ session, onClick }: { session: SessionRecord; onClick: () => void }) {
+function SessionRow({
+  session,
+  onClick,
+  onDelete,
+}: {
+  session: SessionRecord;
+  onClick: () => void;
+  onDelete: () => void;
+}) {
   const ModeIcon = session.mode === '1v1' ? User : Users;
   const cfg = statusConfig[session.status];
 
@@ -143,7 +222,7 @@ function SessionRow({ session, onClick }: { session: SessionRecord; onClick: () 
     >
       <Card
         hoverable
-        className="p-5 flex items-center gap-4 cursor-pointer"
+        className="p-5 flex items-center gap-4 cursor-pointer group"
         onClick={onClick}
       >
         {/* Mode icon */}
@@ -163,10 +242,20 @@ function SessionRow({ session, onClick }: { session: SessionRecord; onClick: () 
           </div>
         </div>
 
-        {/* Status — only show chip for non-completed (completed is the normal state) */}
-        {session.status !== 'completed' && (
-          <Chip variant={cfg.variant}>{cfg.label}</Chip>
-        )}
+        {/* Status label */}
+        <Chip variant={cfg.variant}>{cfg.label}</Chip>
+
+        {/* Delete button — visible on hover */}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-ink-tertiary
+                     opacity-0 group-hover:opacity-100 hover:text-error hover:bg-red-50
+                     transition-all duration-150 cursor-pointer shrink-0"
+          aria-label={`Delete ${session.name}`}
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
 
         {/* Arrow */}
         <ChevronRight className="w-4 h-4 text-ink-tertiary shrink-0" />
@@ -182,10 +271,18 @@ export function HistoryView() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterStatus>('all');
 
-  const allSessions = useMemo(() => getStoredSessions(), []);
+  // Reactive session list — useState instead of useMemo so deletes cause re-render
+  const [allSessions, setAllSessions] = useState<SessionRecord[]>(() => getStoredSessions());
+
+  // Confirm dialog state
+  const [confirmDelete, setConfirmDelete] = useState<{
+    type: 'single' | 'all';
+    session?: SessionRecord;
+  } | null>(null);
 
   const counts = useMemo<Record<FilterStatus, number>>(() => ({
     all: allSessions.length,
+    finalized: allSessions.filter((s) => s.status === 'finalized').length,
     completed: allSessions.filter((s) => s.status === 'completed').length,
     draft: allSessions.filter((s) => s.status === 'draft').length,
     failed: allSessions.filter((s) => s.status === 'failed').length,
@@ -205,6 +302,28 @@ export function HistoryView() {
 
   const grouped = useMemo(() => groupByDate(filtered), [filtered]);
 
+  const handleDeleteSession = useCallback((session: SessionRecord) => {
+    setConfirmDelete({ type: 'single', session });
+  }, []);
+
+  const handleClearAll = useCallback(() => {
+    setConfirmDelete({ type: 'all' });
+  }, []);
+
+  const executeDelete = useCallback(() => {
+    if (!confirmDelete) return;
+
+    if (confirmDelete.type === 'single' && confirmDelete.session) {
+      removeSessionFromStorage(confirmDelete.session.id);
+      setAllSessions((prev) => prev.filter((s) => s.id !== confirmDelete.session!.id));
+    } else if (confirmDelete.type === 'all') {
+      clearAllSessionsFromStorage(allSessions.map((s) => s.id));
+      setAllSessions([]);
+    }
+
+    setConfirmDelete(null);
+  }, [confirmDelete, allSessions]);
+
   return (
     <div className="h-full overflow-auto">
       <div className="max-w-3xl mx-auto px-6 py-6">
@@ -222,10 +341,16 @@ export function HistoryView() {
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <div>
+          <div className="flex-1">
             <h1 className="text-xl font-semibold text-ink">Session History</h1>
             <p className="text-sm text-ink-secondary">Review past interview sessions and reports</p>
           </div>
+          {allSessions.length > 0 && (
+            <Button variant="ghost" size="sm" onClick={handleClearAll}>
+              <Trash2 className="w-3.5 h-3.5" />
+              Clear All
+            </Button>
+          )}
         </motion.div>
 
         {/* Search */}
@@ -278,14 +403,31 @@ export function HistoryView() {
                   {label}
                 </motion.h2>
                 <div className="space-y-2">
-                  {sessions.map((session) => (
-                    <motion.div key={session.id} variants={staggerItem}>
-                      <SessionRow
-                        session={session}
-                        onClick={() => navigate(`/feedback/${session.id}`, { state: { sessionName: session.name } })}
-                      />
-                    </motion.div>
-                  ))}
+                  <AnimatePresence mode="popLayout">
+                    {sessions.map((session) => (
+                      <motion.div
+                        key={session.id}
+                        variants={staggerItem}
+                        exit={{ opacity: 0, x: -20, transition: { duration: 0.2 } }}
+                        layout
+                      >
+                        <SessionRow
+                          session={session}
+                          onClick={() => {
+                            let sessionData: Record<string, unknown> = { sessionName: session.name };
+                            try {
+                              const stored = localStorage.getItem(`ifb_session_data_${session.id}`);
+                              if (stored) {
+                                sessionData = JSON.parse(stored);
+                              }
+                            } catch { /* use minimal data */ }
+                            navigate(`/feedback/${session.id}`, { state: sessionData });
+                          }}
+                          onDelete={() => handleDeleteSession(session)}
+                        />
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
                 </div>
               </div>
             ))}
@@ -306,6 +448,22 @@ export function HistoryView() {
           </Card>
         )}
       </div>
+
+      {/* Confirm delete dialog */}
+      <AnimatePresence>
+        {confirmDelete && (
+          <ConfirmDeleteDialog
+            title={confirmDelete.type === 'all' ? 'Clear All Sessions?' : 'Delete Session?'}
+            message={
+              confirmDelete.type === 'all'
+                ? `This will permanently remove all ${allSessions.length} sessions and their data from this device.`
+                : `This will permanently remove "${confirmDelete.session?.name}" and its data from this device.`
+            }
+            onConfirm={executeDelete}
+            onCancel={() => setConfirmDelete(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

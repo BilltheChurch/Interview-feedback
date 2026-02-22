@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { safeStorage } = require("electron");
 const { PublicClientApplication } = require("@azure/msal-node");
 
 const DEFAULT_SCOPES = ["User.Read", "Calendars.Read", "OnlineMeetings.ReadWrite"];
@@ -72,9 +73,23 @@ class GraphCalendarClient {
     const pca = this._ensurePca();
     if (this._cacheLoaded) return pca;
     if (this.cachePath && fs.existsSync(this.cachePath)) {
-      const serialized = fs.readFileSync(this.cachePath, "utf8");
-      if (serialized.trim()) {
-        await pca.getTokenCache().deserialize(serialized);
+      let raw;
+      const fileContent = fs.readFileSync(this.cachePath);
+      if (safeStorage.isEncryptionAvailable()) {
+        try {
+          raw = safeStorage.decryptString(fileContent);
+        } catch {
+          // Migration: try reading as plaintext (old format)
+          raw = fileContent.toString("utf8");
+          // Re-save encrypted
+          const encrypted = safeStorage.encryptString(raw);
+          fs.writeFileSync(this.cachePath, encrypted, { mode: 0o600 });
+        }
+      } else {
+        raw = fileContent.toString("utf8");
+      }
+      if (raw && raw.trim()) {
+        await pca.getTokenCache().deserialize(raw);
       }
     }
     this._cacheLoaded = true;
@@ -85,7 +100,13 @@ class GraphCalendarClient {
     if (!this.cachePath || !this._pca) return;
     const serialized = await this._pca.getTokenCache().serialize();
     ensureDir(this.cachePath);
-    fs.writeFileSync(this.cachePath, serialized, { encoding: "utf8", mode: 0o600 });
+    if (safeStorage.isEncryptionAvailable()) {
+      const encrypted = safeStorage.encryptString(serialized);
+      fs.writeFileSync(this.cachePath, encrypted, { mode: 0o600 });
+    } else {
+      // Fallback for environments without keychain
+      fs.writeFileSync(this.cachePath, serialized, { encoding: "utf8", mode: 0o600 });
+    }
   }
 
   async getStatus() {
@@ -119,8 +140,8 @@ class GraphCalendarClient {
     const interactiveRequest = {
       scopes: this.scopes,
       openBrowser: this.openBrowser || undefined,
-      successTemplate: "<h1>Authentication successful</h1><p>You can close this window now.</p>",
-      errorTemplate: "<h1>Authentication failed</h1><p>{{error}}</p>"
+      successTemplate: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F6F2EA;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#1A2B33}.card{background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:420px;box-shadow:0 4px 24px rgba(0,0,0,.08)}.icon{width:64px;height:64px;background:#0D6A63;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}svg{width:32px;height:32px}h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#1A2B33}p{font-size:15px;color:#566A77;line-height:1.5}small{display:block;margin-top:20px;font-size:13px;color:#8E9EAB}</style></head><body><div class="card"><div class="icon"><svg fill="none" viewBox="0 0 24 24" stroke="white" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></div><h1>You're all set!</h1><p>Microsoft account connected successfully.</p><small>You can close this tab and return to Chorus.</small></div></body></html>`,
+      errorTemplate: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F6F2EA;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#1A2B33}.card{background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:420px;box-shadow:0 4px 24px rgba(0,0,0,.08)}.icon{width:64px;height:64px;background:#DC2626;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}svg{width:32px;height:32px}h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#1A2B33}p{font-size:15px;color:#566A77;line-height:1.5}</style></head><body><div class="card"><div class="icon"><svg fill="none" viewBox="0 0 24 24" stroke="white" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></div><h1>Authentication failed</h1><p>{{error}}</p></div></body></html>`
     };
     const result = await pca.acquireTokenInteractive(interactiveRequest);
     await this._saveCache();
@@ -169,7 +190,7 @@ class GraphCalendarClient {
       const token = await pca.acquireTokenInteractive({
         scopes: this.scopes,
         openBrowser: this.openBrowser || undefined,
-        successTemplate: "<h1>Re-authentication successful</h1><p>You can close this window now.</p>",
+        successTemplate: `<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F6F2EA;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#1A2B33}.card{background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:420px;box-shadow:0 4px 24px rgba(0,0,0,.08)}.icon{width:64px;height:64px;background:#0D6A63;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}svg{width:32px;height:32px}h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#1A2B33}p{font-size:15px;color:#566A77;line-height:1.5}small{display:block;margin-top:20px;font-size:13px;color:#8E9EAB}</style></head><body><div class="card"><div class="icon"><svg fill="none" viewBox="0 0 24 24" stroke="white" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></div><h1>You're all set!</h1><p>Microsoft account re-authenticated successfully.</p><small>You can close this tab and return to Chorus.</small></div></body></html>`,
         errorTemplate: "<h1>Authentication failed</h1><p>{{error}}</p>"
       });
       await this._saveCache();

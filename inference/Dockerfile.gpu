@@ -1,0 +1,41 @@
+# GPU-enabled Dockerfile for NVIDIA CUDA
+# Requires: NVIDIA Container Toolkit on host
+# Usage:
+#   docker build -f Dockerfile.gpu -t interview-inference-gpu .
+#   docker run --gpus all -p 8000:8000 --env-file .env interview-inference-gpu
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.10 + system deps
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       python3.10 python3.10-venv python3-pip \
+       build-essential ffmpeg libsndfile1 git \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install PyTorch with CUDA support first (large layer, cached separately)
+RUN pip install --no-cache-dir torch>=2.6.0 torchaudio>=2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+COPY requirements.txt /app/requirements.txt
+# Install remaining requirements (torch already installed, pip will skip it)
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY app /app/app
+
+# Default model cache inside container
+ENV MODELSCOPE_CACHE=/modelscope-cache \
+    WHISPER_DEVICE=auto \
+    PYANNOTE_DEVICE=auto \
+    SV_DEVICE=auto
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

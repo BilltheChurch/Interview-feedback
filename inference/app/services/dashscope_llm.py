@@ -53,8 +53,13 @@ class DashScopeLLM:
         response = client.post(self.base_url, headers=self._headers(), json=payload)
 
         if response.status_code >= 400:
+            logger.error(
+                "dashscope %s failed: status=%s body=%s prompt_len=sys:%d+user:%d",
+                self.model_name, response.status_code, response.text[:500],
+                len(system_prompt), len(user_prompt)
+            )
             raise ValidationError(
-                f"dashscope report request failed: status={response.status_code} body={response.text[:240]}"
+                f"dashscope report request failed: status={response.status_code} body={response.text[:500]}"
             )
 
         try:

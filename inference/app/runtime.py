@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.config import Settings
 from app.services.binder import BinderPolicy
+from app.services.checkpoint_analyzer import CheckpointAnalyzer
 from app.services.clustering import OnlineClusterer
 from app.services.dashscope_llm import DashScopeLLM
 from app.services.events_analyzer import EventsAnalyzer
@@ -23,6 +24,7 @@ class AppRuntime:
     events_analyzer: EventsAnalyzer
     report_generator: ReportGenerator
     report_synthesizer: ReportSynthesizer
+    checkpoint_analyzer: CheckpointAnalyzer
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -40,6 +42,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         model_id=settings.sv_model_id,
         model_revision=settings.sv_model_revision,
         cache_dir=settings.modelscope_cache,
+        device=settings.sv_device,
     )
 
     orchestrator = InferenceOrchestrator(
@@ -69,4 +72,5 @@ def build_runtime(settings: Settings) -> AppRuntime:
         events_analyzer=EventsAnalyzer(),
         report_generator=ReportGenerator(llm=report_llm),
         report_synthesizer=ReportSynthesizer(llm=report_llm),
+        checkpoint_analyzer=CheckpointAnalyzer(llm=report_llm),
     )

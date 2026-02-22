@@ -1,4 +1,5 @@
 services:
+  # CPU-only (lightweight, default)
   inference:
     build:
       context: .
@@ -10,6 +11,33 @@ services:
       - .env
     volumes:
       - ../.cache/modelscope:/modelscope-cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # GPU-enabled (NVIDIA CUDA) — use: docker compose --profile gpu up inference-gpu
+  inference-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    container_name: interview-inference-gpu
+    profiles:
+      - gpu
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ../.cache/modelscope:/modelscope-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=3).read()"]
       interval: 15s

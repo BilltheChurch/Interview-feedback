@@ -3,10 +3,13 @@ export type InferenceBackendKey = "primary" | "secondary";
 export type InferenceEndpointKey =
   | "resolve"
   | "enroll"
+  | "sv_extract_embedding"
   | "analysis_events"
   | "analysis_report"
   | "analysis_regenerate_claim"
-  | "analysis_synthesize";
+  | "analysis_synthesize"
+  | "analysis_checkpoint"
+  | "analysis_merge_checkpoints";
 
 type EndpointHealthState = "unknown" | "healthy" | "degraded" | "open_circuit";
 
@@ -131,10 +134,13 @@ function buildBackendState(role: InferenceBackendKey, baseUrl: string): BackendR
     endpoints: {
       resolve: defaultEndpointState(),
       enroll: defaultEndpointState(),
+      sv_extract_embedding: defaultEndpointState(),
       analysis_events: defaultEndpointState(),
       analysis_report: defaultEndpointState(),
       analysis_regenerate_claim: defaultEndpointState(),
-      analysis_synthesize: defaultEndpointState()
+      analysis_synthesize: defaultEndpointState(),
+      analysis_checkpoint: defaultEndpointState(),
+      analysis_merge_checkpoints: defaultEndpointState()
     }
   };
 }

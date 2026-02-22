@@ -70,6 +70,7 @@ class NameResolver:
         (re.compile(r"\bi\s+am\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.90),
         (re.compile(r"\bi'm\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.90),
         (re.compile(r"\b(?:please\s+)?call me\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.88),
+        (re.compile(r"\b(?:usually\s+)?go(?:es)?\s+by\s+([a-z][a-z\s'\-]{1,80})", re.IGNORECASE), 0.88),
         (re.compile(r"(?:我叫|我是)\s*([\u4e00-\u9fff]{2,4})"), 0.96),
         (re.compile(r"([\u4e00-\u9fff]{2,4})(?=来补充|补充一下|认为|先说|继续说)"), 0.80),
     ]

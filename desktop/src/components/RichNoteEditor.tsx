@@ -4,6 +4,7 @@ import StarterKit from '@tiptap/starter-kit';
 import TextAlign from '@tiptap/extension-text-align';
 import Underline from '@tiptap/extension-underline';
 import Placeholder from '@tiptap/extension-placeholder';
+import { MemoHighlight } from '../lib/memoHighlight';
 import {
   Bold,
   Italic,
@@ -34,10 +35,19 @@ export type RichNoteEditorProps = {
   autoFocus?: boolean;
 };
 
+export type MemoMarkType = 'highlight' | 'issue' | 'question' | 'evidence';
+
 export type RichNoteEditorRef = {
   getText: () => string;
+  getHTML: () => string;
   clearContent: () => void;
   insertTimestamp: (stamp: string) => void;
+  /** Returns selected text, or empty string if no selection */
+  getSelectedText: () => string;
+  /** Deletes the current selection and returns true, or false if nothing selected */
+  deleteSelection: () => boolean;
+  /** Applies a colored memo highlight mark to the selection, or to all content if no selection */
+  applyMemoMark: (type: MemoMarkType, memoId: string) => void;
 };
 
 /* ─── ToolbarButton ─────────────────────────── */
@@ -236,6 +246,7 @@ export const RichNoteEditor = forwardRef<RichNoteEditorRef, RichNoteEditorProps>
         Placeholder.configure({
           placeholder: placeholder || 'Type your notes here...',
         }),
+        MemoHighlight,
       ],
       content,
       onUpdate: ({ editor: e }) => {
@@ -253,11 +264,48 @@ export const RichNoteEditor = forwardRef<RichNoteEditorRef, RichNoteEditorProps>
 
     useImperativeHandle(ref, () => ({
       getText: () => editor?.getText() ?? '',
+      getHTML: () => editor?.getHTML() ?? '',
       clearContent: () => {
         editor?.commands.clearContent();
       },
       insertTimestamp: (stamp: string) => {
         editor?.chain().focus().insertContent(stamp).run();
+      },
+      getSelectedText: () => {
+        if (!editor) return '';
+        const { from, to } = editor.state.selection;
+        if (from === to) return '';
+        return editor.state.doc.textBetween(from, to, ' ');
+      },
+      deleteSelection: () => {
+        if (!editor) return false;
+        const { from, to } = editor.state.selection;
+        if (from === to) return false;
+        editor.chain().focus().deleteRange({ from, to }).run();
+        return true;
+      },
+      applyMemoMark: (type: MemoMarkType, memoId: string) => {
+        if (!editor) return;
+        const { from, to } = editor.state.selection;
+        const docEnd = editor.state.doc.content.size;
+        if (from === to) {
+          // No selection — mark all content, then collapse cursor to end
+          editor.chain()
+            .focus()
+            .selectAll()
+            .setMark('memoHighlight', { memoType: type, memoId })
+            .setTextSelection(docEnd)
+            .unsetMark('memoHighlight')
+            .run();
+        } else {
+          // Mark only the selected range, then collapse cursor past the mark
+          editor.chain()
+            .focus()
+            .setMark('memoHighlight', { memoType: type, memoId })
+            .setTextSelection(to)
+            .unsetMark('memoHighlight')
+            .run();
+        }
       },
     }));
 

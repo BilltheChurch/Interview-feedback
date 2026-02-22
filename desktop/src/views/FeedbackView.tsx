@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -31,7 +31,10 @@ import {
   Star,
   HelpCircle,
   Link2,
+  Loader2,
+  Sparkles,
 } from 'lucide-react';
+import { useSessionStore } from '../stores/sessionStore';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Chip } from '../components/ui/Chip';
@@ -114,11 +117,188 @@ type FeedbackReport = {
   evidence: EvidenceRef[];
 };
 
-/* ─── Mock Data ───────────────────────────────────────── */
+/* ─── API → Frontend Report Transformer ───────────────── */
+// The backend API (ResultV2) uses a different schema than the frontend FeedbackReport.
+// This function normalizes the API response into the shape the UI expects.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: string; durationMs?: number; mode?: string; participants?: string[] }): FeedbackReport {
+  // ── participants: extract display_name from stats or speaker_map ──
+  const participants: string[] = (() => {
+    // If raw.stats exists, use speaker_name from stats
+    if (Array.isArray(raw.stats)) {
+      return raw.stats
+        .map((s: any) => s.speaker_name || s.speaker_key || 'Unknown')
+        .filter((n: string) => n !== 'Unknown');
+    }
+    // If raw.participants is string[], use directly
+    if (Array.isArray(raw.participants)) {
+      return raw.participants.map((p: any) =>
+        typeof p === 'string' ? p : p?.display_name || p?.person_id || 'Unknown'
+      );
+    }
+    return sessionMeta?.participants || [];
+  })();
 
-const MOCK_REPORT: FeedbackReport = {
-  session_id: 'sess_20260214_001',
-  session_name: 'Product Manager Final Round',
+  // ── overall.team_summary: flatten summary_sections into a single string ──
+  const teamSummary: string = (() => {
+    if (typeof raw.overall?.team_summary === 'string') return raw.overall.team_summary;
+    if (Array.isArray(raw.overall?.summary_sections)) {
+      return raw.overall.summary_sections
+        .map((s: any) => (Array.isArray(s.bullets) ? s.bullets.join(' ') : ''))
+        .filter(Boolean)
+        .join('\n\n');
+    }
+    return '';
+  })();
+
+  // ── overall.teacher_memos: from memos[] or overall ──
+  const teacherMemos: string[] = (() => {
+    if (Array.isArray(raw.overall?.teacher_memos)) return raw.overall.teacher_memos;
+    if (Array.isArray(raw.memos)) {
+      return raw.memos.map((m: any) => {
+        const prefix = m.stage ? `[${m.stage}] ` : '';
+        return `${prefix}${m.text || ''}`;
+      });
+    }
+    return [];
+  })();
+
+  // ── overall.team_dynamics: normalize object {highlights, risks} → TeamDynamic[] ──
+  const teamDynamics: TeamDynamic[] = (() => {
+    const td = raw.overall?.team_dynamics;
+    if (Array.isArray(td)) return td; // already correct shape
+    if (td && typeof td === 'object') {
+      const result: TeamDynamic[] = [];
+      if (Array.isArray(td.highlights)) {
+        for (const h of td.highlights) result.push({ type: 'highlight', text: String(h) });
+      }
+      if (Array.isArray(td.risks)) {
+        for (const r of td.risks) result.push({ type: 'risk', text: String(r) });
+      }
+      return result;
+    }
+    return [];
+  })();
+
+  // ── overall.interaction_events ──
+  const interactionEvents: string[] = Array.isArray(raw.overall?.interaction_events)
+    ? raw.overall.interaction_events
+    : [];
+
+  // ── overall.evidence_refs ──
+  const overallEvidenceRefs: string[] = (() => {
+    if (Array.isArray(raw.overall?.evidence_refs)) return raw.overall.evidence_refs;
+    if (Array.isArray(raw.overall?.summary_sections)) {
+      return raw.overall.summary_sections
+        .flatMap((s: any) => (Array.isArray(s.evidence_ids) ? s.evidence_ids : []));
+    }
+    return [];
+  })();
+
+  // ── persons: transform per_person[] → PersonFeedback[] ──
+  const persons: PersonFeedback[] = (() => {
+    const source = Array.isArray(raw.per_person) ? raw.per_person
+      : Array.isArray(raw.persons) ? raw.persons
+      : [];
+    return source.map((p: any) => {
+      // Dimensions: merge strengths/risks/actions into unified claims[]
+      const dimensions: DimensionFeedback[] = (Array.isArray(p.dimensions) ? p.dimensions : []).map((d: any) => {
+        const claims: Claim[] = [];
+        // If already has claims[] array (frontend format), use it
+        if (Array.isArray(d.claims)) {
+          for (const c of d.claims) {
+            claims.push({
+              id: c.id || c.claim_id || `${d.dimension}_${claims.length}`,
+              text: c.text || '',
+              category: c.category || 'strength',
+              confidence: typeof c.confidence === 'number' ? c.confidence : 0.5,
+              evidence_refs: Array.isArray(c.evidence_refs) ? c.evidence_refs : [],
+            });
+          }
+        } else {
+          // API format: separate strengths/risks/actions arrays
+          for (const c of (Array.isArray(d.strengths) ? d.strengths : [])) {
+            claims.push({
+              id: c.claim_id || `${d.dimension}_s${claims.length}`,
+              text: c.text || '',
+              category: 'strength',
+              confidence: typeof c.confidence === 'number' ? c.confidence : 0.5,
+              evidence_refs: Array.isArray(c.evidence_refs) ? c.evidence_refs : [],
+            });
+          }
+          for (const c of (Array.isArray(d.risks) ? d.risks : [])) {
+            claims.push({
+              id: c.claim_id || `${d.dimension}_r${claims.length}`,
+              text: c.text || '',
+              category: 'risk',
+              confidence: typeof c.confidence === 'number' ? c.confidence : 0.5,
+              evidence_refs: Array.isArray(c.evidence_refs) ? c.evidence_refs : [],
+            });
+          }
+          for (const c of (Array.isArray(d.actions) ? d.actions : [])) {
+            claims.push({
+              id: c.claim_id || `${d.dimension}_a${claims.length}`,
+              text: c.text || '',
+              category: 'action',
+              confidence: typeof c.confidence === 'number' ? c.confidence : 0.5,
+              evidence_refs: Array.isArray(c.evidence_refs) ? c.evidence_refs : [],
+            });
+          }
+        }
+        return { dimension: d.dimension || 'unknown', claims };
+      });
+
+      // Summary: join arrays into single strings
+      const summary = p.summary || {};
+      return {
+        person_name: p.display_name || p.person_name || p.person_key || 'Unknown',
+        speaker_id: p.person_key || p.speaker_id || `spk_${participants.indexOf(p.display_name || '')}`,
+        dimensions,
+        summary: {
+          strengths: Array.isArray(summary.strengths) ? summary.strengths.join('. ') : (summary.strengths || ''),
+          risks: Array.isArray(summary.risks) ? summary.risks.join('. ') : (summary.risks || ''),
+          actions: Array.isArray(summary.actions) ? summary.actions.join('. ') : (summary.actions || ''),
+        },
+      };
+    });
+  })();
+
+  // ── evidence: transform evidence[] ──
+  const evidence: EvidenceRef[] = (Array.isArray(raw.evidence) ? raw.evidence : []).map((e: any) => ({
+    id: e.evidence_id || e.id || '',
+    timestamp_ms: Array.isArray(e.time_range_ms) ? e.time_range_ms[0] : (e.timestamp_ms || 0),
+    speaker: typeof e.speaker === 'string' ? e.speaker : (e.speaker?.display_name || e.speaker?.person_id || 'Unknown'),
+    text: e.quote || e.text || '',
+    confidence: typeof e.confidence === 'number' ? e.confidence : 0.5,
+    weak: e.weak || false,
+    weak_reason: e.weak_reason,
+  }));
+
+  return {
+    session_id: raw.session?.session_id || raw.session_id || '',
+    session_name: sessionMeta?.name || raw.session_name || '',
+    date: sessionMeta?.date || raw.date || new Date().toISOString().slice(0, 10),
+    duration_ms: sessionMeta?.durationMs || raw.duration_ms || 0,
+    status: 'final',
+    mode: (sessionMeta?.mode as '1v1' | 'group') || raw.mode || '1v1',
+    participants,
+    overall: {
+      team_summary: teamSummary,
+      teacher_memos: teacherMemos,
+      interaction_events: interactionEvents,
+      team_dynamics: teamDynamics,
+      evidence_refs: overallEvidenceRefs,
+    },
+    persons,
+    evidence,
+  };
+}
+
+/* ─── Demo Data (last-resort fallback only) ───────────── */
+
+const DEMO_REPORT: FeedbackReport = {
+  session_id: 'demo_session',
+  session_name: 'Demo Session (Sample Data)',
   date: '2026-02-14',
   duration_ms: 720000,
   status: 'draft',
@@ -511,6 +691,26 @@ function getClaimsForEvidence(report: FeedbackReport, evidenceId: string): { per
   return results;
 }
 
+/** Immutably update a specific claim within a report */
+function updateClaimInReport(
+  report: FeedbackReport,
+  claimId: string,
+  updater: (claim: Claim) => Claim,
+): FeedbackReport {
+  return {
+    ...report,
+    persons: report.persons.map((person) => ({
+      ...person,
+      dimensions: person.dimensions.map((dim) => ({
+        ...dim,
+        claims: dim.claims.map((claim) =>
+          claim.id === claimId ? updater(claim) : claim,
+        ),
+      })),
+    })),
+  };
+}
+
 /** Get surrounding evidence items for context */
 function getSurroundingEvidence(report: FeedbackReport, evidenceId: string): { before: EvidenceRef[]; after: EvidenceRef[] } {
   const sorted = [...report.evidence].sort((a, b) => a.timestamp_ms - b.timestamp_ms);
@@ -547,19 +747,35 @@ function formatMemoTime(seconds: number): string {
 
 /* ─── StageMemosSection ──────────────────────────────── */
 
+type StageArchiveProp = {
+  stageIndex: number;
+  stageName: string;
+  archivedAt: string;
+  freeformText: string;
+  freeformHtml?: string;
+  memoIds: string[];
+};
+
 function StageMemosSection({
   memos,
   stages,
   notes,
+  stageArchives = [],
 }: {
   memos: Memo[];
   stages: string[];
   notes: string;
+  stageArchives?: StageArchiveProp[];
 }) {
-  const [notesOpen, setNotesOpen] = useState(false);
+  const hasArchives = stageArchives.length > 0;
+
   const [openStages, setOpenStages] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
-    stages.forEach((s) => { init[s] = true; });
+    if (hasArchives) {
+      stageArchives.forEach((a) => { init[a.stageName] = true; });
+    } else {
+      stages.forEach((s) => { init[s] = true; });
+    }
     return init;
   });
 
@@ -578,14 +794,20 @@ function StageMemosSection({
       if (list) {
         list.push(memo);
       } else {
-        // Stage not in the ordered list — append it
         map.set(memo.stage, [memo]);
       }
     }
     return map;
   }, [memos, stages]);
 
-  if (memos.length === 0 && !notes) {
+  // Build a memo lookup by ID for archive-based display
+  const memoById = useMemo(() => {
+    const map = new Map<string, Memo>();
+    for (const m of memos) map.set(m.id, m);
+    return map;
+  }, [memos]);
+
+  if (memos.length === 0 && !notes && stageArchives.length === 0) {
     return (
       <Card glass className="border-t-2 border-t-accent p-5">
         <div className="flex items-center gap-2 mb-3">
@@ -605,93 +827,170 @@ function StageMemosSection({
         <Chip className="text-xs">{memos.length} memo{memos.length !== 1 ? 's' : ''}</Chip>
       </div>
 
-      {/* Free-form Notes (collapsible) */}
-      {notes && (
-        <div className="border-t border-border pt-3 mb-3">
-          <button
-            type="button"
-            className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
-            onClick={() => setNotesOpen((v) => !v)}
-          >
-            {notesOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-            <FileText className="w-3.5 h-3.5 text-accent" />
-            Free-form Notes
-          </button>
-          <AnimatePresence>
-            {notesOpen && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.3 }}
-                className="mt-2 pl-6 overflow-hidden"
-              >
-                <div
-                  className="text-sm text-ink-secondary leading-relaxed prose prose-sm max-w-none"
-                  dangerouslySetInnerHTML={{ __html: notes }}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-      )}
+      {/* Stage archives — preferred layout when available */}
+      {hasArchives ? (
+        <>
+          {stageArchives.map((archive) => {
+            const isOpen = openStages[archive.stageName] ?? true;
+            const archiveMemos = archive.memoIds
+              .map((id) => memoById.get(id))
+              .filter((m): m is Memo => !!m);
+            const hasContent = !!archive.freeformText || !!archive.freeformHtml || archiveMemos.length > 0;
+            if (!hasContent) return null;
 
-      {/* Stage-grouped memos */}
-      {Array.from(memosByStage.entries()).map(([stage, stageMemos]) => {
-        if (stageMemos.length === 0) return null;
-        const isOpen = openStages[stage] ?? true;
-
-        return (
-          <div key={stage} className="border-t border-border pt-3 mb-3 last:mb-0">
-            <button
-              type="button"
-              className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
-              onClick={() => toggleStage(stage)}
-            >
-              {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-              <span>{stage}</span>
-              <Chip className="text-xs ml-1">{stageMemos.length}</Chip>
-            </button>
-            <AnimatePresence>
-              {isOpen && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: 0.3 }}
-                  className="mt-2 space-y-2 pl-6 overflow-hidden"
+            return (
+              <div key={`archive-${archive.stageIndex}`} className="border-t border-border pt-3 mb-3 last:mb-0">
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
+                  onClick={() => toggleStage(archive.stageName)}
                 >
-                  {stageMemos.map((memo) => {
-                    const config = MEMO_TYPE_CONFIG[memo.type];
-                    const MemoIcon = config.icon;
-                    return (
-                      <div
-                        key={memo.id}
-                        className={`border border-border border-l-[3px] ${config.borderColor} rounded-[--radius-button] p-3 hover:bg-surface-hover transition-colors`}
-                      >
-                        <div className="flex items-start gap-2">
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <Chip variant={config.chipVariant} className="text-xs">
-                              <MemoIcon className="w-3 h-3 mr-0.5 inline-block" />
-                              {config.label}
-                            </Chip>
-                            <span className="font-mono text-xs text-accent">
-                              {formatMemoTime(memo.timestamp)}
-                            </span>
+                  {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                  <span>{archive.stageName}</span>
+                  {archiveMemos.length > 0 && (
+                    <Chip className="text-xs ml-1">{archiveMemos.length}</Chip>
+                  )}
+                </button>
+                <AnimatePresence>
+                  {isOpen && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.3 }}
+                      className="mt-2 pl-6 overflow-hidden space-y-2"
+                    >
+                      {/* Freeform notes for this stage */}
+                      {(archive.freeformHtml || archive.freeformText) && (
+                        <div
+                          className="text-sm text-ink-secondary leading-relaxed prose prose-sm max-w-none memo-highlight-view"
+                          dangerouslySetInnerHTML={{ __html: archive.freeformHtml || archive.freeformText }}
+                        />
+                      )}
+                      {/* Memos for this stage */}
+                      {archiveMemos.map((memo) => {
+                        const config = MEMO_TYPE_CONFIG[memo.type];
+                        const MemoIcon = config.icon;
+                        return (
+                          <div
+                            key={memo.id}
+                            className={`border border-border border-l-[3px] ${config.borderColor} rounded-[--radius-button] p-3 hover:bg-surface-hover transition-colors`}
+                          >
+                            <div className="flex items-start gap-2">
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <Chip variant={config.chipVariant} className="text-xs">
+                                  <MemoIcon className="w-3 h-3 mr-0.5 inline-block" />
+                                  {config.label}
+                                </Chip>
+                                <span className="font-mono text-xs text-accent">
+                                  {formatMemoTime(memo.timestamp)}
+                                </span>
+                              </div>
+                              <p className="text-sm text-ink-secondary leading-relaxed flex-1">
+                                {memo.text}
+                              </p>
+                            </div>
                           </div>
-                          <p className="text-sm text-ink-secondary leading-relaxed flex-1">
-                            {memo.text}
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        );
-      })}
+                        );
+                      })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            );
+          })}
+        </>
+      ) : (
+        <>
+          {/* Legacy: Free-form Notes (when no stageArchives) */}
+          {notes && (
+            <div className="border-t border-border pt-3 mb-3">
+              <button
+                type="button"
+                className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
+                onClick={() => toggleStage('__notes__')}
+              >
+                {(openStages['__notes__'] ?? true) ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                <FileText className="w-3.5 h-3.5 text-accent" />
+                Free-form Notes
+              </button>
+              <AnimatePresence>
+                {(openStages['__notes__'] ?? true) && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="mt-2 pl-6 overflow-hidden"
+                  >
+                    <div
+                      className="text-sm text-ink-secondary leading-relaxed prose prose-sm max-w-none"
+                      dangerouslySetInnerHTML={{ __html: notes }}
+                    />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
+
+          {/* Legacy: Stage-grouped memos (when no stageArchives) */}
+          {Array.from(memosByStage.entries()).map(([stage, stageMemos]) => {
+            if (stageMemos.length === 0) return null;
+            const isOpen = openStages[stage] ?? true;
+
+            return (
+              <div key={stage} className="border-t border-border pt-3 mb-3 last:mb-0">
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
+                  onClick={() => toggleStage(stage)}
+                >
+                  {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                  <span>{stage}</span>
+                  <Chip className="text-xs ml-1">{stageMemos.length}</Chip>
+                </button>
+                <AnimatePresence>
+                  {isOpen && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.3 }}
+                      className="mt-2 space-y-2 pl-6 overflow-hidden"
+                    >
+                      {stageMemos.map((memo) => {
+                        const config = MEMO_TYPE_CONFIG[memo.type];
+                        const MemoIcon = config.icon;
+                        return (
+                          <div
+                            key={memo.id}
+                            className={`border border-border border-l-[3px] ${config.borderColor} rounded-[--radius-button] p-3 hover:bg-surface-hover transition-colors`}
+                          >
+                            <div className="flex items-start gap-2">
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <Chip variant={config.chipVariant} className="text-xs">
+                                  <MemoIcon className="w-3 h-3 mr-0.5 inline-block" />
+                                  {config.label}
+                                </Chip>
+                                <span className="font-mono text-xs text-accent">
+                                  {formatMemoTime(memo.timestamp)}
+                                </span>
+                              </div>
+                              <p className="text-sm text-ink-secondary leading-relaxed flex-1">
+                                {memo.text}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            );
+          })}
+        </>
+      )}
     </Card>
   );
 }
@@ -702,26 +1001,61 @@ function FeedbackHeader({
   report,
   onRegenerate,
   onBack,
+  statusLabel,
+  statusVariant,
+  isDemo,
+  isEnhanced,
+  sessionNotes,
+  sessionMemos,
 }: {
   report: FeedbackReport;
   onRegenerate: () => void;
   onBack: () => void;
+  statusLabel?: string;
+  statusVariant?: 'success' | 'warning' | 'info' | 'error';
+  isDemo?: boolean;
+  isEnhanced?: boolean;
+  sessionNotes?: string;
+  sessionMemos?: Memo[];
 }) {
   const [copiedText, setCopiedText] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
 
-  const handleCopyText = useCallback(() => {
+  const handleCopyText = useCallback(async () => {
     const lines: string[] = [
       report.session_name,
       `${report.date} | ${formatDuration(report.duration_ms)}`,
       '',
-      'Team Summary:',
-      report.overall.team_summary,
-      '',
-      'Teacher Memos:',
-      ...report.overall.teacher_memos.map((m) => `- ${m}`),
-      '',
     ];
+
+    // Session notes (freeform)
+    const notesText = sessionNotes?.replace(/<[^>]*>/g, '').trim();
+    if (notesText) {
+      lines.push('Session Notes:', notesText, '');
+    }
+
+    // Session memos (tagged by stage)
+    if (sessionMemos && sessionMemos.length > 0) {
+      lines.push('Session Memos:');
+      for (const m of sessionMemos) {
+        lines.push(`- [${m.stage}] ${m.text}`);
+      }
+      lines.push('');
+    }
+
+    lines.push('Team Summary:', report.overall.team_summary, '');
+
+    if (report.overall.teacher_memos.length > 0) {
+      lines.push('Teacher Memos:');
+      lines.push(...report.overall.teacher_memos.map((m) => `- ${m}`));
+      lines.push('');
+    }
+
+    if (report.overall.interaction_events.length > 0) {
+      lines.push('Interaction Events:');
+      lines.push(...report.overall.interaction_events.map((e) => `- ${e}`));
+      lines.push('');
+    }
 
     for (const person of report.persons) {
       lines.push(`--- ${person.person_name} ---`);
@@ -737,10 +1071,23 @@ function FeedbackHeader({
       lines.push('');
     }
 
-    navigator.clipboard.writeText(lines.join('\n'));
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API may fail in Electron — fall back to execCommand
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
     setCopiedText(true);
     setTimeout(() => setCopiedText(false), 2000);
-  }, [report]);
+  }, [report, sessionNotes, sessionMemos]);
 
   const handleExportMarkdown = useCallback(() => {
     const lines: string[] = [
@@ -750,19 +1097,42 @@ function FeedbackHeader({
       `**Mode:** ${report.mode}  `,
       `**Participants:** ${report.participants.join(', ')}`,
       '',
-      '## Team Summary',
-      report.overall.team_summary,
-      '',
-      '### Teacher Memos',
-      ...report.overall.teacher_memos.map((m) => `- ${m}`),
-      '',
-      '### Interaction Events',
-      ...report.overall.interaction_events.map((e) => `- ${e}`),
-      '',
-      '### Team Dynamics',
-      ...report.overall.team_dynamics.map((d) => `- ${d.type === 'highlight' ? '+' : '!'} ${d.text}`),
-      '',
     ];
+
+    // Session notes (freeform)
+    const notesText = sessionNotes?.replace(/<[^>]*>/g, '').trim();
+    if (notesText) {
+      lines.push('## Session Notes', '', notesText, '');
+    }
+
+    // Session memos (tagged by stage)
+    if (sessionMemos && sessionMemos.length > 0) {
+      lines.push('## Session Memos', '');
+      for (const m of sessionMemos) {
+        lines.push(`- **[${m.stage}]** ${m.text}`);
+      }
+      lines.push('');
+    }
+
+    lines.push('## Team Summary', '', report.overall.team_summary, '');
+
+    if (report.overall.teacher_memos.length > 0) {
+      lines.push('### Teacher Memos');
+      lines.push(...report.overall.teacher_memos.map((m) => `- ${m}`));
+      lines.push('');
+    }
+
+    if (report.overall.interaction_events.length > 0) {
+      lines.push('### Interaction Events');
+      lines.push(...report.overall.interaction_events.map((e) => `- ${e}`));
+      lines.push('');
+    }
+
+    if (report.overall.team_dynamics.length > 0) {
+      lines.push('### Team Dynamics');
+      lines.push(...report.overall.team_dynamics.map((d) => `- ${d.type === 'highlight' ? '+' : '!'} ${d.text}`));
+      lines.push('');
+    }
 
     for (const person of report.persons) {
       lines.push(`## ${person.person_name}`);
@@ -782,12 +1152,14 @@ function FeedbackHeader({
       lines.push('');
     }
 
-    lines.push('## Evidence Timeline');
-    for (const ev of report.evidence) {
-      const weakTag = ev.weak ? ' **(weak)** ' : '';
-      lines.push(
-        `- **[${formatTimestamp(ev.timestamp_ms)}]** ${ev.speaker}: "${ev.text}"${weakTag} _(${Math.round(ev.confidence * 100)}%)_`
-      );
+    if (report.evidence.length > 0) {
+      lines.push('## Evidence Timeline');
+      for (const ev of report.evidence) {
+        const weakTag = ev.weak ? ' **(weak)** ' : '';
+        lines.push(
+          `- **[${formatTimestamp(ev.timestamp_ms)}]** ${ev.speaker}: "${ev.text}"${weakTag} _(${Math.round(ev.confidence * 100)}%)_`
+        );
+      }
     }
 
     const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
@@ -797,7 +1169,7 @@ function FeedbackHeader({
     a.download = `${report.session_name.replace(/\s+/g, '_')}_feedback.md`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [report]);
+  }, [report, sessionNotes, sessionMemos]);
 
   const handleRegenerate = () => {
     setRegenerating(true);
@@ -832,9 +1204,11 @@ function FeedbackHeader({
               {report.participants.length} participants
             </span>
             <Chip variant="accent">{report.mode === '1v1' ? '1 v 1' : 'Group'}</Chip>
-            <Chip variant={report.status === 'final' ? 'success' : 'warning'}>
-              {report.status === 'final' ? 'Final Report' : 'Draft — finalizing...'}
+            {isDemo && <Chip variant="default">Demo Data</Chip>}
+            <Chip variant={statusVariant || (report.status === 'final' ? 'success' : 'warning')}>
+              {statusLabel || (report.status === 'final' ? 'Final Report' : 'Draft')}
             </Chip>
+            {isEnhanced && <EnhancedBadge />}
           </div>
           </div>
         </div>
@@ -870,7 +1244,7 @@ function OverallCard({
   onEvidenceClick: (ev: EvidenceRef) => void;
 }) {
   const [memosOpen, setMemosOpen] = useState(true);
-  const [eventsOpen, setEventsOpen] = useState(false);
+  const [eventsOpen, setEventsOpen] = useState((report.overall?.interaction_events?.length ?? 0) > 0);
 
   return (
     <Card glass className="border-t-2 border-t-accent p-5">
@@ -1423,12 +1797,18 @@ function EditClaimModal({
   claim,
   report,
   onEvidenceClick,
+  sessionId,
+  baseApiUrl,
+  onSave,
 }: {
   open: boolean;
   onClose: () => void;
   claim: Claim | null;
   report: FeedbackReport;
   onEvidenceClick: (ev: EvidenceRef) => void;
+  sessionId?: string;
+  baseApiUrl?: string;
+  onSave?: (claimId: string, text: string, evidenceRefs: string[]) => void;
 }) {
   const [text, setText] = useState('');
   const [refs, setRefs] = useState<string[]>([]);
@@ -1458,9 +1838,31 @@ function EditClaimModal({
     setShowPicker(false);
   };
 
-  const handleRegenerate = () => {
+  const handleRegenerate = async () => {
+    if (!sessionId || !baseApiUrl) return;
     setRegenerating(true);
-    setTimeout(() => setRegenerating(false), 2000);
+    try {
+      const result = await window.desktopAPI.regenerateFeedbackClaim({
+        baseUrl: baseApiUrl,
+        sessionId,
+        body: { claim_id: claim.id, evidence_refs: refs },
+      });
+      if (result && typeof result === 'object' && (result as any).text) {
+        setText((result as any).text);
+        if (Array.isArray((result as any).evidence_refs)) {
+          setRefs((result as any).evidence_refs);
+        }
+      }
+    } catch {
+      // Regeneration failed — keep current text
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  const handleSave = () => {
+    onSave?.(claim.id, text, refs);
+    onClose();
   };
 
   return (
@@ -1567,6 +1969,7 @@ function EditClaimModal({
             size="sm"
             onClick={handleRegenerate}
             loading={regenerating}
+            disabled={!sessionId || !baseApiUrl}
           >
             <RefreshCw className="w-3.5 h-3.5" />
             Regenerate with LLM
@@ -1575,7 +1978,7 @@ function EditClaimModal({
             <Button variant="secondary" size="sm" onClick={onClose}>
               Cancel
             </Button>
-            <Button size="sm" onClick={onClose}>
+            <Button size="sm" onClick={handleSave}>
               Save
             </Button>
           </div>
@@ -1710,18 +2113,107 @@ function CompetencyRadar({
 
 /* ─── DraftBanner ────────────────────────────────────── */
 
-function DraftBanner() {
+function DraftBanner({
+  message,
+  isDemo,
+  showRetry,
+  onRetry,
+}: {
+  message?: string;
+  isDemo?: boolean;
+  showRetry?: boolean;
+  onRetry?: () => void;
+}) {
+  const defaultMsg = isDemo
+    ? 'This is demo data. Start a real session to generate an actual report.'
+    : 'This report is a draft. Content may change once finalization completes.';
   return (
     <motion.div
       initial={{ opacity: 0, y: -8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-[--radius-card] mb-4"
+      className={`flex items-center gap-2 px-4 py-2.5 ${
+        isDemo ? 'bg-blue-50 border-blue-200' : showRetry ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'
+      } border rounded-[--radius-card] mb-4`}
     >
-      <div className="w-2 h-2 rounded-full bg-warning animate-pulse shrink-0" />
-      <span className="text-sm text-warning font-medium">
-        This report is being finalized. Content may change.
+      <div className={`w-2 h-2 rounded-full ${isDemo ? 'bg-blue-400' : showRetry ? 'bg-error' : 'bg-warning'} ${showRetry ? '' : 'animate-pulse'} shrink-0`} />
+      <span className={`text-sm ${isDemo ? 'text-blue-600' : showRetry ? 'text-error' : 'text-warning'} font-medium flex-1`}>
+        {message || defaultMsg}
+      </span>
+      {showRetry && onRetry && (
+        <Button variant="secondary" size="sm" onClick={onRetry}>
+          <RefreshCw className="w-3.5 h-3.5" />
+          Retry
+        </Button>
+      )}
+    </motion.div>
+  );
+}
+
+/* ─── Tier2Banner ────────────────────────────────────── */
+
+function Tier2Banner({
+  status,
+  progress,
+}: {
+  status: 'tier2_running' | 'tier2_ready';
+  progress?: number;
+}) {
+  if (status === 'tier2_ready') {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-[--radius-card] mb-4"
+      >
+        <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+        <span className="text-sm text-emerald-700 font-medium flex-1">
+          Enhanced report ready — transcript and speaker identification have been refined.
+        </span>
+      </motion.div>
+    );
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex items-center gap-2 px-4 py-2.5 bg-blue-50 border border-blue-200 rounded-[--radius-card] mb-4"
+    >
+      <Loader2 className="w-4 h-4 text-blue-500 animate-spin shrink-0" />
+      <span className="text-sm text-blue-600 font-medium flex-1">
+        Refining report with enhanced transcription...{progress != null && progress > 0 ? ` ${progress}%` : ''}
       </span>
     </motion.div>
+  );
+}
+
+/* ─── EnhancedBadge ──────────────────────────────────── */
+
+function EnhancedBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+      <Sparkles className="w-3 h-3" />
+      Enhanced
+    </span>
+  );
+}
+
+/* ─── SectionStickyHeader (sticks at top of scroll area) ── */
+
+function SectionStickyHeader({
+  icon: Icon,
+  title,
+}: {
+  icon: typeof Activity;
+  title: string;
+}) {
+  return (
+    <div className="sticky top-0 z-10 bg-bg">
+      <div className="flex items-center gap-2 py-2 border-b border-border/40">
+        <Icon className="w-3.5 h-3.5 text-accent shrink-0" />
+        <span className="text-xs font-semibold text-ink-secondary uppercase tracking-wider">{title}</span>
+      </div>
+    </div>
   );
 }
 
@@ -1744,7 +2236,7 @@ function SectionNav({
   ];
 
   return (
-    <nav className="w-44 shrink-0 sticky top-6 self-start hidden lg:block">
+    <nav className="w-44 shrink-0 pt-6 hidden lg:block overflow-y-auto">
       <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2 px-2">
         Sections
       </h3>
@@ -1837,61 +2329,7 @@ function DimensionSummaryRow({
 }
 
 /* ─── Dynamic Mock Generators ────────────────────────── */
-
-function generateMockPersonFeedback(name: string, speakerIndex: number): PersonFeedback {
-  const dimensions = ['leadership', 'collaboration', 'communication', 'analytical', 'adaptability'];
-  return {
-    person_name: name,
-    speaker_id: `spk_${speakerIndex}`,
-    dimensions: dimensions.map(dim => ({
-      dimension: dim,
-      claims: [
-        {
-          id: `c-${speakerIndex}-${dim}-s`,
-          text: `Demonstrated strong ${dim} skills throughout the session.`,
-          category: 'strength' as const,
-          confidence: 0.75 + Math.random() * 0.2,
-          evidence_refs: [`ev-${speakerIndex * 3 + 1}`],
-        },
-        {
-          id: `c-${speakerIndex}-${dim}-r`,
-          text: `Could improve in ${dim} by being more proactive in team discussions.`,
-          category: 'risk' as const,
-          confidence: 0.65 + Math.random() * 0.2,
-          evidence_refs: [`ev-${speakerIndex * 3 + 2}`],
-        },
-        {
-          id: `c-${speakerIndex}-${dim}-a`,
-          text: `Practice ${dim} exercises and seek feedback from peers regularly.`,
-          category: 'action' as const,
-          confidence: 0.7 + Math.random() * 0.15,
-          evidence_refs: [`ev-${speakerIndex * 3 + 1}`, `ev-${speakerIndex * 3 + 3}`],
-        },
-      ],
-    })),
-    summary: {
-      strengths: `${name} showed consistent engagement and contributed meaningfully to the discussion.`,
-      risks: `${name} could benefit from more structured communication in high-pressure scenarios.`,
-      actions: `Encourage ${name} to lead smaller group discussions to build confidence.`,
-    },
-  };
-}
-
-function generateMockEvidence(participantNames: string[]): EvidenceRef[] {
-  const evidence: EvidenceRef[] = [];
-  participantNames.forEach((name, i) => {
-    for (let j = 1; j <= 3; j++) {
-      evidence.push({
-        id: `ev-${i * 3 + j}`,
-        timestamp_ms: (60 + i * 120 + j * 45) * 1000,
-        speaker: name,
-        text: `${name} made a relevant point about the topic under discussion at this point in the session.`,
-        confidence: 0.7 + Math.random() * 0.25,
-      });
-    }
-  });
-  return evidence;
-}
+// REMOVED: All mock data generators have been removed to prevent fake data in production
 
 /* ─── Main View ───────────────────────────────────────── */
 
@@ -1899,7 +2337,18 @@ export function FeedbackView() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
-  const locationState = location.state as {
+
+  // ── Session data type from location.state or localStorage ──
+  type StageArchiveData = {
+    stageIndex: number;
+    stageName: string;
+    archivedAt: string;
+    freeformText: string;
+    freeformHtml?: string;
+    memoIds: string[];
+  };
+
+  type SessionData = {
     sessionName?: string;
     mode?: string;
     participants?: string[];
@@ -1912,7 +2361,316 @@ export function FeedbackView() {
     }>;
     stages?: string[];
     notes?: string;
-  } | null;
+    stageArchives?: StageArchiveData[];
+    elapsedSeconds?: number;
+    date?: string;
+    baseApiUrl?: string;
+  };
+
+  // ── Resolve session data: localStorage (full) > location.state > session list ──
+  const [sessionData] = useState<SessionData | null>(() => {
+    // Priority 1: localStorage (full data with memos/notes/stages, persisted by orchestrator)
+    if (sessionId) {
+      try {
+        const stored = localStorage.getItem(`ifb_session_data_${sessionId}`);
+        if (stored) return JSON.parse(stored) as SessionData;
+      } catch { /* ignore parse errors */ }
+    }
+
+    // Priority 2: location.state (may be incomplete when coming from Home's PendingFeedback)
+    const locState = location.state as SessionData | null;
+    if (locState?.sessionName) return locState;
+
+    // Priority 3: basic session info from ifb_sessions list
+    if (sessionId) {
+      try {
+        const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
+        const match = sessions.find((s: Record<string, unknown>) => s.id === sessionId);
+        if (match) {
+          return {
+            sessionName: match.name as string,
+            mode: match.mode as string,
+            participants: (match.participants as string[]) || [],
+            date: match.date as string,
+          };
+        }
+      } catch { /* ignore */ }
+    }
+
+    return null;
+  });
+
+  // Track whether we are using demo data
+  const isDemo = !sessionData?.sessionName;
+
+  // ── Finalization status tracking ──
+  type FinalizeStatus = 'not_started' | 'awaiting' | 'finalizing' | 'final' | 'tier2_running' | 'tier2_ready' | 'error';
+  // If no baseApiUrl is configured, treat as 'not_started' (no backend to finalize with)
+  const [finalizeStatus, setFinalizeStatus] = useState<FinalizeStatus>(
+    isDemo || !sessionData?.baseApiUrl ? 'not_started' : 'awaiting'
+  );
+  const [apiReport, setApiReport] = useState<FeedbackReport | null>(null);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [reportLoading, setReportLoading] = useState(!isDemo && !!sessionData?.baseApiUrl);
+  const [tier2Progress, setTier2Progress] = useState(0);
+  // Guard against double finalization (orchestrator setTimeout + FeedbackView retry)
+  const finalizingRef = useRef(false);
+  const tier2PollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Stable polling start time — must not reset when finalizeStatus changes (SF-8)
+  const pollStartedAtRef = useRef<number>(Date.now());
+
+  // Mark session as 'finalized' in localStorage so it leaves PendingFeedback
+  useEffect(() => {
+    if (finalizeStatus !== 'final' || !sessionId) return;
+    try {
+      const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
+      const updated = sessions.map((s: Record<string, unknown>) =>
+        s.id === sessionId ? { ...s, status: 'finalized' } : s
+      );
+      localStorage.setItem('ifb_sessions', JSON.stringify(updated));
+    } catch { /* ignore */ }
+  }, [finalizeStatus, sessionId]);
+
+  // Attempt to load finalized report from API on mount
+  useEffect(() => {
+    if (!sessionId || !sessionData?.baseApiUrl || isDemo) return;
+
+    let cancelled = false;
+    const baseUrl = sessionData.baseApiUrl;
+
+    async function tryLoadReport() {
+      try {
+        // First check finalization status — detect 'failed' early
+        const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! });
+        if (!cancelled && status && typeof status === 'object') {
+          if ((status as any).status === 'failed') {
+            const errors = (status as any).errors;
+            const msg = Array.isArray(errors) && errors.length > 0
+              ? errors.join('; ')
+              : 'Finalization failed on the server.';
+            setFinalizeError(msg);
+            setFinalizeStatus('error');
+            return;
+          }
+        }
+
+        // Then try to load a finalized report via feedback-open (quality-gated)
+        const result = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as any;
+        if (!cancelled && result && typeof result === 'object') {
+          if (result.report) {
+            const normalized = normalizeApiReport(result.report, {
+              name: sessionData?.sessionName,
+              date: sessionData?.date,
+              durationMs: (sessionData?.elapsedSeconds || 0) * 1000,
+              mode: sessionData?.mode,
+              participants: sessionData?.participants,
+            });
+            setApiReport(normalized);
+            setFinalizeStatus('final');
+          } else {
+            // Quality gate failed — report withheld by backend
+            const reason = result.blocking_reason || 'Report quality did not meet threshold.';
+            setFinalizeError(reason);
+            setFinalizeStatus('error');
+          }
+        }
+      } catch {
+        // No finalized report yet -- that's expected
+        if (!cancelled) {
+          setFinalizeStatus('awaiting');
+        }
+      } finally {
+        if (!cancelled) setReportLoading(false);
+      }
+    }
+
+    tryLoadReport();
+    return () => { cancelled = true; };
+  }, [sessionId, sessionData?.baseApiUrl, isDemo]);
+
+  // Poll for finalization status when awaiting (timeout after 3 min).
+  // NOTE: finalizeStatus is deliberately NOT in the dependency array (SF-8 fix).
+  // Including it caused the effect to re-run on status changes, resetting the
+  // pollStartedAt timer and extending the timeout indefinitely.
+  useEffect(() => {
+    if (!sessionId || !sessionData?.baseApiUrl || isDemo) return;
+
+    let cancelled = false;
+    const baseUrl = sessionData.baseApiUrl;
+    // Set poll start time once when this effect mounts
+    pollStartedAtRef.current = Date.now();
+    const POLL_TIMEOUT_MS = 180_000;
+
+    // Declare interval before poll so the closure can clear it
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const poll = async () => {
+      // Check for timeout using the stable ref
+      if (Date.now() - pollStartedAtRef.current > POLL_TIMEOUT_MS) {
+        if (interval) clearInterval(interval);
+        if (!cancelled) {
+          setFinalizeError('Finalization timed out after 3 minutes. The server may still be processing.');
+          setFinalizeStatus('error');
+        }
+        return;
+      }
+
+      try {
+        const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! });
+        if (cancelled) return;
+
+        if (status && typeof status === 'object') {
+          const backendStatus = (status as any).status;
+
+          if (backendStatus === 'failed') {
+            // Backend explicitly says finalization failed — stop polling immediately
+            if (interval) clearInterval(interval);
+            const errors = (status as any).errors;
+            const msg = Array.isArray(errors) && errors.length > 0
+              ? errors.join('; ')
+              : 'Finalization failed on the server.';
+            setFinalizeError(msg);
+            setFinalizeStatus('error');
+            return;
+          }
+
+          if (backendStatus === 'completed' || backendStatus === 'succeeded') {
+            // Stop polling BEFORE the async fetch to prevent timeout race
+            if (interval) clearInterval(interval);
+            setFinalizeStatus('finalizing');
+            try {
+              const result = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as any;
+              if (!cancelled && result && typeof result === 'object') {
+                if (result.report) {
+                  const normalized = normalizeApiReport(result.report, {
+                    name: sessionData?.sessionName,
+                    date: sessionData?.date,
+                    durationMs: (sessionData?.elapsedSeconds || 0) * 1000,
+                    mode: sessionData?.mode,
+                    participants: sessionData?.participants,
+                  });
+                  setApiReport(normalized);
+                  setFinalizeStatus('final');
+                } else {
+                  // Quality gate failed — report withheld by backend
+                  const reason = (result as any).blocking_reason || 'Report quality did not meet threshold.';
+                  setFinalizeError(reason);
+                  setFinalizeStatus('error');
+                }
+              }
+            } catch {
+              if (!cancelled) {
+                setFinalizeError('Failed to load the finalized report.');
+                setFinalizeStatus('error');
+              }
+            }
+            return;
+          }
+        }
+      } catch {
+        // Keep polling unless timed out
+      }
+    };
+
+    interval = setInterval(poll, 5000);
+    poll(); // Initial check
+
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, sessionData?.baseApiUrl, isDemo]);
+
+  // ── Tier 2 polling: starts after finalizeStatus becomes 'final' ──
+  useEffect(() => {
+    if (finalizeStatus !== 'final' || !sessionId || !sessionData?.baseApiUrl || isDemo) return;
+
+    let cancelled = false;
+    const baseUrl = sessionData.baseApiUrl;
+
+    const checkTier2 = async () => {
+      try {
+        const result = await window.desktopAPI.getTier2Status({
+          baseUrl,
+          sessionId: sessionId!,
+        });
+        if (cancelled) return;
+        const data = result as Record<string, unknown>;
+        if (!data || typeof data !== 'object') return;
+
+        const tier2Status = data.status as string;
+        const tier2Enabled = Boolean(data.enabled);
+        const progress = typeof data.progress === 'number' ? data.progress : 0;
+
+        if (!tier2Enabled || tier2Status === 'idle') {
+          // Tier 2 not active — stop polling
+          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+          return;
+        }
+
+        setTier2Progress(progress);
+
+        if (tier2Status === 'succeeded') {
+          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+          // Fetch the enhanced report
+          try {
+            const freshResult = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as any;
+            if (!cancelled && freshResult?.report) {
+              const normalized = normalizeApiReport(freshResult.report, {
+                name: sessionData?.sessionName,
+                date: sessionData?.date,
+                durationMs: (sessionData?.elapsedSeconds || 0) * 1000,
+                mode: sessionData?.mode,
+                participants: sessionData?.participants,
+              });
+              setApiReport(normalized);
+              setFinalizeStatus('tier2_ready');
+            }
+          } catch {
+            // Keep tier1 report if fetch fails
+          }
+          return;
+        }
+
+        if (tier2Status === 'failed') {
+          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+          // Tier 2 failed — keep tier1 report, no user-facing error
+          return;
+        }
+
+        // Still running
+        if (finalizeStatus === 'final') {
+          setFinalizeStatus('tier2_running');
+        }
+      } catch {
+        // Tier 2 status endpoint not available — stop silently
+        if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+      }
+    };
+
+    // Small delay before first check (tier2 needs 2s to schedule)
+    const startDelay = setTimeout(() => {
+      if (!cancelled) {
+        tier2PollRef.current = setInterval(checkTier2, 5000);
+        checkTier2();
+      }
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(startDelay);
+      if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finalizeStatus === 'final', sessionId, sessionData?.baseApiUrl, isDemo]);
+
+  // Cleanup tier2 poll on unmount
+  useEffect(() => {
+    return () => {
+      if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+    };
+  }, []);
 
   // Modal state
   const [editClaim, setEditClaim] = useState<Claim | null>(null);
@@ -1920,45 +2678,95 @@ export function FeedbackView() {
   const [evidenceModalMode, setEvidenceModalMode] = useState<'browse' | 'claim-editor'>('browse');
   const [highlightEvidence, setHighlightEvidence] = useState<string | null>(null);
 
-  // Extract session memos from location state
-  const sessionMemos: Memo[] = locationState?.memos || [];
-  const sessionStages: string[] = locationState?.stages || [];
-  const sessionNotes: string = locationState?.notes || '';
+  // ── Extract session metadata ──
+  const sessionMemos: Memo[] = sessionData?.memos || [];
+  const sessionStages: string[] = sessionData?.stages || [];
+  const sessionNotes: string = sessionData?.notes || '';
+  const sessionStageArchives: StageArchiveData[] = sessionData?.stageArchives || [];
 
-  // If we have real memos, derive teacher_memos from them
+  // Derive teacher memos from ALL real session memos (all types)
   const derivedTeacherMemos = sessionMemos.length > 0
-    ? sessionMemos
-        .filter(m => m.type === 'highlight' || m.type === 'issue')
-        .map(m => `[${m.stage}] ${m.text}`)
-    : MOCK_REPORT.overall.teacher_memos;
+    ? sessionMemos.map(m => `[${m.stage}] ${m.text}`)
+    : [];
 
-  // In production this would fetch from API using sessionId
-  const actualParticipants = locationState?.participants;
-  const effectiveReport: FeedbackReport = actualParticipants && actualParticipants.length > 0
-    ? {
-        ...MOCK_REPORT,
-        session_id: sessionId || MOCK_REPORT.session_id,
-        session_name: locationState?.sessionName || MOCK_REPORT.session_name,
-        mode: (locationState?.mode as '1v1' | 'group') || MOCK_REPORT.mode,
-        participants: actualParticipants,
-        persons: actualParticipants.map((name, i) => generateMockPersonFeedback(name, i)),
-        evidence: generateMockEvidence(actualParticipants),
+  // ── Build the effective report ──
+  // If we have a finalized API report, use it directly
+  // If we have real session data, build a placeholder report from it
+  // Otherwise fall back to DEMO_REPORT
+  const report: FeedbackReport = useMemo(() => {
+    // Case 1: Finalized report from API (already normalized by normalizeApiReport)
+    if (apiReport) {
+      // Merge local teacher memos if API returned none
+      const mergedMemos = apiReport.overall.teacher_memos.length > 0
+        ? apiReport.overall.teacher_memos
+        : derivedTeacherMemos;
+      return {
+        ...apiReport,
+        status: 'final' as const,
+        // Supplement missing metadata from local session data
+        session_name: apiReport.session_name || sessionData?.sessionName || '',
+        date: apiReport.date || sessionData?.date || new Date().toISOString().slice(0, 10),
+        duration_ms: apiReport.duration_ms || (sessionData?.elapsedSeconds || 0) * 1000,
         overall: {
-          ...MOCK_REPORT.overall,
-          teacher_memos: derivedTeacherMemos,
-          team_summary: `The session "${locationState?.sessionName || 'Interview'}" included ${actualParticipants.length} participant${actualParticipants.length > 1 ? 's' : ''}: ${actualParticipants.join(', ')}. ${MOCK_REPORT.overall.team_summary}`,
-        },
-      }
-    : {
-        ...MOCK_REPORT,
-        session_id: sessionId || MOCK_REPORT.session_id,
-        session_name: locationState?.sessionName || MOCK_REPORT.session_name,
-        overall: {
-          ...MOCK_REPORT.overall,
-          teacher_memos: derivedTeacherMemos,
+          ...apiReport.overall,
+          teacher_memos: mergedMemos,
         },
       };
-  const report = effectiveReport;
+    }
+
+    // Case 2: Real session data available (draft state)
+    if (sessionData?.sessionName) {
+      const participantNames = sessionData.participants || [];
+      const durationMs = (sessionData.elapsedSeconds || 0) * 1000;
+      const sessionDate = sessionData.date || new Date().toISOString().slice(0, 10);
+
+      if (participantNames.length > 0) {
+        return {
+          session_id: sessionId || '',
+          session_name: sessionData.sessionName,
+          date: sessionDate,
+          duration_ms: durationMs,
+          status: 'draft' as const,
+          mode: (sessionData.mode as '1v1' | 'group') || '1v1',
+          participants: participantNames,
+          overall: {
+            team_summary: finalizeStatus === 'awaiting' || finalizeStatus === 'finalizing'
+              ? 'Report will be generated after finalization completes. The session data has been captured and is ready for processing.'
+              : `Session "${sessionData.sessionName}" with ${participantNames.length} participant${participantNames.length > 1 ? 's' : ''}: ${participantNames.join(', ')}.`,
+            teacher_memos: derivedTeacherMemos,
+            interaction_events: [],
+            team_dynamics: [],
+            evidence_refs: [],
+          },
+          persons: [],
+          evidence: [],
+        };
+      }
+
+      // Participants list empty but we have session name
+      return {
+        session_id: sessionId || '',
+        session_name: sessionData.sessionName,
+        date: sessionDate,
+        duration_ms: durationMs,
+        status: 'draft' as const,
+        mode: (sessionData.mode as '1v1' | 'group') || '1v1',
+        participants: [],
+        overall: {
+          team_summary: 'Report will be generated after finalization completes.',
+          teacher_memos: derivedTeacherMemos,
+          interaction_events: [],
+          team_dynamics: [],
+          evidence_refs: [],
+        },
+        persons: [],
+        evidence: [],
+      };
+    }
+
+    // Case 3: No session data at all -- demo fallback
+    return DEMO_REPORT;
+  }, [apiReport, sessionData, sessionId, derivedTeacherMemos, finalizeStatus]);
 
   const handleClaimEdit = (claim: Claim, _person: PersonFeedback) => {
     setEditClaim(claim);
@@ -1979,9 +2787,92 @@ export function FeedbackView() {
     setEditClaim(claim);
   };
 
-  const handleRegenerate = () => {
-    // Placeholder: would trigger full LLM re-generation
-  };
+  const handleSaveClaim = useCallback((claimId: string, text: string, evidenceRefs: string[]) => {
+    if (apiReport) {
+      setApiReport(updateClaimInReport(apiReport, claimId, (c) => ({
+        ...c,
+        text,
+        evidence_refs: evidenceRefs,
+      })));
+    }
+    // Persist to backend if available
+    if (sessionId && sessionData?.baseApiUrl) {
+      window.desktopAPI.updateFeedbackClaimEvidence({
+        baseUrl: sessionData.baseApiUrl,
+        sessionId: sessionId!,
+        body: { claim_id: claimId, text, evidence_refs: evidenceRefs },
+      }).catch(() => { /* non-fatal */ });
+    }
+  }, [apiReport, sessionId, sessionData?.baseApiUrl]);
+
+  // Build metadata payload from session data for finalize requests
+  const buildFinalizeMetadata = useCallback(() => {
+    if (!sessionData) return {};
+    return {
+      memos: (sessionData.memos || []).map(m => ({
+        memo_id: m.id,
+        type: m.type,
+        text: m.text,
+        tags: [] as string[],
+        created_at_ms: Date.now(),
+        author_role: 'teacher' as const,
+        stage: m.stage,
+        stage_index: undefined,
+      })),
+      free_form_notes: sessionData.notes || null,
+      stages: sessionData.stages || [],
+      participants: sessionData.participants || [],
+    };
+  }, [sessionData]);
+
+  const handleRetryFinalize = useCallback(async () => {
+    if (!sessionId || !sessionData?.baseApiUrl || finalizingRef.current) return;
+    // Guard against double finalization via store flag
+    const storeState = useSessionStore.getState();
+    if (storeState.finalizeRequested && finalizingRef.current) return;
+    finalizingRef.current = true;
+    storeState.setFinalizeRequested(true);
+    setFinalizeError(null);
+    setFinalizeStatus('awaiting');
+    try {
+      await window.desktopAPI.finalizeV2({
+        baseUrl: sessionData.baseApiUrl,
+        sessionId: sessionId!,
+        metadata: buildFinalizeMetadata(),
+      });
+      // Polling will resume via useEffect dependency on finalizeStatus
+    } catch {
+      setFinalizeStatus('error');
+    } finally {
+      finalizingRef.current = false;
+      useSessionStore.getState().setFinalizeRequested(false);
+    }
+  }, [sessionId, sessionData?.baseApiUrl, buildFinalizeMetadata]);
+
+  const handleRegenerate = useCallback(async () => {
+    if (!sessionId || !sessionData?.baseApiUrl || finalizingRef.current) return;
+    // Guard against double finalization via store flag
+    const storeState = useSessionStore.getState();
+    if (storeState.finalizeRequested && finalizingRef.current) return;
+    finalizingRef.current = true;
+    storeState.setFinalizeRequested(true);
+    setFinalizeError(null);
+    setFinalizeStatus('awaiting');
+    setApiReport(null);
+    try {
+      await window.desktopAPI.finalizeV2({
+        baseUrl: sessionData.baseApiUrl,
+        sessionId: sessionId!,
+        metadata: buildFinalizeMetadata(),
+      });
+      // Polling will pick up the new report
+    } catch {
+      setFinalizeStatus('error');
+    } finally {
+      finalizingRef.current = false;
+      useSessionStore.getState().setFinalizeRequested(false);
+    }
+  }, [sessionId, sessionData?.baseApiUrl, buildFinalizeMetadata]);
 
   const handleTimelineEvidenceClick = (ev: EvidenceRef) => {
     setHighlightEvidence(ev.id);
@@ -1989,8 +2880,9 @@ export function FeedbackView() {
     setEvidenceModalMode('browse');
   };
 
-  // Section navigation
+  // Section navigation + scroll-spy
   const [activeSection, setActiveSection] = useState('overview');
+  const contentRef = useRef<HTMLDivElement>(null);
 
   const handleSectionClick = useCallback((id: string) => {
     setActiveSection(id);
@@ -1998,36 +2890,167 @@ export function FeedbackView() {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
+  // Scroll-spy: track which section is at the top of the scroll area
+  useEffect(() => {
+    const container = contentRef.current;
+    if (!container || reportLoading) return;
+
+    let rafId = 0;
+    const handleScroll = () => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        const sections = container.querySelectorAll<HTMLElement>('[data-section]');
+        const offset = container.getBoundingClientRect().top;
+        let current = 'overview';
+
+        for (const section of sections) {
+          // Section becomes "active" when its top is within 100px of the container top
+          if (section.getBoundingClientRect().top - offset <= 100) {
+            current = section.id;
+          }
+        }
+
+        setActiveSection(current);
+      });
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll(); // Initial check
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+      cancelAnimationFrame(rafId);
+    };
+  }, [report, reportLoading]);
+
+  // ── Compute status badge label & variant ──
+  const statusLabel = useMemo(() => {
+    if (isDemo) return 'Demo Data';
+    switch (finalizeStatus) {
+      case 'tier2_ready': return 'Enhanced Report';
+      case 'tier2_running': return 'Refining...';
+      case 'final': return 'Final Report';
+      case 'finalizing': return 'Finalizing...';
+      case 'awaiting': return 'Draft -- awaiting finalization';
+      case 'error': return 'Finalization failed';
+      case 'not_started': return 'Draft';
+      default: return 'Draft';
+    }
+  }, [finalizeStatus, isDemo]);
+
+  const statusVariant = useMemo((): 'success' | 'warning' | 'info' | 'error' => {
+    if (isDemo) return 'info';
+    switch (finalizeStatus) {
+      case 'tier2_ready': return 'success';
+      case 'tier2_running': return 'info';
+      case 'final': return 'success';
+      case 'finalizing': return 'warning';
+      case 'awaiting': return 'warning';
+      case 'error': return 'error';
+      default: return 'warning';
+    }
+  }, [finalizeStatus, isDemo]);
+
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="max-w-5xl mx-auto p-6">
-        <motion.div initial="hidden" animate="visible">
-          <motion.div variants={fadeInUp} custom={0}>
-            <FeedbackHeader report={report} onRegenerate={handleRegenerate} onBack={() => navigate('/')} />
-          </motion.div>
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* ── Fixed header zone (never scrolls) ── */}
+      {!reportLoading && (
+        <div className="shrink-0 bg-bg border-b border-border">
+          <div className="max-w-5xl mx-auto px-6 pt-6 pb-4">
+            <FeedbackHeader
+              report={report}
+              onRegenerate={handleRegenerate}
+              onBack={() => navigate('/history')}
+              statusLabel={statusLabel}
+              statusVariant={statusVariant}
+              isDemo={isDemo}
+              isEnhanced={finalizeStatus === 'tier2_ready'}
+              sessionNotes={sessionNotes}
+              sessionMemos={sessionMemos}
+            />
 
-          {/* Draft banner */}
-          {report.status === 'draft' && <DraftBanner />}
+            {/* Draft / demo banner */}
+            {(report.status === 'draft' || isDemo) && (
+              <DraftBanner
+                isDemo={isDemo}
+                showRetry={finalizeStatus === 'error'}
+                onRetry={handleRetryFinalize}
+                message={
+                  isDemo
+                    ? undefined
+                    : finalizeStatus === 'finalizing'
+                      ? 'Report is being finalized. Content will update automatically.'
+                      : finalizeStatus === 'error'
+                        ? finalizeError || 'Finalization failed or timed out.'
+                        : undefined
+                }
+              />
+            )}
 
-          <div className="flex gap-6">
-            {/* Sticky left navigation */}
-            <SectionNav report={report} activeSection={activeSection} onSectionClick={handleSectionClick} />
+            {/* Tier 2 refinement banner */}
+            {(finalizeStatus === 'tier2_running' || finalizeStatus === 'tier2_ready') && (
+              <Tier2Banner status={finalizeStatus} progress={tier2Progress} />
+            )}
+          </div>
+        </div>
+      )}
 
-            {/* Content area */}
-            <div className="flex-1 min-w-0 space-y-4">
-              <motion.div variants={fadeInUp} custom={1} id="overview">
+      {/* ── Body: fixed sidebar + scrollable content ── */}
+      <div className="flex-1 min-h-0">
+        {reportLoading ? (
+          <div className="flex flex-col items-center justify-center h-full gap-3">
+            <Loader2 className="w-8 h-8 text-accent animate-spin" />
+            <p className="text-sm text-ink-secondary">Loading report...</p>
+          </div>
+        ) : (
+        <div className="max-w-5xl mx-auto px-6 h-full flex gap-6">
+          {/* Fixed left navigation (never scrolls) */}
+          <SectionNav report={report} activeSection={activeSection} onSectionClick={handleSectionClick} />
+
+          {/* Scrollable content area with sticky section headers */}
+          <motion.div
+            ref={contentRef}
+            initial="hidden"
+            animate="visible"
+            className="flex-1 min-w-0 overflow-y-auto scroll-smooth"
+          >
+            {/* ── Overview section ── */}
+            <section id="overview" data-section className="pb-4 pt-6">
+              <SectionStickyHeader icon={Activity} title="Overview" />
+              <motion.div variants={fadeInUp} custom={1}>
                 <OverallCard report={report} onEvidenceClick={handleEvidenceClick} />
               </motion.div>
+            </section>
 
-              {/* Stage Memos */}
-              {(sessionMemos.length > 0 || sessionNotes) && (
-                <motion.div variants={fadeInUp} custom={2} id="notes">
-                  <StageMemosSection memos={sessionMemos} stages={sessionStages} notes={sessionNotes} />
+            {/* ── Session Notes section ── */}
+            {(sessionMemos.length > 0 || sessionNotes || sessionStageArchives.length > 0) && (
+              <section id="notes" data-section className="pb-4">
+                <SectionStickyHeader icon={BookOpen} title="Session Notes" />
+                <motion.div variants={fadeInUp} custom={2}>
+                  <StageMemosSection memos={sessionMemos} stages={sessionStages} notes={sessionNotes} stageArchives={sessionStageArchives} />
                 </motion.div>
-              )}
+              </section>
+            )}
 
-              {report.persons.map((person, index) => (
-                <motion.div key={person.speaker_id} variants={fadeInUp} custom={index + 3} id={`person-${person.speaker_id}`}>
+            {/* Awaiting Report UI — only show spinner when actively polling for finalization */}
+            {report.persons.length === 0 && (finalizeStatus === 'awaiting' || finalizeStatus === 'finalizing') && !isDemo && (
+              <motion.div variants={fadeInUp} custom={3} className="py-4">
+                <Card className="p-8 text-center">
+                  <Loader2 className="w-6 h-6 animate-spin text-accent mx-auto mb-3" />
+                  <p className="text-sm text-ink-secondary">
+                    Generating feedback report...
+                  </p>
+                  <p className="text-xs text-ink-tertiary mt-1">
+                    This may take up to a minute. The page will update automatically.
+                  </p>
+                </Card>
+              </motion.div>
+            )}
+
+            {/* ── Person sections ── */}
+            {report.persons.map((person, index) => (
+              <section key={person.speaker_id} id={`person-${person.speaker_id}`} data-section className="pb-4">
+                <SectionStickyHeader icon={User} title={person.person_name} />
+                <motion.div variants={fadeInUp} custom={index + 3}>
                   <PersonFeedbackCard
                     person={person}
                     report={report}
@@ -2036,18 +3059,23 @@ export function FeedbackView() {
                     onNeedsEvidence={handleNeedsEvidence}
                   />
                 </motion.div>
-              ))}
+              </section>
+            ))}
 
-              <motion.div variants={fadeInUp} custom={report.persons.length + 3} id="evidence">
+            {/* ── Evidence section ── */}
+            <section id="evidence" data-section className="pb-6">
+              <SectionStickyHeader icon={MessageSquare} title="Evidence Timeline" />
+              <motion.div variants={fadeInUp} custom={report.persons.length + 3}>
                 <EvidenceTimeline
                   report={report}
                   highlightEvidence={highlightEvidence}
                   onEvidenceClick={handleTimelineEvidenceClick}
                 />
               </motion.div>
-            </div>
-          </div>
-        </motion.div>
+            </section>
+          </motion.div>
+        </div>
+        )}
       </div>
 
       {/* Edit Claim Modal */}
@@ -2057,6 +3085,9 @@ export function FeedbackView() {
         claim={editClaim}
         report={report}
         onEvidenceClick={handleEvidenceClickFromEditor}
+        sessionId={sessionId}
+        baseApiUrl={sessionData?.baseApiUrl}
+        onSave={handleSaveClaim}
       />
 
       {/* Evidence Detail Modal */}
@@ -2070,9 +3101,51 @@ export function FeedbackView() {
         report={report}
         mode={evidenceModalMode}
         onUseAsEvidence={() => {
+          // When in claim-editor mode, add evidence to the current claim
+          if (editClaim && detailEvidence && apiReport) {
+            const updatedReport = updateClaimInReport(apiReport, editClaim.id, (c) => ({
+              ...c,
+              evidence_refs: c.evidence_refs.includes(detailEvidence.id)
+                ? c.evidence_refs
+                : [...c.evidence_refs, detailEvidence.id],
+            }));
+            setApiReport(updatedReport);
+            // Also update editClaim to reflect the change
+            setEditClaim((prev) => prev ? {
+              ...prev,
+              evidence_refs: prev.evidence_refs.includes(detailEvidence.id)
+                ? prev.evidence_refs
+                : [...prev.evidence_refs, detailEvidence.id],
+            } : null);
+            // Persist
+            if (sessionId && sessionData?.baseApiUrl) {
+              const updatedClaim = updatedReport.persons
+                .flatMap(p => p.dimensions)
+                .flatMap(d => d.claims)
+                .find(c => c.id === editClaim.id);
+              if (updatedClaim) {
+                window.desktopAPI.updateFeedbackClaimEvidence({
+                  baseUrl: sessionData.baseApiUrl,
+                  sessionId: sessionId!,
+                  body: { claim_id: editClaim.id, evidence_refs: updatedClaim.evidence_refs },
+                }).catch(() => { /* non-fatal */ });
+              }
+            }
+          }
           setDetailEvidence(null);
         }}
         onRemove={() => {
+          // Remove evidence from the current claim
+          if (editClaim && detailEvidence && apiReport) {
+            setApiReport(updateClaimInReport(apiReport, editClaim.id, (c) => ({
+              ...c,
+              evidence_refs: c.evidence_refs.filter(id => id !== detailEvidence.id),
+            })));
+            setEditClaim((prev) => prev ? {
+              ...prev,
+              evidence_refs: prev.evidence_refs.filter(id => id !== detailEvidence.id),
+            } : null);
+          }
           setDetailEvidence(null);
         }}
       />

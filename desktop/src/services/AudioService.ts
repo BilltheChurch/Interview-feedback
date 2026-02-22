@@ -1,11 +1,17 @@
 import { useSessionStore } from '../stores/sessionStore';
+import { wsService } from './WebSocketService';
+import type { StreamRole } from '../stores/sessionStore';
 
 /* ── Constants ─────────────────────────────── */
 
 const LEVEL_POLL_MS = 100;
 const FFT_SIZE = 2048;
+const TARGET_SAMPLE_RATE = 16000;
+const CHUNK_SAMPLES = 16000; // 1 second @ 16kHz mono
+const MAX_QUEUE_SAMPLES = CHUNK_SAMPLES * 30; // ~30 seconds of audio
+const SCRIPT_PROCESSOR_BUFFER = 4096;
 
-/* ── Helpers ───────────────────────────────── */
+/* ── Audio conversion helpers ─────────────── */
 
 function readRmsLevel(analyser: AnalyserNode, buf: Float32Array<ArrayBuffer>): number {
   analyser.getFloatTimeDomainData(buf);
@@ -15,6 +21,108 @@ function readRmsLevel(analyser: AnalyserNode, buf: Float32Array<ArrayBuffer>): n
   }
   const rms = Math.sqrt(sum / buf.length);
   return Math.min(100, Math.round(rms * 200));
+}
+
+function downsampleBuffer(input: Float32Array, inputRate: number, outputRate: number): Float32Array {
+  if (inputRate === outputRate) return input.slice();
+  if (inputRate < outputRate) return input.slice(); // shouldn't happen, but don't crash
+  const ratio = inputRate / outputRate;
+  const outLength = Math.round(input.length / ratio);
+  const out = new Float32Array(outLength);
+  let outOffset = 0;
+  let inOffset = 0;
+  while (outOffset < out.length) {
+    const nextInOffset = Math.round((outOffset + 1) * ratio);
+    let sum = 0;
+    let count = 0;
+    for (let i = inOffset; i < nextInOffset && i < input.length; i++) {
+      sum += input[i];
+      count++;
+    }
+    out[outOffset] = count > 0 ? sum / count : 0;
+    outOffset++;
+    inOffset = nextInOffset;
+  }
+  return out;
+}
+
+function float32ToInt16(floatData: Float32Array): Int16Array {
+  const int16 = new Int16Array(floatData.length);
+  for (let i = 0; i < floatData.length; i++) {
+    const sample = Math.max(-1, Math.min(1, floatData[i]));
+    int16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return int16;
+}
+
+/* ── Chunk queue for accumulating 1-second PCM chunks ── */
+
+type ChunkQueue = {
+  buffers: { samples: Int16Array; offset: number }[];
+  totalSamples: number;
+  seq: number;
+};
+
+function createChunkQueue(): ChunkQueue {
+  return { buffers: [], totalSamples: 0, seq: 0 };
+}
+
+let _queueDropWarned = false;
+
+function enqueue(q: ChunkQueue, samples: Int16Array): void {
+  if (samples.length === 0) return;
+  q.buffers.push({ samples, offset: 0 });
+  q.totalSamples += samples.length;
+
+  // Enforce queue depth limit — drop oldest samples when queue exceeds ~30s of audio
+  if (q.totalSamples > MAX_QUEUE_SAMPLES) {
+    if (!_queueDropWarned) {
+      console.warn(
+        `[AudioService] Queue exceeded ${MAX_QUEUE_SAMPLES} samples — dropping oldest data`,
+      );
+      _queueDropWarned = true;
+    }
+    while (q.totalSamples > MAX_QUEUE_SAMPLES && q.buffers.length > 0) {
+      const head = q.buffers[0];
+      const available = head.samples.length - head.offset;
+      const excess = q.totalSamples - MAX_QUEUE_SAMPLES;
+      if (available <= excess) {
+        // Drop the entire head buffer
+        q.totalSamples -= available;
+        q.buffers.shift();
+      } else {
+        // Partially consume the head buffer
+        head.offset += excess;
+        q.totalSamples -= excess;
+      }
+    }
+  }
+}
+
+function dequeue(q: ChunkQueue, count: number): Int16Array | null {
+  if (q.totalSamples < count) return null;
+  const merged = new Int16Array(count);
+  let writeOffset = 0;
+  while (writeOffset < count) {
+    const head = q.buffers[0];
+    const available = head.samples.length - head.offset;
+    const needs = count - writeOffset;
+    const toCopy = Math.min(available, needs);
+    merged.set(head.samples.subarray(head.offset, head.offset + toCopy), writeOffset);
+    head.offset += toCopy;
+    writeOffset += toCopy;
+    q.totalSamples -= toCopy;
+    if (head.offset >= head.samples.length) {
+      q.buffers.shift();
+    }
+  }
+  return merged;
+}
+
+function resetQueue(q: ChunkQueue): void {
+  q.buffers = [];
+  q.totalSamples = 0;
+  q.seq = 0;
 }
 
 /* ── AudioService ──────────────────────────── */
@@ -32,6 +140,14 @@ class AudioService {
   private mixGain: GainNode | null = null;
   private silentGain: GainNode | null = null;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
+
+  // PCM recording nodes
+  private micProcessor: ScriptProcessorNode | null = null;
+  private systemProcessor: ScriptProcessorNode | null = null;
+
+  // Chunk queues for accumulating 1-second PCM chunks
+  private teacherQueue: ChunkQueue = createChunkQueue();
+  private studentsQueue: ChunkQueue = createChunkQueue();
 
   /* ── Audio graph ─────────────────────────── */
 
@@ -62,14 +178,73 @@ class AudioService {
     mixedAnalyser.connect(silentGain);
     silentGain.connect(ctx.destination);
 
+    // ScriptProcessorNodes for PCM chunk capture
+    const micProcessor = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
+    micProcessor.onaudioprocess = (event) => {
+      this.handleAudioProcess(event, 'teacher');
+    };
+
+    const systemProcessor = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
+    systemProcessor.onaudioprocess = (event) => {
+      this.handleAudioProcess(event, 'students');
+    };
+
+    // Connect processors to silent gain so Chromium keeps them alive
+    micProcessor.connect(silentGain);
+    systemProcessor.connect(silentGain);
+
     this.audioCtx = ctx;
     this.micAnalyser = micAnalyser;
     this.systemAnalyser = systemAnalyser;
     this.mixedAnalyser = mixedAnalyser;
     this.mixGain = mixGain;
     this.silentGain = silentGain;
+    this.micProcessor = micProcessor;
+    this.systemProcessor = systemProcessor;
 
     return ctx;
+  }
+
+  /* ── PCM chunk capture ─────────────────── */
+
+  private handleAudioProcess(event: AudioProcessingEvent, role: StreamRole): void {
+    if (!this.audioCtx) return;
+
+    const inputBuffer = event.inputBuffer;
+    const channelCount = inputBuffer.numberOfChannels || 1;
+    const inputLength = inputBuffer.getChannelData(0).length;
+    const mono = new Float32Array(inputLength);
+
+    if (channelCount === 1) {
+      mono.set(inputBuffer.getChannelData(0));
+    } else {
+      for (let c = 0; c < channelCount; c++) {
+        const channel = inputBuffer.getChannelData(c);
+        for (let i = 0; i < inputLength; i++) {
+          mono[i] += channel[i] / channelCount;
+        }
+      }
+    }
+
+    const downsampled = downsampleBuffer(mono, this.audioCtx.sampleRate, TARGET_SAMPLE_RATE);
+    const pcm16 = float32ToInt16(downsampled);
+
+    const queue = role === 'teacher' ? this.teacherQueue : this.studentsQueue;
+    enqueue(queue, pcm16);
+    this.processQueue(role, queue);
+  }
+
+  private processQueue(role: StreamRole, queue: ChunkQueue): void {
+    while (queue.totalSamples >= CHUNK_SAMPLES) {
+      const chunk = dequeue(queue, CHUNK_SAMPLES);
+      if (!chunk) break;
+
+      queue.seq += 1;
+      // Convert Int16Array to ArrayBuffer for WebSocket transmission
+      const ab = new ArrayBuffer(chunk.byteLength);
+      new Uint8Array(ab).set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      wsService.sendAudioChunk(role, ab, queue.seq);
+    }
   }
 
   /* ── Mic init ────────────────────────────── */
@@ -105,6 +280,8 @@ class AudioService {
       const source = ctx.createMediaStreamSource(stream);
       source.connect(this.micAnalyser!);
       source.connect(this.mixGain!);
+      // Connect to ScriptProcessorNode for PCM chunk capture
+      source.connect(this.micProcessor!);
 
       this.micSource = source;
       this.micStream = stream;
@@ -158,6 +335,8 @@ class AudioService {
       const source = ctx.createMediaStreamSource(audioStream);
       source.connect(this.systemAnalyser!);
       source.connect(this.mixGain!);
+      // Connect to ScriptProcessorNode for PCM chunk capture
+      source.connect(this.systemProcessor!);
 
       this.systemSource = source;
       this.systemStream = audioStream;
@@ -187,10 +366,14 @@ class AudioService {
     }
   }
 
-  /* ── Capture (level polling) ─────────────── */
+  /* ── Capture (level polling + chunk recording) ── */
 
   startCapture(): void {
     useSessionStore.getState().setIsCapturing(true);
+
+    // Reset chunk queues for fresh recording
+    resetQueue(this.teacherQueue);
+    resetQueue(this.studentsQueue);
 
     if (this.levelTimer) return;
 
@@ -212,6 +395,11 @@ class AudioService {
       clearInterval(this.levelTimer);
       this.levelTimer = null;
     }
+
+    // Reset chunk queues
+    resetQueue(this.teacherQueue);
+    resetQueue(this.studentsQueue);
+
     const store = useSessionStore.getState();
     store.setIsCapturing(false);
     store.setAudioLevels({ mic: 0, system: 0, mixed: 0 });
@@ -233,6 +421,8 @@ class AudioService {
     this.micStream = null;
     this.systemStream = null;
     this.displayStream = null;
+    this.micProcessor = null;
+    this.systemProcessor = null;
 
     if (this.audioCtx && this.audioCtx.state !== 'closed') {
       this.audioCtx.close();

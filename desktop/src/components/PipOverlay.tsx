@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import { useSessionStore } from '../stores/sessionStore';
@@ -28,7 +28,22 @@ export function PipOverlay() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const visible = status === 'recording' && location.pathname !== '/session';
+  // Suppress PiP for 300ms when status transitions to 'recording' to avoid
+  // flash before React Router processes the navigate('/session') call
+  const [suppressed, setSuppressed] = useState(false);
+  const prevStatusRef = useRef(status);
+
+  useEffect(() => {
+    if (prevStatusRef.current !== 'recording' && status === 'recording') {
+      setSuppressed(true);
+      prevStatusRef.current = status;
+      const t = setTimeout(() => setSuppressed(false), 300);
+      return () => clearTimeout(t);
+    }
+    prevStatusRef.current = status;
+  }, [status]);
+
+  const visible = status === 'recording' && location.pathname !== '/session' && !suppressed;
 
   // Drag state
   const [pos, setPos] = useState({ x: 16, y: 16 }); // offset from bottom-right

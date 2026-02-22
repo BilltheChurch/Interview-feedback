@@ -1,18 +1,39 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import tempfile
 import threading
 import wave
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from app.exceptions import SVBackendError
 from app.services.audio import NormalizedAudio
+
+logger = logging.getLogger(__name__)
+
+SVDeviceType = Literal["cuda", "rocm", "mps", "cpu"]
+
+
+def detect_sv_device() -> SVDeviceType:
+    """Return the best available compute device for speaker verification."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            if hasattr(torch.version, "hip") and torch.version.hip is not None:
+                return "rocm"
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 @dataclass(slots=True)
@@ -22,22 +43,29 @@ class SVHealth:
     embedding_dim: int | None
     model_loaded: bool
     model_load_seconds: float | None
+    device: str = "cpu"
 
 
 class ModelScopeSVBackend:
-    def __init__(self, model_id: str, model_revision: str, cache_dir: str) -> None:
+    def __init__(self, model_id: str, model_revision: str, cache_dir: str, device: str = "auto") -> None:
         self.model_id = model_id
         self.model_revision = model_revision
-        self.cache_dir = cache_dir
+        self.cache_dir = os.path.expanduser(cache_dir)
+        self._device: SVDeviceType = detect_sv_device() if device == "auto" else device  # type: ignore[assignment]
 
         self._pipeline: Any | None = None
         self._embedding_dim: int | None = None
         self._model_load_seconds: float | None = None
         self._lock = threading.RLock()
+        logger.info("ModelScopeSVBackend: device=%s, model=%s", self._device, self.model_id)
 
     @property
     def embedding_dim(self) -> int | None:
         return self._embedding_dim
+
+    @property
+    def device(self) -> SVDeviceType:
+        return self._device
 
     def _ensure_pipeline(self) -> Any:
         with self._lock:
@@ -55,6 +83,20 @@ class ModelScopeSVBackend:
                     model=self.model_id,
                     model_revision=self.model_revision,
                 )
+
+                # Transfer model to GPU if available
+                if self._device in ("cuda", "rocm"):
+                    try:
+                        import torch
+                        if torch.cuda.is_available() and hasattr(self._pipeline, "model"):
+                            self._pipeline.model = self._pipeline.model.to(torch.device("cuda"))
+                            logger.info("SV model transferred to CUDA/ROCm GPU")
+                    except Exception:
+                        logger.warning("Failed to transfer SV model to CUDA, running on CPU", exc_info=True)
+                elif self._device == "mps":
+                    # ModelScope pipelines don't auto-convert inputs to MPS
+                    # (unlike CUDA). Keep model on CPU for reliable inference.
+                    logger.info("SV model stays on CPU (MPS pipeline input conversion not supported by ModelScope)")
             except Exception as exc:  # noqa: BLE001
                 raise SVBackendError(f"failed to initialize ModelScope speaker verification pipeline: {exc}") from exc
             finally:
@@ -192,4 +234,5 @@ class ModelScopeSVBackend:
             embedding_dim=self._embedding_dim,
             model_loaded=self._pipeline is not None,
             model_load_seconds=self._model_load_seconds,
+            device=self._device,
         )

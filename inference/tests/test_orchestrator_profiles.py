@@ -172,7 +172,7 @@ def test_resolve_falls_back_to_roster_name_extract() -> None:
     )
     req = ResolveRequest(session_id="s4", audio=_audio_payload(), asr_text="hello my name is alice", state=state)
     resp = orchestrator.resolve(req.session_id, req.audio, req.asr_text, req.state)
-    assert resp.decision == "confirm"
+    assert resp.decision == "auto"  # confidence 0.95 ("my name is") >= 0.80 persists binding
     assert resp.speaker_name == "Alice"
     assert resp.evidence.binding_source == "name_extract"
 

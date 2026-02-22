@@ -75,9 +75,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd inference
 cp .env.example .env        # or .env.production for production-like settings
-docker compose up --build   # Starts FastAPI service + dependencies
+
+# macOS: MUST run natively (Docker cannot access MPS/Metal GPU)
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Linux with NVIDIA GPU: Docker is fine
+# docker compose up --build
+
 curl http://localhost:8000/health  # Verify service is running
 ```
+
+> **Important**: On macOS, Docker runs inside a Linux VM and **cannot access Apple Silicon MPS/Metal GPU**.
+> Running Whisper large-v3 on CPU is ~15x slower than MPS. Always use native `uvicorn` on macOS.
 
 **Key Endpoints (13 total):**
 - `GET /health` — Service health check with model info
@@ -203,14 +214,29 @@ node scripts/eval_speaker_accuracy.mjs
 - Use **Lucide React** for icons (no emojis as UI icons)
 - Minimum text size: 12px (WCAG compliance)
 - WCAG AA contrast ratios for all text
+- **使用中文回复**所有对话和文档（代码注释和变量名保持英文）
+
+### Teams ACS 集成策略（2026-02-22 决定）
+- **主力方案**: ACS TeamsCaptions — 通过 `@azure/communication-calling` SDK 加入 Teams 会议，订阅 `CaptionsReceived` 事件获取带说话人归属的实时字幕
+- **ACS Unmixed Audio**: 支持最多 4 个 dominant speakers 的分离音频流，足够覆盖小组面试场景（面试官本地采集 + 4 名面试者）
+- **后备策略**: 如果本地 ASR/SV/Diarization 持续无法正常工作（E2E 测试失败），则全面转向 Teams ACS 方案
+- **不使用 Bot**: 避免 VM + Bot 加入会议的架构，ACS 以外部参与者身份加入（非 Bot）
+- **Tier 2 增强**: Graph API 会后转录（`GET /communications/callRecords/{id}/transcript`）替代 Whisper 批处理
+- **ACS 资源**: `chorus-captions` (Asia Pacific), endpoint: `https://chorus-captions.asiapacific.communication.azure.com/`
+- **ACS 加入模式**: BYOI 匿名加入（无需管理员 PowerShell 配置，无需 Teams token exchange）
+- **设计文档**: `docs/plans/2026-02-22-teams-acs-integration-design.md`
 
 ## Deployment
 
-### Inference Service (Docker)
+### Inference Service
 ```bash
-cd inference
+# macOS (native — required for MPS GPU)
+cd inference && source .venv/bin/activate
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Linux with NVIDIA GPU (Docker OK)
 docker build -t interview-feedback-inference .
-docker run -p 8000:8000 --env-file .env interview-feedback-inference
+docker run --gpus all -p 8000:8000 --env-file .env interview-feedback-inference
 ```
 
 ### Edge Worker (Cloudflare)

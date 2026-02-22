@@ -116,7 +116,7 @@ def test_binder_name_extract_confirm_when_no_profile() -> None:
         now_iso=datetime.now(timezone.utc).isoformat(),
     )
 
-    assert result.decision == "confirm"
+    assert result.decision == "auto"  # confidence 0.9 >= 0.80 threshold persists binding
     assert result.speaker_name == "Daisy"
 
 

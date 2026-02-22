@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hmac
 import logging
 
@@ -7,6 +9,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.routes.asr import router as asr_router
+from app.routes.batch import router as batch_router
 from app.exceptions import (
     AudioDecodeError,
     NotImplementedServiceError,
@@ -17,6 +21,9 @@ from app.exceptions import (
 )
 from app.runtime import build_runtime
 from app.schemas import (
+    CheckpointRequest,
+    CheckpointResponse,
+    DeviceInfo,
     EnrollRequest,
     EnrollResponse,
     DiarizeRequest,
@@ -28,6 +35,7 @@ from app.schemas import (
     AnalysisEventsResponse,
     AnalysisReportRequest,
     AnalysisReportResponse,
+    MergeCheckpointsRequest,
     RegenerateClaimRequest,
     RegenerateClaimResponse,
     HealthResponse,
@@ -53,11 +61,35 @@ rate_limiter = (
     else None
 )
 app = FastAPI(title=settings.app_name, version="0.1.0")
+app.include_router(asr_router)
+app.include_router(batch_router)
+
+_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+
+
+@app.on_event("startup")
+async def _expand_thread_pool() -> None:
+    """Expand asyncio thread pool so concurrent SV model calls don't starve other endpoints."""
+    asyncio.get_running_loop().set_default_executor(_thread_pool)
+
+
+@app.on_event("startup")
+async def _warmup_whisper() -> None:
+    """Pre-load the Whisper model at startup so the first ASR request doesn't block for minutes."""
+    try:
+        from app.routes.asr import _get_whisper
+
+        logger.info("Warming up Whisper model (this may take a few minutes on first run)...")
+        whisper = await asyncio.to_thread(_get_whisper)
+        logger.info("Whisper model ready: device=%s, backend=%s", whisper.device, whisper.backend)
+    except Exception as exc:
+        logger.warning("Whisper warm-up failed (will retry on first request): %s", exc)
 
 
 @app.middleware("http")
 async def request_guard(request: Request, call_next):
-    if settings.inference_api_key:
+    # Skip API key check for health endpoint (Docker health check, load balancers)
+    if settings.inference_api_key and request.url.path != "/health":
         incoming_key = request.headers.get("x-api-key", "")
         if not hmac.compare_digest(incoming_key.encode(), settings.inference_api_key.encode()):
             raise UnauthorizedError("invalid x-api-key")
@@ -145,12 +177,18 @@ async def health() -> HealthResponse:
         rate_limit_window_seconds=settings.rate_limit_window_seconds,
         segmenter_backend=settings.segmenter_backend,
         diarization_enabled=settings.enable_diarization,
+        devices=DeviceInfo(
+            sv_device=sv_health.device,
+            whisper_device=settings.whisper_device,
+            pyannote_device=settings.pyannote_device,
+            whisper_model_size=settings.whisper_model_size,
+        ),
     )
 
 
 @app.post("/sv/extract_embedding", response_model=ExtractEmbeddingResponse)
 async def extract_embedding(req: ExtractEmbeddingRequest) -> ExtractEmbeddingResponse:
-    embedding = runtime.orchestrator.extract_embedding(req.audio)
+    embedding = await asyncio.to_thread(runtime.orchestrator.extract_embedding, req.audio)
     return ExtractEmbeddingResponse(
         model_id=settings.sv_model_id,
         model_revision=settings.sv_model_revision,
@@ -161,7 +199,7 @@ async def extract_embedding(req: ExtractEmbeddingRequest) -> ExtractEmbeddingRes
 
 @app.post("/sv/score", response_model=ScoreResponse)
 async def score(req: ScoreRequest) -> ScoreResponse:
-    score_value = runtime.orchestrator.score(req.audio_a, req.audio_b)
+    score_value = await asyncio.to_thread(runtime.orchestrator.score, req.audio_a, req.audio_b)
     return ScoreResponse(
         model_id=settings.sv_model_id,
         model_revision=settings.sv_model_revision,
@@ -171,7 +209,8 @@ async def score(req: ScoreRequest) -> ScoreResponse:
 
 @app.post("/speaker/resolve", response_model=ResolveResponse)
 async def resolve_speaker(req: ResolveRequest) -> ResolveResponse:
-    return runtime.orchestrator.resolve(
+    return await asyncio.to_thread(
+        runtime.orchestrator.resolve,
         session_id=req.session_id,
         audio_payload=req.audio,
         asr_text=req.asr_text,
@@ -181,7 +220,8 @@ async def resolve_speaker(req: ResolveRequest) -> ResolveResponse:
 
 @app.post("/speaker/enroll", response_model=EnrollResponse)
 async def enroll_speaker(req: EnrollRequest) -> EnrollResponse:
-    return runtime.orchestrator.enroll(
+    return await asyncio.to_thread(
+        runtime.orchestrator.enroll,
         session_id=req.session_id,
         participant_name=req.participant_name,
         audio_payload=req.audio,
@@ -191,6 +231,8 @@ async def enroll_speaker(req: EnrollRequest) -> EnrollResponse:
 
 @app.post("/analysis/events", response_model=AnalysisEventsResponse)
 async def analyze_events(req: AnalysisEventsRequest) -> AnalysisEventsResponse:
+    # Run inline — events analyzer is pure CPU keyword matching (<1ms),
+    # no I/O.  Avoids thread-pool starvation when SV model calls fill the pool.
     events = runtime.events_analyzer.analyze(
         session_id=req.session_id,
         transcript=req.transcript,
@@ -202,21 +244,33 @@ async def analyze_events(req: AnalysisEventsRequest) -> AnalysisEventsResponse:
 
 @app.post("/analysis/report", response_model=AnalysisReportResponse)
 async def analyze_report(req: AnalysisReportRequest) -> AnalysisReportResponse:
-    return runtime.report_generator.generate(req)
+    return await asyncio.to_thread(runtime.report_generator.generate, req)
 
 
 @app.post("/analysis/regenerate-claim", response_model=RegenerateClaimResponse)
 async def regenerate_claim(req: RegenerateClaimRequest) -> RegenerateClaimResponse:
-    return runtime.report_generator.regenerate_claim(req)
+    return await asyncio.to_thread(runtime.report_generator.regenerate_claim, req)
 
 
 @app.post("/analysis/synthesize", response_model=AnalysisReportResponse)
 async def synthesize_report(req: SynthesizeReportRequest) -> AnalysisReportResponse:
-    return runtime.report_synthesizer.synthesize(req)
+    return await asyncio.to_thread(runtime.report_synthesizer.synthesize, req)
+
+
+@app.post("/analysis/checkpoint", response_model=CheckpointResponse)
+async def analyze_checkpoint(req: CheckpointRequest) -> CheckpointResponse:
+    return await asyncio.to_thread(runtime.checkpoint_analyzer.analyze_checkpoint, req)
+
+
+@app.post("/analysis/merge-checkpoints", response_model=AnalysisReportResponse)
+async def merge_checkpoints(req: MergeCheckpointsRequest) -> AnalysisReportResponse:
+    return await asyncio.to_thread(runtime.checkpoint_analyzer.merge_checkpoints, req)
 
 
 @app.post("/sd/diarize", response_model=DiarizeResponse)
 async def diarize(req: DiarizeRequest) -> DiarizeResponse:
+    """Phase 2 placeholder — speaker diarization is not yet implemented.
+    Returns 501 Not Implemented."""
     raise NotImplementedServiceError("/sd/diarize is reserved for Phase 2 diarization plugin")
 
 

@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const http = require("node:http");
 const { URL } = require("node:url");
+const { safeStorage } = require("electron");
 const { OAuth2Client } = require("google-auth-library");
 
 const SCOPES = [
@@ -29,8 +30,24 @@ class GoogleCalendarClient {
     if (this._cacheLoaded) return;
     if (this.cachePath && fs.existsSync(this.cachePath)) {
       try {
-        const raw = fs.readFileSync(this.cachePath, "utf8");
-        if (raw.trim()) {
+        let raw;
+        const fileContent = fs.readFileSync(this.cachePath);
+        if (safeStorage.isEncryptionAvailable()) {
+          try {
+            raw = safeStorage.decryptString(fileContent);
+          } catch {
+            // Migration: try reading as plaintext (old format)
+            raw = fileContent.toString("utf8");
+            // Re-save encrypted
+            if (raw && raw.trim()) {
+              const encrypted = safeStorage.encryptString(raw);
+              fs.writeFileSync(this.cachePath, encrypted, { mode: 0o600 });
+            }
+          }
+        } else {
+          raw = fileContent.toString("utf8");
+        }
+        if (raw && raw.trim()) {
           this._tokens = JSON.parse(raw);
         }
       } catch (error) {
@@ -44,7 +61,14 @@ class GoogleCalendarClient {
     if (!this.cachePath) return;
     ensureDir(this.cachePath);
     if (this._tokens) {
-      fs.writeFileSync(this.cachePath, JSON.stringify(this._tokens, null, 2), { encoding: "utf8", mode: 0o600 });
+      const serialized = JSON.stringify(this._tokens, null, 2);
+      if (safeStorage.isEncryptionAvailable()) {
+        const encrypted = safeStorage.encryptString(serialized);
+        fs.writeFileSync(this.cachePath, encrypted, { mode: 0o600 });
+      } else {
+        // Fallback for environments without keychain
+        fs.writeFileSync(this.cachePath, serialized, { encoding: "utf8", mode: 0o600 });
+      }
     } else if (fs.existsSync(this.cachePath)) {
       fs.unlinkSync(this.cachePath);
     }
@@ -122,7 +146,7 @@ class GoogleCalendarClient {
             }
 
             res.writeHead(200, { "content-type": "text/html" });
-            res.end("<h1>Authentication successful</h1><p>You can close this window now.</p>");
+            res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F6F2EA;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#1A2B33}.card{background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:420px;box-shadow:0 4px 24px rgba(0,0,0,.08)}.icon{width:64px;height:64px;background:#0D6A63;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}svg{width:32px;height:32px}h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#1A2B33}p{font-size:15px;color:#566A77;line-height:1.5}small{display:block;margin-top:20px;font-size:13px;color:#8E9EAB}</style></head><body><div class="card"><div class="icon"><svg fill="none" viewBox="0 0 24 24" stroke="white" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></div><h1>You're all set!</h1><p>Google account connected successfully.</p><small>You can close this tab and return to Chorus.</small></div></body></html>`);
 
             settle(null, {
               connected: true,
@@ -130,7 +154,7 @@ class GoogleCalendarClient {
             });
           } catch (err) {
             res.writeHead(500, { "content-type": "text/html" });
-            res.end("<h1>Authentication failed</h1><p>Internal error</p>");
+            res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F6F2EA;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#1A2B33}.card{background:#fff;border-radius:16px;padding:48px;text-align:center;max-width:420px;box-shadow:0 4px 24px rgba(0,0,0,.08)}.icon{width:64px;height:64px;background:#DC2626;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}svg{width:32px;height:32px}h1{font-size:22px;font-weight:600;margin-bottom:8px;color:#1A2B33}p{font-size:15px;color:#566A77;line-height:1.5}</style></head><body><div class="card"><div class="icon"><svg fill="none" viewBox="0 0 24 24" stroke="white" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg></div><h1>Authentication failed</h1><p>Something went wrong. Please try again.</p></div></body></html>`);
             settle(err);
           }
         });

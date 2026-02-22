@@ -11,6 +11,7 @@ export type Memo = {
   text: string;
   tags: string[];
   timestamp: number;
+  stageIndex: number;
   anchor?: {
     mode: MemoAnchorMode;
     ref_id?: string;
@@ -46,6 +47,15 @@ export type SessionStatus =
   | 'recording'
   | 'feedback_draft'
   | 'feedback_final';
+
+export type StageArchive = {
+  stageIndex: number;
+  stageName: string;
+  archivedAt: string;
+  freeformText: string;
+  freeformHtml?: string;
+  memoIds: string[];
+};
 
 export type SessionConfig = {
   sessionId: string;
@@ -93,15 +103,20 @@ interface SessionStore {
   wsError: string | null;
   wsConnected: boolean;
 
+  // Finalization guard
+  finalizeRequested: boolean;
+
   // Memos & Notes
   memos: Memo[];
   notes: string;
+  stageArchives: StageArchive[];
 
   // Actions
   startSession: (config: SessionConfig) => void;
   endSession: () => void;
   addMemo: (type: MemoType, text: string) => void;
   advanceStage: () => void;
+  addStageArchive: (archive: StageArchive) => void;
   setNotes: (html: string) => void;
   tick: () => void;
   setAudioLevels: (levels: AudioLevels) => void;
@@ -110,6 +125,7 @@ interface SessionStore {
   setIsCapturing: (capturing: boolean) => void;
   setWsStatus: (role: StreamRole, status: WebSocketStatus) => void;
   setWsError: (error: string | null) => void;
+  setFinalizeRequested: (value: boolean) => void;
   reset: () => void;
 }
 
@@ -142,8 +158,11 @@ const INITIAL_STATE = {
   wsError: null as string | null,
   wsConnected: false,
 
+  finalizeRequested: false,
+
   memos: [] as Memo[],
   notes: '',
+  stageArchives: [] as StageArchive[],
 };
 
 /* ── Store ─────────────────────────────────── */
@@ -169,6 +188,7 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       elapsedSeconds: 0,
       memos: [],
       notes: '',
+      stageArchives: [],
     }),
 
   endSession: () =>
@@ -184,6 +204,7 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
           text,
           tags: [],
           timestamp: s.elapsedSeconds,
+          stageIndex: s.currentStage,
           createdAt: new Date(),
         },
       ],
@@ -194,6 +215,11 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       const next = s.currentStage + 1;
       return next < s.stages.length ? { currentStage: next } : {};
     }),
+
+  addStageArchive: (archive) =>
+    set((s) => ({
+      stageArchives: [...s.stageArchives, archive],
+    })),
 
   setNotes: (html) => set({ notes: html }),
 
@@ -218,6 +244,8 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
     }),
 
   setWsError: (error) => set({ wsError: error }),
+
+  setFinalizeRequested: (value) => set({ finalizeRequested: value }),
 
   reset: () => set({ ...INITIAL_STATE }),
 }));
