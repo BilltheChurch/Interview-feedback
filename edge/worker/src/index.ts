@@ -51,7 +51,7 @@ import {
 } from "./reconcile";
 import { EmbeddingCache } from "./embedding-cache";
 import { globalCluster, mapClustersToRoster } from "./global-cluster";
-import type { CachedEmbedding, GlobalClusterResult } from "./providers/types";
+import type { CachedEmbedding, GlobalClusterResult, CaptionEvent } from "./providers/types";
 import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
 import type { RosterParticipant } from "./global-cluster";
 import type {
@@ -68,7 +68,8 @@ import type {
   SpeakerLogs,
   SpeakerMapItem,
   SynthesizeRequestPayload,
-  Tier2Status
+  Tier2Status,
+  CaptionSource
 } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
@@ -1617,19 +1618,20 @@ export class MeetingSessionDO extends DurableObject<Env> {
   /** Embedding cache for global speaker clustering at finalization. */
   readonly embeddingCache: EmbeddingCache = new EmbeddingCache();
   /** Buffer for ACS Teams caption events. */
-  private captionBuffer: import('./providers/types').CaptionEvent[] = [];
+  private captionBuffer: CaptionEvent[] = [];
   /** Caption data source for this session. */
-  private captionSource: import('./types_v2').CaptionSource = 'none';
-  /** Session start time in epoch ms, set on first "hello". 0 = not yet initialized. */
+  private captionSource: CaptionSource = 'none';
+  /** Session start time in epoch ms, set on first "hello". 0 = not yet initialized.
+   *  NOTE: In-memory only — does not survive DO eviction. Acceptable for active sessions. */
   private sessionStartMs: number = 0;
 
   /** Get the caption buffer for finalization. */
-  getCaptionBuffer(): import('./providers/types').CaptionEvent[] {
+  getCaptionBuffer(): CaptionEvent[] {
     return this.captionBuffer;
   }
 
   /** Get the current caption source mode. */
-  getCaptionSource(): import('./types_v2').CaptionSource {
+  getCaptionSource(): CaptionSource {
     return this.captionSource;
   }
 
@@ -6144,11 +6146,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
           if (type === "caption") {
             const resultType = String(message.resultType ?? "");
             if (resultType === "Final") {
+              const rawTs = Number(message.timestamp ?? 0);
+              const timestampMs = Number.isFinite(rawTs) ? rawTs - this.sessionStartMs : 0;
               this.captionBuffer.push({
                 speaker: String(message.speaker ?? ""),
                 text: String(message.text ?? ""),
                 language: String(message.language ?? ""),
-                timestamp_ms: Number(message.timestamp ?? 0) - (this.sessionStartMs ?? 0),
+                timestamp_ms: timestampMs,
                 teamsUserId: message.teamsUserId ? String(message.teamsUserId) : undefined,
               });
             }
