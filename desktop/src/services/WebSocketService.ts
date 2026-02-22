@@ -18,6 +18,7 @@ export type WsConnectOptions = {
 
 const STREAM_ROLES: StreamRole[] = ['teacher', 'students'];
 const RECONNECT_BACKOFF_MS = [1000, 2000, 5000];
+const MAX_RECONNECT_ATTEMPTS = 20;
 
 /* ── Helpers ───────────────────────────────── */
 
@@ -31,9 +32,26 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-function buildWsUrl(baseWsUrl: string, sessionId: string, role: StreamRole): string {
+async function buildWsUrl(baseWsUrl: string, sessionId: string, role: StreamRole): Promise<string> {
   const base = baseWsUrl.replace(/\/+$/, '');
-  return `${base}/${encodeURIComponent(sessionId)}/${role}`;
+  const url = `${base}/v1/audio/ws/${encodeURIComponent(sessionId)}/${role}`;
+  // Retrieve API key from main process via IPC (keeps secret out of renderer bundle).
+  // Falls back to VITE_ env var for dev/browser mode where desktopAPI is unavailable.
+  let apiKey: string | undefined;
+  try {
+    if (window.desktopAPI?.getWorkerApiKey) {
+      apiKey = await window.desktopAPI.getWorkerApiKey();
+    }
+  } catch {
+    // IPC unavailable — fall through to env var
+  }
+  if (!apiKey) {
+    apiKey = import.meta.env.VITE_WORKER_API_KEY;
+  }
+  if (apiKey) {
+    return `${url}?api_key=${encodeURIComponent(apiKey)}`;
+  }
+  return url;
 }
 
 /* ── WebSocketService ──────────────────────── */
@@ -68,8 +86,8 @@ class WebSocketService {
       participants,
     } = opts;
 
-    return new Promise((resolve, reject) => {
-      const url = buildWsUrl(baseWsUrl, sessionId, role);
+    return new Promise(async (resolve, reject) => {
+      const url = await buildWsUrl(baseWsUrl, sessionId, role);
       useSessionStore.getState().setWsStatus(role, 'connecting');
 
       const ws = new WebSocket(url);
@@ -158,6 +176,19 @@ class WebSocketService {
     if (this.closing[role]) return;
 
     const attempts = this.reconnectAttempts[role];
+
+    // Enforce max reconnect attempts to avoid infinite retry loops
+    if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.error(
+        `[WebSocketService] ${role}: max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) exceeded — giving up`,
+      );
+      useSessionStore.getState().setWsStatus(role, 'error');
+      useSessionStore
+        .getState()
+        .setWsError(`${role} connection failed after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+      return;
+    }
+
     const idx = Math.min(RECONNECT_BACKOFF_MS.length - 1, attempts);
     const delay = RECONNECT_BACKOFF_MS[idx];
     this.reconnectAttempts[role] = attempts + 1;
@@ -258,6 +289,11 @@ class WebSocketService {
     const ws = this.sockets[role];
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'enrollment', stream_role: role, ...data }));
+  }
+
+  /** Get the raw WebSocket for a given stream role. Used by ACS caption integration. */
+  getSocket(role: StreamRole): WebSocket | null {
+    return this.sockets[role];
   }
 
   destroy(): void {
