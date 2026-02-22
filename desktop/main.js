@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, session, screen } = require('electron');
 
 const {
@@ -84,14 +85,67 @@ function parseDeepLink(rawUrl) {
   if (candidateName && participants.length === 0) {
     participants = [{ name: candidateName }];
   }
+
+  // MF-3: Validate and sanitize deep link data
+  const MAX_PARTICIPANT_NAME_LENGTH = 100;
+  const MAX_PARTICIPANT_COUNT = 50;
+
+  // Enforce max participant count
+  if (participants.length > MAX_PARTICIPANT_COUNT) {
+    participants = participants.slice(0, MAX_PARTICIPANT_COUNT);
+    logDesktop("[deep-link] participants truncated to max count", { max: MAX_PARTICIPANT_COUNT });
+  }
+
+  // Strip unexpected fields and enforce name length on each participant
+  participants = participants.map((p) => {
+    const sanitized = {};
+    if (typeof p.name === "string") {
+      sanitized.name = p.name.slice(0, MAX_PARTICIPANT_NAME_LENGTH);
+    }
+    if (typeof p.email === "string") {
+      sanitized.email = p.email;
+    }
+    if (typeof p.role === "string") {
+      sanitized.role = p.role;
+    }
+    return sanitized;
+  });
+
+  const teamsJoinUrl = String(url.searchParams.get("teams_join_url") || "").trim();
+  const returnUrl = String(url.searchParams.get("return_url") || "").trim();
+
+  // Validate teams_join_url is HTTPS if provided
+  if (teamsJoinUrl) {
+    try {
+      const parsed = new URL(teamsJoinUrl);
+      if (parsed.protocol !== "https:") {
+        throw new Error(`teams_join_url must be HTTPS, got: ${parsed.protocol}`);
+      }
+    } catch (error) {
+      throw new Error(`Invalid teams_join_url: ${error.message}`);
+    }
+  }
+
+  // Validate return_url is HTTPS if provided
+  if (returnUrl) {
+    try {
+      const parsed = new URL(returnUrl);
+      if (parsed.protocol !== "https:") {
+        throw new Error(`return_url must be HTTPS, got: ${parsed.protocol}`);
+      }
+    } catch (error) {
+      throw new Error(`Invalid return_url: ${error.message}`);
+    }
+  }
+
   return {
     raw_url: rawUrl,
     session_id: String(url.searchParams.get("session_id") || "").trim(),
     mode: String(url.searchParams.get("mode") || "").trim() || "1v1",
-    teams_join_url: String(url.searchParams.get("teams_join_url") || "").trim(),
+    teams_join_url: teamsJoinUrl,
     template_id: String(url.searchParams.get("template_id") || "").trim(),
     booking_ref: String(url.searchParams.get("booking_ref") || "").trim(),
-    return_url: String(url.searchParams.get("return_url") || "").trim(),
+    return_url: returnUrl,
     participants
   };
 }
@@ -172,6 +226,11 @@ function pickDisplaySource(sources) {
 }
 
 async function requestJson(url, init = {}) {
+  // Inject x-api-key header into all outgoing requests when WORKER_API_KEY is set
+  const apiKey = process.env.WORKER_API_KEY;
+  if (apiKey) {
+    init.headers = { 'x-api-key': apiKey, ...(init.headers || {}) };
+  }
   const response = await fetch(url, init);
   const text = await response.text();
   let data;
@@ -255,7 +314,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // MF-5: Sandbox enabled to enforce Chromium security boundary — renderer
+      // cannot access Node.js APIs directly; all IPC goes through preload.js
+      sandbox: true,
       autoplayPolicy: 'no-user-gesture-required'
     }
   });
@@ -395,7 +456,12 @@ function registerIpcHandlers() {
       throw new Error('api request url is required');
     }
 
-    const headers = payload.headers && typeof payload.headers === 'object' ? payload.headers : {};
+    const headers = payload.headers && typeof payload.headers === 'object' ? { ...payload.headers } : {};
+    // Inject x-api-key when WORKER_API_KEY is set
+    const apiKey = process.env.WORKER_API_KEY;
+    if (apiKey && !headers['x-api-key']) {
+      headers['x-api-key'] = apiKey;
+    }
     const response = await fetch(url, {
       method,
       headers,
@@ -448,6 +514,24 @@ function registerIpcHandlers() {
     );
     if (!response.ok) {
       throw new Error(`get-finalize-status failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
+    }
+    return response.data;
+  });
+
+  ipcMain.handle('session:getTier2Status', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('tier2 status payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/tier2-status`
+    );
+    if (!response.ok) {
+      throw new Error(`get-tier2-status failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
     }
     return response.data;
   });
@@ -868,13 +952,42 @@ function registerIpcHandlers() {
     };
   });
 
+  // MF-1: Provide API key at runtime via IPC instead of baking into renderer bundle
+  ipcMain.handle('auth:getWorkerApiKey', async () => {
+    return process.env.WORKER_API_KEY || '';
+  });
+
   ipcMain.handle('system:openExternalUrl', async (_event, payload) => {
     const target = String(payload?.url || '').trim();
     if (!target) {
       throw new Error('url is required');
     }
+    // MF-2: URL scheme whitelist — only allow http/https to prevent arbitrary protocol execution
+    const parsed = new URL(target); // throws on invalid URL
+    const allowedSchemes = ['https:', 'http:'];
+    if (!allowedSchemes.includes(parsed.protocol)) {
+      throw new Error(`Blocked protocol: ${parsed.protocol}`);
+    }
     await shell.openExternal(target);
     return { ok: true, url: target };
+  });
+
+  // ── ACS Caption IPC ──────────────────────────
+  ipcMain.handle('acs:getEnabled', () => {
+    return !!process.env.ACS_CONNECTION_STRING && process.env.ACS_ENABLED === 'true';
+  });
+
+  ipcMain.handle('acs:getToken', async () => {
+    const connectionString = process.env.ACS_CONNECTION_STRING;
+    if (!connectionString) return { ok: false, error: 'ACS not configured' };
+    try {
+      const { CommunicationIdentityClient } = require('@azure/communication-identity');
+      const client = new CommunicationIdentityClient(connectionString);
+      const { token, expiresOn, user } = await client.createUserAndToken(['voip']);
+      return { ok: true, token, expiresOn: expiresOn.toISOString(), userId: user.communicationUserId };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 }
 
@@ -901,6 +1014,18 @@ app.whenReady().then(() => {
     clientSecret: process.env.GOOGLE_CALENDAR_CLIENT_SECRET || '',
     openBrowser: async (url) => { await shell.openExternal(url); },
     log: (message, details) => logDesktop(message, details)
+  });
+
+  // MF-6: Content Security Policy — restrict resource loading in the renderer
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; img-src 'self' data: https:; font-src 'self' data:;"
+        ]
+      }
+    });
   });
 
   const allowedPermissions = new Set([

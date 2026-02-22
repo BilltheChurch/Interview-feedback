@@ -13,6 +13,7 @@ interface DesktopAPI {
   apiRequest(payload: { method: string; url: string; headers?: Record<string, string>; body?: string }): Promise<{ ok: boolean; status: number; text: string }>;
   finalizeV2(payload: { baseUrl: string; sessionId: string; metadata?: Record<string, unknown> }): Promise<unknown>;
   getFinalizeStatus(payload: { baseUrl: string; sessionId: string; jobId?: string }): Promise<unknown>;
+  getTier2Status(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
   getResultV2(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
   getFeedbackReady(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
   openFeedback(payload: { baseUrl: string; sessionId: string; body?: Record<string, unknown> }): Promise<unknown>;
@@ -47,12 +48,24 @@ interface DesktopAPI {
   openExternalUrl(payload: { url: string }): Promise<unknown>;
   clearPreferredCaptureSource(): Promise<unknown>;
   getPreferredCaptureSource(): Promise<unknown>;
+  getWorkerApiKey(): Promise<string | undefined>;
+  enrollSpeaker?(payload: { sessionId: string; speakerName: string }): Promise<{ success: boolean; confidence?: number }>;
   onDeepLinkStart(listener: (payload: unknown) => void): () => void;
 
   // Secure credential storage (Electron safeStorage / macOS Keychain)
   secureStore?(payload: { key: string; value: string }): Promise<void>;
   secureRetrieve?(payload: { key: string }): Promise<string | null>;
   secureDelete?(payload: { key: string }): Promise<void>;
+
+  // ACS Caption
+  acsGetEnabled(): Promise<boolean>;
+  acsGetToken(): Promise<{
+    ok: boolean;
+    token?: string;
+    expiresOn?: string;
+    userId?: string;
+    error?: string;
+  }>;
 }
 
 declare global {

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   apiRequest: (payload) => ipcRenderer.invoke('api:request', payload),
   finalizeV2: (payload) => ipcRenderer.invoke('session:finalizeV2', payload),
   getFinalizeStatus: (payload) => ipcRenderer.invoke('session:getFinalizeStatus', payload),
+  getTier2Status: (payload) => ipcRenderer.invoke('session:getTier2Status', payload),
   getResultV2: (payload) => ipcRenderer.invoke('session:getResultV2', payload),
   getFeedbackReady: (payload) => ipcRenderer.invoke('session:getFeedbackReady', payload),
   openFeedback: (payload) => ipcRenderer.invoke('session:openFeedback', payload),
@@ -40,6 +41,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   openExternalUrl: (payload) => ipcRenderer.invoke('system:openExternalUrl', payload),
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source'),
+  getWorkerApiKey: () => ipcRenderer.invoke('auth:getWorkerApiKey'),
+  acsGetEnabled: () => ipcRenderer.invoke('acs:getEnabled'),
+  acsGetToken: () => ipcRenderer.invoke('acs:getToken'),
   onDeepLinkStart: (listener) => {
     const wrapped = (_event, payload) => listener(payload);
     ipcRenderer.on("deeplink:start", wrapped);
