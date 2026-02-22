@@ -799,6 +799,24 @@ export function SetupView() {
                     participants={participants}
                   />
                 </Card>
+
+                <Card className="p-4 opacity-60">
+                  <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
+                    Schedule from DualSync
+                  </h3>
+                  <p className="text-xs text-ink-tertiary mb-3">
+                    Import participants and meeting link from your DualSync scheduling platform.
+                  </p>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled
+                    title="Coming in Phase 2"
+                  >
+                    <Layout className="w-3.5 h-3.5" />
+                    Import from DualSync
+                  </Button>
+                </Card>
               </motion.div>
             )}
 
