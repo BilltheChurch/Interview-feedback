@@ -188,6 +188,7 @@ export interface ResultV2 {
     confidence_level: "high" | "medium" | "low";
     unresolved_cluster_count: number;
     diarization_backend: "cloud" | "edge";
+    caption_source?: CaptionSource;
   };
   transcript: Array<{
     utterance_id: string;

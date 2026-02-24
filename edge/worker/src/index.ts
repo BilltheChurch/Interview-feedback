@@ -620,7 +620,6 @@ const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
 const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
 const STORAGE_KEY_FEEDBACK_CACHE = "feedback_cache";
 const STORAGE_KEY_DEPENDENCY_HEALTH = "dependency_health";
-const STORAGE_KEY_CAPTION_SOURCE = "caption_source";
 
 const STORAGE_KEY_INGEST_STATE = "ingest_state";
 const STORAGE_KEY_ASR_STATE = "asr_state";
@@ -2832,6 +2831,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       confidenceLevel,
       unresolvedClusterCount,
       diarizationBackend,
+      captionSource: this.captionSource,
       transcript,
       speakerLogs:
         diarizationBackend === "edge"
@@ -4999,6 +4999,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
             tentative,
             confidenceLevel,
             unresolvedClusterCount: existingResult.session.unresolved_cluster_count ?? 0,
+            captionSource: this.captionSource,
             diarizationBackend: existingResult.session.diarization_backend ?? "cloud",
             transcript,
             speakerLogs,
@@ -5068,6 +5069,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       // ── Caption mode: skip audio-dependent stages ──
       const useCaptions = this.captionSource === 'acs-teams' && this.captionBuffer.length > 0;
+
+      // GUARD: If captionSource is acs-teams but captionBuffer is empty (DO evicted + storage lost),
+      // force report-only mode to avoid falling through to local_asr which would timeout.
+      // At this point mode is 'full' (report-only already returned above), so we redirect.
+      if (this.captionSource === 'acs-teams' && !useCaptions) {
+        console.warn(`[finalize-v2] captionSource=acs-teams but captionBuffer empty — forcing report-only mode`);
+        await this.setFinalizeLock(false);
+        return this.runFinalizeV2Job(sessionId, jobId, metadata, 'report-only');
+      }
 
       if (!useCaptions) {
       // ── Drain ASR queues (non-fatal) ──
@@ -5817,6 +5827,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         confidenceLevel,
         unresolvedClusterCount,
         diarizationBackend,
+        captionSource: this.captionSource,
         transcript,
         speakerLogs,
         stats,

@@ -1586,6 +1586,7 @@ export function buildResultV2(params: {
   confidenceLevel: "high" | "medium" | "low";
   unresolvedClusterCount: number;
   diarizationBackend: "cloud" | "edge";
+  captionSource?: "none" | "acs-teams";
   transcript: TranscriptItem[];
   speakerLogs: SpeakerLogs;
   stats: SpeakerStatItem[];
@@ -1637,6 +1638,7 @@ export function buildResultV2(params: {
       confidence_level: params.confidenceLevel,
       unresolved_cluster_count: params.unresolvedClusterCount,
       diarization_backend: params.diarizationBackend,
+      ...(params.captionSource && params.captionSource !== 'none' ? { caption_source: params.captionSource } : {}),
     },
     transcript: params.transcript,
     speaker_logs: params.speakerLogs,
