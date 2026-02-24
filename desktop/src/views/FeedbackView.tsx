@@ -1451,7 +1451,7 @@ function OverallCard({
         {report.positionTitle && <><span>·</span><span>目标: {report.positionTitle}</span></>}
       </div>
 
-      <h2 className="text-sm font-semibold text-ink mb-3">Team Summary</h2>
+      <h2 className="text-sm font-semibold text-ink mb-3">{report.persons.length > 1 ? 'Team Summary' : 'Summary'}</h2>
 
       {/* New narrative format with footnotes */}
       {hasNarrative ? (
@@ -1593,61 +1593,65 @@ function OverallCard({
         </AnimatePresence>
       </div>
 
-      {/* Interaction Events */}
-      <div className="border-t border-border pt-3 mb-3">
-        <button
-          type="button"
-          className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
-          onClick={() => setEventsOpen((v) => !v)}
-        >
-          {eventsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          <Activity className="w-3.5 h-3.5 text-accent" />
-          Interaction Events
-        </button>
-        <AnimatePresence>
-          {eventsOpen && (
-            <motion.ul
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.3 }}
-              className="mt-2 space-y-1.5 pl-6 overflow-hidden"
-            >
-              {report.overall.interaction_events.map((event, i) => (
-                <li key={i} className="text-sm text-ink-secondary leading-relaxed flex items-start gap-2">
-                  <span className="text-ink-tertiary mt-1.5 shrink-0">&#8226;</span>
-                  {event}
-                </li>
-              ))}
-            </motion.ul>
-          )}
-        </AnimatePresence>
-      </div>
+      {/* Interaction Events — hidden for 1v1 or when empty */}
+      {report.persons.length > 1 && report.overall.interaction_events.length > 0 && (
+        <div className="border-t border-border pt-3 mb-3">
+          <button
+            type="button"
+            className="flex items-center gap-1.5 text-sm font-semibold text-ink cursor-pointer w-full text-left transition-all duration-200"
+            onClick={() => setEventsOpen((v) => !v)}
+          >
+            {eventsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            <Activity className="w-3.5 h-3.5 text-accent" />
+            Interaction Events
+          </button>
+          <AnimatePresence>
+            {eventsOpen && (
+              <motion.ul
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="mt-2 space-y-1.5 pl-6 overflow-hidden"
+              >
+                {report.overall.interaction_events.map((event, i) => (
+                  <li key={i} className="text-sm text-ink-secondary leading-relaxed flex items-start gap-2">
+                    <span className="text-ink-tertiary mt-1.5 shrink-0">&#8226;</span>
+                    {event}
+                  </li>
+                ))}
+              </motion.ul>
+            )}
+          </AnimatePresence>
+        </div>
+      )}
 
-      {/* Team Dynamics */}
-      <div className="border-t border-border pt-3">
-        <div className="flex items-center gap-1.5 text-sm font-semibold text-ink mb-2">
-          <TrendingUp className="w-3.5 h-3.5 text-accent" />
-          Team Dynamics
+      {/* Team Dynamics — hidden for 1v1 or when empty */}
+      {report.persons.length > 1 && report.overall.team_dynamics.length > 0 && (
+        <div className="border-t border-border pt-3">
+          <div className="flex items-center gap-1.5 text-sm font-semibold text-ink mb-2">
+            <TrendingUp className="w-3.5 h-3.5 text-accent" />
+            Team Dynamics
+          </div>
+          <div className="space-y-1.5 pl-6">
+            {report.overall.team_dynamics.map((dyn, i) => (
+              <div
+                key={i}
+                className={`flex items-start gap-2 text-sm leading-relaxed ${
+                  dyn.type === 'highlight' ? 'text-success' : 'text-warning'
+                }`}
+              >
+                {dyn.type === 'highlight' ? (
+                  <TrendingUp className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                )}
+                <span className="text-ink-secondary">{dyn.text}</span>
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="space-y-1.5 pl-6">
-          {report.overall.team_dynamics.map((dyn, i) => (
-            <div
-              key={i}
-              className={`flex items-start gap-2 text-sm leading-relaxed ${
-                dyn.type === 'highlight' ? 'text-success' : 'text-warning'
-              }`}
-            >
-              {dyn.type === 'highlight' ? (
-                <TrendingUp className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-              )}
-              <span className="text-ink-secondary">{dyn.text}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+      )}
 
       {/* AI Dimension Suggestions */}
       {suggestedDimensions && suggestedDimensions.length > 0 && (
@@ -1900,13 +1904,13 @@ function PersonFeedbackCard({
   const { footnoteEntries, getFootnoteIndex } = useFootnotes(allPersonEvidenceRefs, personEvidenceMap);
 
   return (
-    <Card className="p-5">
+    <Card className="pt-3 px-5 pb-5">
       <div className="flex items-center gap-2 mb-1">
         <h3 className="text-base font-semibold text-ink">{person.person_name}</h3>
         <Chip>{person.speaker_id}</Chip>
       </div>
       {/* Compact summary chips */}
-      <div className="flex flex-wrap gap-1.5 mb-3">
+      <div className="flex flex-wrap gap-1.5 mb-2">
         <Chip variant="success" className="text-xs">
           {person.dimensions.reduce((n, d) => n + d.claims.filter((c) => c.category === 'strength').length, 0)} strengths
         </Chip>
@@ -2545,14 +2549,16 @@ function SectionNav({
   report,
   activeSection,
   onSectionClick,
+  hasNotes,
 }: {
   report: FeedbackReport;
   activeSection: string;
   onSectionClick: (id: string) => void;
+  hasNotes?: boolean;
 }) {
   const sections = [
     { id: 'overview', label: 'Overview' },
-    { id: 'notes', label: 'Session Notes' },
+    ...(hasNotes ? [{ id: 'notes', label: 'Session Notes' }] : []),
     ...report.persons.map((p) => ({ id: `person-${p.speaker_id}`, label: p.person_name })),
     ...(report.transcript.length > 0 ? [{ id: 'transcript', label: 'Transcript' }] : []),
   ];
@@ -3404,7 +3410,7 @@ export function FeedbackView() {
         <div className={`flex-1 overflow-hidden transition-all duration-300 ${transcriptOpen ? 'w-[60%]' : 'w-full'}`}>
         <div className="max-w-5xl mx-auto px-6 h-full flex gap-6">
           {/* Fixed left navigation (never scrolls) */}
-          <SectionNav report={report} activeSection={activeSection} onSectionClick={handleSectionClick} />
+          <SectionNav report={report} activeSection={activeSection} onSectionClick={handleSectionClick} hasNotes={sessionMemos.length > 0 || !!sessionNotes || sessionStageArchives.length > 0} />
 
           {/* Scrollable content area with sticky section headers */}
           <motion.div
