@@ -539,3 +539,51 @@ class MergeCheckpointsRequest(BaseModel):
     final_memos: list[Memo] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
     locale: str = "zh-CN"
+
+
+# ── Improvement Suggestions Schemas ───────────────────────────────────────
+
+
+class ClaimBeforeAfter(BaseModel):
+    before: str = Field(description="Original expression from transcript")
+    after: str = Field(description="Improved expression in interview language")
+
+
+class ClaimImprovement(BaseModel):
+    claim_id: str = Field(min_length=1, max_length=64)
+    advice: str = Field(description="Improvement advice in Chinese")
+    suggested_wording: str = Field(default="", description="Recommended wording in interview language")
+    before_after: ClaimBeforeAfter | None = None
+
+
+class DimensionImprovement(BaseModel):
+    dimension: str = Field(min_length=1, max_length=100)
+    advice: str = Field(description="Improvement direction in Chinese")
+    framework: str = Field(default="", description="Recommended framework/methodology in Chinese")
+    example_response: str = Field(default="", description="Example response in interview language")
+
+
+class OverallImprovement(BaseModel):
+    summary: str = Field(description="Overall improvement summary in Chinese")
+    key_points: list[str] = Field(default_factory=list, description="3-5 key improvement points")
+
+
+class ImprovementReport(BaseModel):
+    overall: OverallImprovement
+    dimensions: list[DimensionImprovement] = Field(default_factory=list)
+    claims: list[ClaimImprovement] = Field(default_factory=list)
+
+
+class ImprovementRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    report_json: str = Field(description="Serialized AnalysisReportResponse JSON")
+    transcript: list[TranscriptUtterance] = Field(default_factory=list)
+    interview_language: str = Field(default="en", description="Language for example responses")
+    dimension_presets: list[DimensionPreset] = Field(default_factory=list)
+
+
+class ImprovementResponse(BaseModel):
+    session_id: str
+    improvements: ImprovementReport
+    model: str = ""
+    elapsed_ms: int = 0

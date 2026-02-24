@@ -11,6 +11,7 @@ from app.services.events_analyzer import EventsAnalyzer
 from app.services.name_resolver import NameResolver
 from app.services.orchestrator import InferenceOrchestrator
 from app.services.report_generator import ReportGenerator
+from app.services.improvement_generator import ImprovementGenerator
 from app.services.report_synthesizer import ReportSynthesizer
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
 from app.services.sv import ModelScopeSVBackend
@@ -24,6 +25,7 @@ class AppRuntime:
     events_analyzer: EventsAnalyzer
     report_generator: ReportGenerator
     report_synthesizer: ReportSynthesizer
+    improvement_generator: ImprovementGenerator
     checkpoint_analyzer: CheckpointAnalyzer
 
 
@@ -72,5 +74,6 @@ def build_runtime(settings: Settings) -> AppRuntime:
         events_analyzer=EventsAnalyzer(),
         report_generator=ReportGenerator(llm=report_llm),
         report_synthesizer=ReportSynthesizer(llm=report_llm),
+        improvement_generator=ImprovementGenerator(llm=report_llm),
         checkpoint_analyzer=CheckpointAnalyzer(llm=report_llm),
     )

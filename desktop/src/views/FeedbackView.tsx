@@ -133,6 +133,36 @@ type OverallFeedback = {
   }>;
 };
 
+type ClaimBeforeAfter = {
+  before: string;
+  after: string;
+};
+
+type ClaimImprovement = {
+  claim_id: string;
+  advice: string;
+  suggested_wording: string;
+  before_after: ClaimBeforeAfter | null;
+};
+
+type DimensionImprovement = {
+  dimension: string;
+  advice: string;
+  framework: string;
+  example_response: string;
+};
+
+type OverallImprovement = {
+  summary: string;
+  key_points: string[];
+};
+
+type ImprovementReport = {
+  overall: OverallImprovement;
+  dimensions: DimensionImprovement[];
+  claims: ClaimImprovement[];
+};
+
 type FeedbackReport = {
   session_id: string;
   session_name: string;
@@ -150,6 +180,7 @@ type FeedbackReport = {
   captionSource?: string;
   interviewType?: string;
   positionTitle?: string;
+  improvements?: ImprovementReport;
 };
 
 /* ─── Legacy Score Helpers ─────────────────────────────── */
@@ -433,6 +464,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     captionSource,
     interviewType: raw.interview_type || raw.overall?.interview_type || undefined,
     positionTitle: raw.position_title || raw.overall?.position_title || undefined,
+    improvements: raw.improvements || undefined,
   };
 }
 
@@ -1653,6 +1685,29 @@ function OverallCard({
         </div>
       )}
 
+      {/* Overall Improvement Suggestions */}
+      {report.improvements?.overall && (
+        <div className="bg-blue-50/50 border border-blue-200/50 rounded-lg p-4 mt-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Lightbulb className="w-4 h-4 text-blue-600" />
+            <h3 className="text-sm font-semibold text-blue-900">改进建议</h3>
+          </div>
+          <p className="text-sm text-ink-secondary leading-relaxed mb-3">
+            {report.improvements.overall.summary}
+          </p>
+          {report.improvements.overall.key_points.length > 0 && (
+            <ul className="space-y-1.5">
+              {report.improvements.overall.key_points.map((point, i) => (
+                <li key={i} className="flex items-start gap-2 text-sm text-ink-secondary">
+                  <span className="text-blue-500 mt-0.5 shrink-0">•</span>
+                  {point}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {/* AI Dimension Suggestions */}
       {suggestedDimensions && suggestedDimensions.length > 0 && (
         <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 mt-4">
@@ -1696,6 +1751,7 @@ function ClaimCard({
   onNeedsEvidenceClick,
   getFootnoteIndex,
   onFootnoteClick,
+  improvement,
 }: {
   claim: Claim;
   report: FeedbackReport;
@@ -1704,6 +1760,7 @@ function ClaimCard({
   onNeedsEvidenceClick: () => void;
   getFootnoteIndex?: (evidenceId: string) => number;
   onFootnoteClick?: (evidenceId: string) => void;
+  improvement?: ClaimImprovement;
 }) {
   const hasFootnotes = !!getFootnoteIndex;
   const [expandedRef, setExpandedRef] = useState<string | null>(null);
@@ -1799,6 +1856,28 @@ function ClaimCard({
         return ev?.weak;
       }) && (
         <Chip variant="warning" className="text-xs mt-1">weak evidence</Chip>
+      )}
+      {/* Claim improvement suggestion (only for risk/action) */}
+      {improvement && (
+        <div className="border-t border-border/50 pt-2 mt-2">
+          <p className="text-xs text-blue-700 font-medium mb-1">改进建议</p>
+          <p className="text-sm text-ink-secondary leading-relaxed">{improvement.advice}</p>
+          {improvement.suggested_wording && (
+            <p className="text-sm text-ink italic mt-1">&quot;{improvement.suggested_wording}&quot;</p>
+          )}
+          {improvement.before_after && (
+            <div className="mt-2 space-y-1">
+              <div className="flex items-start gap-2">
+                <span className="text-xs text-red-400 font-medium shrink-0 mt-0.5">Before</span>
+                <p className="text-xs text-red-400/80 line-through">{improvement.before_after.before}</p>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-xs text-emerald-600 font-medium shrink-0 mt-0.5">After</span>
+                <p className="text-xs text-emerald-700">{improvement.before_after.after}</p>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -1926,18 +2005,24 @@ function PersonFeedbackCard({
         <CompetencyRadar dimensions={person.dimensions} />
       )}
       {/* Collapsible dimensions */}
-      {person.dimensions.map((dim) => (
-        <DimensionSummaryRow
-          key={dim.dimension}
-          dim={dim}
-          report={report}
-          onClaimEdit={(claim) => onClaimEdit(claim, person)}
-          onEvidenceClick={onEvidenceClick}
-          onNeedsEvidence={onNeedsEvidence}
-          getFootnoteIndex={getFootnoteIndex}
-          onFootnoteClick={onFootnoteClick}
-        />
-      ))}
+      {person.dimensions.map((dim) => {
+        const dimImprovement = report.improvements?.dimensions.find(
+          di => di.dimension === dim.dimension
+        );
+        return (
+          <DimensionSummaryRow
+            key={dim.dimension}
+            dim={dim}
+            report={report}
+            onClaimEdit={(claim) => onClaimEdit(claim, person)}
+            onEvidenceClick={onEvidenceClick}
+            onNeedsEvidence={onNeedsEvidence}
+            getFootnoteIndex={getFootnoteIndex}
+            onFootnoteClick={onFootnoteClick}
+            dimensionImprovement={dimImprovement}
+          />
+        );
+      })}
       <PersonSummary summary={person.summary} />
       {/* Footnote list at the bottom of the person section */}
       {footnoteEntries.length > 0 && (
@@ -2600,6 +2685,7 @@ function DimensionSummaryRow({
   onNeedsEvidence,
   getFootnoteIndex,
   onFootnoteClick,
+  dimensionImprovement,
 }: {
   dim: DimensionFeedback;
   report: FeedbackReport;
@@ -2608,6 +2694,7 @@ function DimensionSummaryRow({
   onNeedsEvidence: (claim: Claim) => void;
   getFootnoteIndex?: (evidenceId: string) => number;
   onFootnoteClick?: (evidenceId: string) => void;
+  dimensionImprovement?: DimensionImprovement;
 }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = DIMENSION_ICONS[dim.dimension] ?? Layers;
@@ -2652,18 +2739,48 @@ function DimensionSummaryRow({
             className="overflow-hidden"
           >
             <div className="space-y-2 pl-6 pb-2">
-              {dim.claims.map((claim) => (
-                <ClaimCard
-                  key={claim.id}
-                  claim={claim}
-                  report={report}
-                  onEditClick={() => onClaimEdit(claim)}
-                  onEvidenceClick={onEvidenceClick}
-                  onNeedsEvidenceClick={() => onNeedsEvidence(claim)}
-                  getFootnoteIndex={getFootnoteIndex}
-                  onFootnoteClick={onFootnoteClick}
-                />
-              ))}
+              {dim.claims.map((claim) => {
+                const claimImprovement = report.improvements?.claims.find(
+                  ci => ci.claim_id === claim.id
+                );
+                return (
+                  <ClaimCard
+                    key={claim.id}
+                    claim={claim}
+                    report={report}
+                    onEditClick={() => onClaimEdit(claim)}
+                    onEvidenceClick={onEvidenceClick}
+                    onNeedsEvidenceClick={() => onNeedsEvidence(claim)}
+                    getFootnoteIndex={getFootnoteIndex}
+                    onFootnoteClick={onFootnoteClick}
+                    improvement={claimImprovement}
+                  />
+                );
+              })}
+              {dimensionImprovement && (
+                <div className="border-l-2 border-blue-300 bg-blue-50/30 rounded-r-lg p-3 mt-2">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Lightbulb className="w-3.5 h-3.5 text-blue-600" />
+                    <span className="text-xs font-semibold text-blue-800">维度改进建议</span>
+                  </div>
+                  <p className="text-sm text-ink-secondary leading-relaxed mb-2">
+                    {dimensionImprovement.advice}
+                  </p>
+                  {dimensionImprovement.framework && (
+                    <p className="text-xs text-blue-700 font-medium mb-2">
+                      推荐框架: {dimensionImprovement.framework}
+                    </p>
+                  )}
+                  {dimensionImprovement.example_response && (
+                    <div className="bg-white/60 rounded p-2 mt-1">
+                      <p className="text-xs text-secondary mb-1">示范回答:</p>
+                      <p className="text-sm text-ink italic leading-relaxed">
+                        &quot;{dimensionImprovement.example_response}&quot;
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </motion.div>
         )}

@@ -240,6 +240,7 @@ export interface ResultV2 {
   overall: OverallFeedback;
   per_person: PersonFeedbackItem[];
   quality: ReportQualityMeta;
+  improvements?: ImprovementReport;
   trace: {
     finalize_job_id: string;
     model_versions: Record<string, string>;
@@ -450,4 +451,36 @@ export interface SuggestedDimension {
   reason: string;
   action: "add" | "replace" | "mark_not_applicable";
   replaces?: string;
+}
+
+// ── Improvement Suggestions ─────────────────────────────────────────────
+
+export interface ClaimBeforeAfter {
+  before: string;
+  after: string;
+}
+
+export interface ClaimImprovement {
+  claim_id: string;
+  advice: string;
+  suggested_wording: string;
+  before_after: ClaimBeforeAfter | null;
+}
+
+export interface DimensionImprovement {
+  dimension: string;
+  advice: string;
+  framework: string;
+  example_response: string;
+}
+
+export interface OverallImprovement {
+  summary: string;
+  key_points: string[];
+}
+
+export interface ImprovementReport {
+  overall: OverallImprovement;
+  dimensions: DimensionImprovement[];
+  claims: ClaimImprovement[];
 }
