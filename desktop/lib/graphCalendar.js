@@ -3,7 +3,7 @@ const path = require("node:path");
 const { safeStorage } = require("electron");
 const { PublicClientApplication } = require("@azure/msal-node");
 
-const DEFAULT_SCOPES = ["User.Read", "Calendars.Read", "OnlineMeetings.ReadWrite"];
+const DEFAULT_SCOPES = ["User.Read", "Calendars.ReadWrite", "OnlineMeetings.ReadWrite"];
 
 function safeString(value) {
   return String(value || "").trim();
@@ -212,12 +212,14 @@ class GraphCalendarClient {
       $select: "id,subject,start,end,onlineMeeting,isOnlineMeeting,onlineMeetingUrl,attendees,organizer,webLink"
     });
 
+    // Use local timezone so dateTime values match user's clock
+    const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     const response = await fetch(`https://graph.microsoft.com/v1.0/me/calendarView?${params.toString()}`, {
       method: "GET",
       headers: {
         authorization: `Bearer ${token.accessToken}`,
         accept: "application/json",
-        prefer: 'outlook.timezone="UTC"'
+        prefer: `outlook.timezone="${localTz}"`
       }
     });
     if (!response.ok) {
@@ -314,6 +316,149 @@ class GraphCalendarClient {
       meeting_code: safeString(joinSettings?.joinMeetingId),
       passcode: safeString(joinSettings?.passcode),
       participants
+    };
+  }
+
+  async createCalendarEvent(options = {}) {
+    const subject = safeString(options.subject) || "Interview Session";
+    const now = Date.now();
+    const startAt = safeString(options.startAt) || new Date(now + 5 * 60 * 1000).toISOString();
+    const endAt = safeString(options.endAt) || new Date(now + 65 * 60 * 1000).toISOString();
+    const timeZone = safeString(options.timeZone) || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const participants = Array.isArray(options.participants) ? options.participants : [];
+
+    const token = await this._acquireAccessToken();
+
+    // Build attendees array (only those with email addresses)
+    const attendees = participants
+      .map((item) => {
+        const email = safeString(item?.email);
+        const name = safeString(item?.name);
+        if (!email) return null;
+        return {
+          emailAddress: { address: email, name: name || email },
+          type: "required"
+        };
+      })
+      .filter(Boolean);
+
+    // Graph API expects dateTime in the specified timeZone (NOT UTC).
+    // Strip any trailing 'Z' or timezone offset so Graph treats it as local time.
+    // Also ensure seconds are present (datetime-local gives "HH:mm" but Graph may need "HH:mm:ss").
+    const normalizeLocalDateTime = (dt) => {
+      let cleaned = dt.replace(/Z$/, "").replace(/[+-]\d{2}:\d{2}$/, "");
+      // Ensure seconds: "2026-02-23T14:00" → "2026-02-23T14:00:00"
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(cleaned)) {
+        cleaned += ":00";
+      }
+      return cleaned;
+    };
+
+    this.log("[graph] createCalendarEvent times", { startAt, endAt, timeZone });
+
+    const body = {
+      subject,
+      start: { dateTime: normalizeLocalDateTime(startAt), timeZone },
+      end: { dateTime: normalizeLocalDateTime(endAt), timeZone },
+      isOnlineMeeting: true,
+      onlineMeetingProvider: "teamsForBusiness"
+    };
+    if (attendees.length > 0) {
+      body.attendees = attendees;
+    }
+
+    const response = await fetch("https://graph.microsoft.com/v1.0/me/events", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token.accessToken}`,
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Graph createCalendarEvent failed: ${response.status} ${text.slice(0, 300)}`);
+    }
+    const item = await response.json();
+
+    // Extract join URL from onlineMeeting property
+    const joinUrl = safeString(item?.onlineMeeting?.joinUrl) || safeString(item?.onlineMeetingUrl) || "";
+
+    // Calendar event response has conferenceId (dial-in ID) but no joinMeetingId/passcode.
+    // Fetch the full online meeting details to get joinMeetingId + passcode.
+    let meetingCode = safeString(item?.onlineMeeting?.conferenceId);
+    let passcode = "";
+
+    if (joinUrl) {
+      try {
+        const encodedUrl = encodeURIComponent(joinUrl);
+        const meetingResp = await fetch(
+          `https://graph.microsoft.com/v1.0/me/onlineMeetings?$filter=JoinWebUrl eq '${encodedUrl}'`,
+          {
+            headers: {
+              authorization: `Bearer ${token.accessToken}`,
+              accept: "application/json"
+            }
+          }
+        );
+        if (meetingResp.ok) {
+          const meetingData = await meetingResp.json();
+          const meeting = Array.isArray(meetingData?.value) ? meetingData.value[0] : null;
+          if (meeting) {
+            if (meeting.joinMeetingIdSettings) {
+              meetingCode = safeString(meeting.joinMeetingIdSettings.joinMeetingId) || meetingCode;
+              passcode = safeString(meeting.joinMeetingIdSettings.passcode);
+            }
+
+            // Enable auto-recording and set spoken language for transcription
+            const onlineMeetingId = safeString(meeting.id);
+            if (onlineMeetingId) {
+              try {
+                // Use beta API for meetingSpokenLanguageTag support
+                const patchResp = await fetch(
+                  `https://graph.microsoft.com/beta/me/onlineMeetings/${onlineMeetingId}`,
+                  {
+                    method: "PATCH",
+                    headers: {
+                      authorization: `Bearer ${token.accessToken}`,
+                      "content-type": "application/json"
+                    },
+                    body: JSON.stringify({
+                      recordAutomatically: true,
+                      meetingSpokenLanguageTag: "zh-CN"
+                    })
+                  }
+                );
+                this.log("[graph] Meeting configured", {
+                  onlineMeetingId,
+                  status: patchResp.status,
+                  recordAutomatically: true,
+                  meetingSpokenLanguageTag: "zh-CN"
+                });
+              } catch (patchErr) {
+                this.log("[graph] Failed to configure meeting", { error: patchErr?.message || String(patchErr) });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        this.log("[graph] Failed to fetch online meeting details", { error: err?.message || String(err) });
+        // Non-fatal: we still have the calendar event and join URL
+      }
+    }
+
+    return {
+      source: "graph",
+      meeting_id: safeString(item?.id) || `graph-event-${Math.random().toString(36).slice(2, 10)}`,
+      title: safeString(item?.subject) || subject,
+      start_at: safeString(item?.start?.dateTime) || startAt,
+      end_at: safeString(item?.end?.dateTime) || endAt,
+      join_url: joinUrl,
+      meeting_code: meetingCode,
+      passcode,
+      participants,
+      web_link: safeString(item?.webLink)
     };
   }
 }

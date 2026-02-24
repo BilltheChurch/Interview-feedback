@@ -870,6 +870,19 @@ function registerIpcHandlers() {
     });
   });
 
+  ipcMain.handle('calendar:createCalendarEvent', async (_event, payload) => {
+    if (!graphCalendar) {
+      throw new Error('graph calendar is not initialized');
+    }
+    return graphCalendar.createCalendarEvent({
+      subject: String(payload?.subject || '').trim(),
+      startAt: String(payload?.startAt || '').trim(),
+      endAt: String(payload?.endAt || '').trim(),
+      timeZone: String(payload?.timeZone || '').trim(),
+      participants: Array.isArray(payload?.participants) ? payload.participants : []
+    });
+  });
+
   ipcMain.handle('calendar:disconnectMicrosoft', async () => {
     if (!graphCalendar) {
       throw new Error('graph calendar is not initialized');
@@ -1033,7 +1046,7 @@ app.whenReady().then(() => {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; img-src 'self' data: https:; font-src 'self' data:;"
+          "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:;"
         ]
       }
     });
@@ -1111,6 +1124,16 @@ process.on('unhandledRejection', (reason) => {
 });
 
 app.on('before-quit', async () => {
+  // Notify renderer to disconnect ACS (graceful hangUp before process exits)
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('app:before-quit');
+      // Give renderer a moment to call ACS hangUp()
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  } catch (error) {
+    logDesktop('renderer quit notification failed', { error: error?.message || String(error) });
+  }
   try {
     await teamsWindowTracker.detach();
   } catch (error) {

@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   calendarConnectMicrosoft: () => ipcRenderer.invoke('calendar:connectMicrosoft'),
   calendarGetUpcomingMeetings: (payload) => ipcRenderer.invoke('calendar:getUpcomingMeetings', payload),
   calendarCreateOnlineMeeting: (payload) => ipcRenderer.invoke('calendar:createOnlineMeeting', payload),
+  calendarCreateCalendarEvent: (payload) => ipcRenderer.invoke('calendar:createCalendarEvent', payload),
   calendarDisconnectMicrosoft: () => ipcRenderer.invoke('calendar:disconnectMicrosoft'),
   authGetState: () => ipcRenderer.invoke('auth:getState'),
   authSignOut: () => ipcRenderer.invoke('auth:signOut'),
@@ -49,5 +50,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     const wrapped = (_event, payload) => listener(payload);
     ipcRenderer.on("deeplink:start", wrapped);
     return () => ipcRenderer.removeListener("deeplink:start", wrapped);
+  },
+  onBeforeQuit: (listener) => {
+    const wrapped = () => listener();
+    ipcRenderer.on("app:before-quit", wrapped);
+    return () => ipcRenderer.removeListener("app:before-quit", wrapped);
   }
 });

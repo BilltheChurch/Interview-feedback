@@ -257,7 +257,7 @@ npm run dist                # Build distributable
 ```
 
 ### OAuth Setup Required
-- **Microsoft**: Azure App Registration with `User.Read`, `Calendars.Read`, `OnlineMeetings.ReadWrite` permissions
+- **Microsoft**: Azure App Registration with `User.Read`, `Calendars.ReadWrite`, `OnlineMeetings.ReadWrite` permissions
 - **Google**: Google Cloud OAuth 2.0 Client ID (Desktop type) with Calendar API enabled
 
 ## Circuit Breaker Configuration

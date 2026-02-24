@@ -49,6 +49,24 @@ interface DesktopAPI {
     passcode: string;
     participants: { name: string; email?: string }[];
   }>;
+  calendarCreateCalendarEvent(payload: {
+    subject: string;
+    startAt: string;
+    endAt: string;
+    timeZone?: string;
+    participants?: { name: string; email?: string }[];
+  }): Promise<{
+    source: string;
+    meeting_id: string;
+    title: string;
+    start_at: string;
+    end_at: string;
+    join_url: string;
+    meeting_code: string;
+    passcode: string;
+    participants: { name: string; email?: string }[];
+    web_link: string;
+  }>;
   calendarDisconnectMicrosoft(): Promise<unknown>;
   authGetState(): Promise<{
     microsoft: { connected: boolean; account: { username?: string; home_account_id?: string; tenant_id?: string } | null };
@@ -67,6 +85,7 @@ interface DesktopAPI {
   copyToClipboard(text: string): Promise<{ ok: boolean }>;
   enrollSpeaker?(payload: { sessionId: string; speakerName: string }): Promise<{ success: boolean; confidence?: number }>;
   onDeepLinkStart(listener: (payload: unknown) => void): () => void;
+  onBeforeQuit(listener: () => void): () => void;
 
   // Secure credential storage (Electron safeStorage / macOS Keychain)
   secureStore?(payload: { key: string; value: string }): Promise<void>;
