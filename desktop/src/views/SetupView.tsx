@@ -17,6 +17,8 @@ import {
   Pencil,
   Check,
   Loader2,
+  Calendar,
+  ExternalLink,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -365,16 +367,64 @@ function MeetingConnector({
   onTeamsUrlChange,
   sessionName,
   participants,
+  initialStartTime,
+  initialEndTime,
 }: {
   teamsUrl: string;
   onTeamsUrlChange: (v: string) => void;
   sessionName: string;
   participants: Participant[];
+  initialStartTime?: string;
+  initialEndTime?: string;
 }) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [meetingInfo, setMeetingInfo] = useState<{
+    meeting_code: string;
+    passcode: string;
+    title: string;
+    start_at: string;
+    end_at: string;
+  } | null>(null);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Default meeting time: next 30-min slot rounded up, duration 60 min
+  const getDefaultStart = () => {
+    const now = new Date();
+    const minutes = now.getMinutes();
+    const roundedMinutes = Math.ceil(minutes / 30) * 30;
+    const start = new Date(now);
+    start.setMinutes(roundedMinutes, 0, 0);
+    if (roundedMinutes >= 60) {
+      start.setHours(start.getHours() + 1);
+      start.setMinutes(0, 0, 0);
+    }
+    return start;
+  };
+
+  const defaultStart = getDefaultStart();
+  const defaultEnd = new Date(defaultStart.getTime() + 60 * 60 * 1000);
+
+  // Format to datetime-local input value (YYYY-MM-DDTHH:mm)
+  const toLocalInput = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const h = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return `${y}-${m}-${day}T${h}:${min}`;
+  };
+
+  // Use meeting times from calendar if available (Quick Start), else default to next 30-min slot
+  const parseInitialTime = (isoStr: string | undefined, fallback: Date) => {
+    if (!isoStr) return toLocalInput(fallback);
+    const d = new Date(isoStr);
+    return isNaN(d.getTime()) ? toLocalInput(fallback) : toLocalInput(d);
+  };
+
+  const [startTime, setStartTime] = useState(parseInitialTime(initialStartTime, defaultStart));
+  const [endTime, setEndTime] = useState(parseInitialTime(initialEndTime, defaultEnd));
 
   useEffect(() => {
     return () => {
@@ -382,27 +432,47 @@ function MeetingConnector({
     };
   }, []);
 
+  // Auto-adjust end time when start changes (keep 60-min duration)
+  const handleStartChange = (value: string) => {
+    setStartTime(value);
+    const startDate = new Date(value);
+    if (!isNaN(startDate.getTime())) {
+      const newEnd = new Date(startDate.getTime() + 60 * 60 * 1000);
+      setEndTime(toLocalInput(newEnd));
+    }
+  };
+
   const handleCreateMeeting = async () => {
     if (creating) return;
     setCreating(true);
     setError(null);
     try {
-      const result = await window.desktopAPI.calendarCreateOnlineMeeting({
+      // Send local time directly (not UTC) — Graph API interprets dateTime in the given timeZone
+      const result = await window.desktopAPI.calendarCreateCalendarEvent({
         subject: sessionName || 'Mock Interview Session',
+        startAt: startTime,
+        endAt: endTime,
         participants: participants
           .filter((p) => p.name.trim())
           .map((p) => ({ name: p.name })),
       });
       onTeamsUrlChange(result.join_url);
+      setMeetingInfo({
+        meeting_code: result.meeting_code,
+        passcode: result.passcode,
+        title: result.title,
+        start_at: startTime,
+        end_at: endTime,
+      });
 
-      // Build invite text
-      const lines = [`Mock Interview: ${result.title}`];
-      lines.push(
-        `Time: ${new Date(result.start_at).toLocaleString()} - ${new Date(result.end_at).toLocaleString()}`
-      );
-      lines.push(`Join: ${result.join_url}`);
+      // Build invite text — use local times from the picker, not API response
+      const fmtTime = (v: string) => new Date(v).toLocaleString();
+      const lines = [`${result.title}`];
+      lines.push(`Time: ${fmtTime(startTime)} - ${fmtTime(endTime)}`);
       if (result.meeting_code) lines.push(`Meeting ID: ${result.meeting_code}`);
       if (result.passcode) lines.push(`Passcode: ${result.passcode}`);
+      lines.push('');
+      lines.push(`Join link: ${result.join_url}`);
       const inviteText = lines.join('\n');
 
       await window.desktopAPI.copyToClipboard(inviteText);
@@ -418,7 +488,17 @@ function MeetingConnector({
   const handleCopyInvite = async () => {
     if (!teamsUrl) return;
     try {
-      await window.desktopAPI.copyToClipboard(teamsUrl);
+      const fmtTime = (v: string) => new Date(v).toLocaleString();
+      const lines: string[] = [];
+      if (meetingInfo) {
+        lines.push(meetingInfo.title);
+        lines.push(`Time: ${fmtTime(meetingInfo.start_at)} - ${fmtTime(meetingInfo.end_at)}`);
+        if (meetingInfo.meeting_code) lines.push(`Meeting ID: ${meetingInfo.meeting_code}`);
+        if (meetingInfo.passcode) lines.push(`Passcode: ${meetingInfo.passcode}`);
+        lines.push('');
+      }
+      lines.push(`Join link: ${teamsUrl}`);
+      await window.desktopAPI.copyToClipboard(lines.join('\n'));
       setCopied(true);
       copiedTimerRef.current = setTimeout(() => setCopied(false), 3000);
     } catch {
@@ -426,18 +506,67 @@ function MeetingConnector({
     }
   };
 
+  const handleOpenTeams = async () => {
+    if (!teamsUrl) return;
+    try {
+      await window.desktopAPI.openExternalUrl({ url: teamsUrl });
+    } catch {
+      // Teams not installed or URL open failed
+    }
+  };
+
   return (
     <div>
       <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
-        Meeting Link
+        Teams Meeting
       </h3>
-      <div className="space-y-2">
+      <div className="space-y-3">
+        {/* Date/Time Picker */}
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-ink-secondary mb-1">Start</label>
+            <input
+              type="datetime-local"
+              value={startTime}
+              onChange={(e) => handleStartChange(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-[--radius-button] border border-border bg-surface text-ink focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-ink-secondary mb-1">End</label>
+            <input
+              type="datetime-local"
+              value={endTime}
+              onChange={(e) => setEndTime(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-[--radius-button] border border-border bg-surface text-ink focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent"
+            />
+          </div>
+        </div>
+
+        {/* Paste existing URL or Create */}
         <TextField
           label="Teams join URL"
           placeholder="Paste Teams meeting link or create new below..."
           value={teamsUrl}
           onChange={(e) => onTeamsUrlChange(e.target.value)}
         />
+
+        {/* Meeting code display */}
+        {meetingInfo?.meeting_code && (
+          <div className="flex items-center gap-3 px-3 py-2 rounded-[--radius-button] bg-accent-soft border border-accent/20">
+            <div className="flex-1 min-w-0">
+              <span className="text-xs text-ink-secondary">Meeting ID: </span>
+              <span className="text-sm font-mono font-semibold text-ink">{meetingInfo.meeting_code}</span>
+              {meetingInfo.passcode && (
+                <>
+                  <span className="text-xs text-ink-secondary ml-3">Passcode: </span>
+                  <span className="text-sm font-mono font-semibold text-ink">{meetingInfo.passcode}</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-2">
           <Button
             variant="secondary"
@@ -448,19 +577,25 @@ function MeetingConnector({
             {creating ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
-              <LinkIcon className="w-3.5 h-3.5" />
+              <Calendar className="w-3.5 h-3.5" />
             )}
-            {creating ? 'Creating...' : 'Create Meeting'}
+            {creating ? 'Creating...' : 'Create & Send Invites'}
           </Button>
           {teamsUrl && (
-            <Button variant="ghost" size="sm" onClick={handleCopyInvite}>
-              <ClipboardPaste className="w-3.5 h-3.5" />
-              Copy Invite
-            </Button>
+            <>
+              <Button variant="ghost" size="sm" onClick={handleCopyInvite}>
+                <ClipboardPaste className="w-3.5 h-3.5" />
+                {copied ? 'Copied!' : 'Copy Invite'}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleOpenTeams}>
+                <ExternalLink className="w-3.5 h-3.5" />
+                Open Teams
+              </Button>
+            </>
           )}
         </div>
         {error && <p className="text-error text-xs">{error}</p>}
-        {copied && <p className="text-accent text-xs">Invite copied to clipboard!</p>}
+        {copied && !teamsUrl && <p className="text-accent text-xs">Invite copied to clipboard!</p>}
       </div>
     </div>
   );
@@ -557,12 +692,12 @@ export function SetupView() {
   const navigate = useNavigate();
   const location = useLocation();
   const { start: startSession } = useSessionOrchestrator();
-  const locationState = location.state as { mode?: SessionMode; sessionName?: string; stages?: string[] } | null;
+  const locationState = location.state as { mode?: SessionMode; sessionName?: string; stages?: string[]; teamsJoinUrl?: string; startTime?: string; endTime?: string } | null;
   const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
   const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
   const [template, setTemplate] = useState('general');
   const [participants, setParticipants] = useState<Participant[]>([]);
-  const [teamsUrl, setTeamsUrl] = useState('');
+  const [teamsUrl, setTeamsUrl] = useState(locationState?.teamsJoinUrl || '');
   const [stages, setStages] = useState<string[]>(
     locationState?.stages || ['Intro', 'Q1', 'Q2', 'Wrap-up']
   );
@@ -686,6 +821,15 @@ export function SetupView() {
       localStorage.setItem('ifb_sessions', JSON.stringify(existing));
     }
 
+    // Auto-launch Teams when starting session (not when creating meeting)
+    if (teamsUrl) {
+      try {
+        await window.desktopAPI.openExternalUrl({ url: teamsUrl });
+      } catch {
+        // Teams not installed or URL open failed — non-fatal
+      }
+    }
+
     // Navigate first to prevent PiP flash (status will change before we leave /setup)
     navigate('/session', {
       state: {
@@ -716,6 +860,18 @@ export function SetupView() {
   // Wizard step state
   const [step, setStep] = useState(0);
   const stepLabels = ['Basics', 'Template & Flow', 'Review'];
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Scroll content area to top when step changes
+  const changeStep = useCallback((newStep: number) => {
+    setStep(newStep);
+    // Defer scroll to after React renders the new step content
+    requestAnimationFrame(() => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = 0;
+      }
+    });
+  }, []);
 
   const canAdvance = step === 0
     ? true // No required fields on step 1 (session name defaults to "Untitled")
@@ -731,7 +887,7 @@ export function SetupView() {
           {/* Title row */}
           <div className="flex items-center gap-3 mb-3">
             <button
-              onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
+              onClick={() => step > 0 ? changeStep(step - 1) : navigate('/')}
               className="text-ink-tertiary hover:text-ink transition-colors cursor-pointer"
               aria-label={step > 0 ? 'Previous step' : 'Back to home'}
             >
@@ -748,7 +904,7 @@ export function SetupView() {
             {stepLabels.map((label, i) => (
               <div key={label} className="flex items-center gap-2 flex-1">
                 <button
-                  onClick={() => i < step && setStep(i)}
+                  onClick={() => i < step && changeStep(i)}
                   className={`flex items-center gap-2 ${i <= step ? 'cursor-pointer' : 'cursor-default'}`}
                   disabled={i > step}
                 >
@@ -772,7 +928,7 @@ export function SetupView() {
       </div>
 
       {/* ── Scrollable Content Area ── */}
-      <div className="flex-1 overflow-y-auto scroll-smooth min-h-0">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto scroll-smooth min-h-0">
         <div className="max-w-xl w-full mx-auto px-6 py-4">
           <AnimatePresence mode="wait">
             {step === 0 && (
@@ -812,6 +968,8 @@ export function SetupView() {
                     onTeamsUrlChange={setTeamsUrl}
                     sessionName={sessionName}
                     participants={participants}
+                    initialStartTime={locationState?.startTime}
+                    initialEndTime={locationState?.endTime}
                   />
                 </Card>
 
@@ -987,14 +1145,14 @@ export function SetupView() {
         <div className="max-w-xl mx-auto flex items-center justify-between">
           <Button
             variant="ghost"
-            onClick={() => step > 0 ? setStep(step - 1) : navigate('/')}
+            onClick={() => step > 0 ? changeStep(step - 1) : navigate('/')}
           >
             {step > 0 ? 'Back' : 'Cancel'}
           </Button>
 
           {step < stepLabels.length - 1 ? (
             <Button
-              onClick={() => setStep(step + 1)}
+              onClick={() => changeStep(step + 1)}
               disabled={!canAdvance}
             >
               Continue

@@ -58,6 +58,21 @@ export function App() {
     })();
   }, []);
 
+  // Gracefully disconnect ACS when the app is about to quit (Cmd+Q)
+  useEffect(() => {
+    if (!window.desktopAPI?.onBeforeQuit) return;
+    const unsubscribe = window.desktopAPI.onBeforeQuit(async () => {
+      try {
+        const { acsCaptionService } = await import('./services/ACSCaptionService');
+        const status = acsCaptionService.getStatus();
+        if (status === 'connected' || status === 'connecting') {
+          acsCaptionService.disconnect().catch(() => {});
+        }
+      } catch { /* ACS not available */ }
+    });
+    return unsubscribe;
+  }, []);
+
   if (!authChecked) {
     return null;
   }

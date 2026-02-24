@@ -11,6 +11,8 @@ import {
   ArrowRight,
   CalendarPlus,
   Loader2,
+  RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -18,6 +20,9 @@ import { TextField } from '../components/ui/TextField';
 import { EmptyState } from '../components/ui/EmptyState';
 import { staggerContainer, staggerItem } from '../lib/animations';
 import { useCalendar } from '../hooks/useCalendar';
+import { getPersistedSession, clearPersistedSession } from '../stores/sessionStore';
+import type { PersistedSession } from '../stores/sessionStore';
+import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
 
 type SessionMode = '1v1' | 'group';
 
@@ -113,30 +118,52 @@ function StartInterviewCard({
 
 /* --- ActiveSessionCard -------------------- */
 
-function ActiveSessionCard({ onResume }: { onResume: () => void }) {
+function ActiveSessionCard({
+  session,
+  onResume,
+  onDiscard,
+}: {
+  session: PersistedSession;
+  onResume: () => void;
+  onDiscard: () => void;
+}) {
+  const mins = Math.floor(session.elapsedSeconds / 60);
+  const secs = session.elapsedSeconds % 60;
+  const elapsed = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
   return (
     <Card className="p-5 border-accent/30 border">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-ink">Active Session</h3>
-        <span className="flex items-center gap-1.5 text-xs text-success font-medium">
-          <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-          Recording
+        <h3 className="text-sm font-semibold text-ink">Recoverable Session</h3>
+        <span className="flex items-center gap-1.5 text-xs text-warning font-medium">
+          <span className="w-2 h-2 rounded-full bg-warning" />
+          Interrupted
         </span>
       </div>
       <div className="mb-3">
-        <p className="text-sm text-ink">Mock Interview - Jane S.</p>
+        <p className="text-sm text-ink truncate">
+          {session.sessionName || 'Untitled Session'}
+        </p>
         <div className="flex items-center gap-2 mt-1">
-          <span className="text-xs text-ink-tertiary">1 v 1</span>
+          <span className="text-xs text-ink-tertiary">{session.mode === '1v1' ? '1 v 1' : 'Group'}</span>
           <span className="text-xs text-ink-tertiary flex items-center gap-1">
             <Clock className="w-3 h-3" />
-            12:34
+            {elapsed}
+          </span>
+          <span className="text-xs text-ink-tertiary">
+            {session.participants.length} participant{session.participants.length !== 1 ? 's' : ''}
           </span>
         </div>
       </div>
-      <Button variant="secondary" size="sm" className="w-full" onClick={onResume}>
-        <ArrowRight className="w-3.5 h-3.5" />
-        Resume
-      </Button>
+      <div className="flex gap-2">
+        <Button variant="secondary" size="sm" className="flex-1" onClick={onResume}>
+          <ArrowRight className="w-3.5 h-3.5" />
+          Resume
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onDiscard} title="Discard session">
+          <Trash2 className="w-3.5 h-3.5" />
+        </Button>
+      </div>
     </Card>
   );
 }
@@ -220,9 +247,10 @@ function PendingFeedbackCard({
 
 /* --- UpcomingMeetings --------------------- */
 
-function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject: string }) => void }) {
-  const { status, meetings, connectMicrosoft, connectGoogle } = useCalendar();
+function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject: string; joinUrl?: string; startTime?: string; endTime?: string }) => void }) {
+  const { status, meetings, connectMicrosoft, connectGoogle, refresh } = useCalendar();
   const [connecting, setConnecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const handleConnect = async (provider: 'microsoft' | 'google') => {
     setConnecting(true);
@@ -295,12 +323,22 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
     );
   }
 
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try { await refresh(); } finally { setRefreshing(false); }
+  };
+
   if (meetings.length === 0) {
     return (
       <Card className="p-5 h-full">
-        <h3 className="text-sm font-semibold text-ink-secondary mb-2">
-          Upcoming Meetings
-        </h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-ink-secondary">
+            Upcoming Meetings
+          </h3>
+          <button onClick={handleRefresh} className="p-1 rounded hover:bg-border/50 text-ink-tertiary" title="Refresh">
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
         <EmptyState
           icon={Calendar}
           title="No upcoming meetings"
@@ -312,9 +350,14 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
 
   return (
     <Card className="p-5 h-full flex flex-col">
-      <h3 className="text-sm font-semibold text-ink-secondary mb-3">
-        Upcoming Meetings
-      </h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-ink-secondary">
+          Upcoming Meetings
+        </h3>
+        <button onClick={handleRefresh} className="p-1 rounded hover:bg-border/50 text-ink-tertiary" title="Refresh">
+          <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
       <ul className="space-y-2 flex-1 min-h-0 overflow-y-auto">
         {meetings.map((m) => (
           <li
@@ -334,7 +377,7 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
               variant="ghost"
               size="sm"
               className="shrink-0"
-              onClick={() => onQuickStart({ subject: m.subject })}
+              onClick={() => onQuickStart({ subject: m.subject, joinUrl: m.joinUrl, startTime: m.startTime, endTime: m.endTime })}
             >
               Quick Start
             </Button>
@@ -358,22 +401,34 @@ function getGreeting(): string {
 
 export function HomeView() {
   const navigate = useNavigate();
+  const { resume } = useSessionOrchestrator();
   const [mode, setMode] = useState<SessionMode>('1v1');
   const [sessionName, setSessionName] = useState('');
+  const [recoverable, setRecoverable] = useState<PersistedSession | null>(null);
 
-  const hasActiveSession = false;
+  // Check for recoverable session on mount
+  useEffect(() => {
+    setRecoverable(getPersistedSession());
+  }, []);
 
   const handleStart = () => {
     navigate('/setup', { state: { mode, sessionName } });
   };
 
-  const handleResume = () => {
-    navigate('/session');
+  const handleResume = async () => {
+    if (!recoverable) return;
+    await resume(recoverable);
+    setRecoverable(null);
   };
 
-  const handleQuickStart = (meeting: { subject: string }) => {
+  const handleDiscard = () => {
+    clearPersistedSession();
+    setRecoverable(null);
+  };
+
+  const handleQuickStart = (meeting: { subject: string; joinUrl?: string; startTime?: string; endTime?: string }) => {
     setSessionName(meeting.subject);
-    navigate('/setup', { state: { mode, sessionName: meeting.subject } });
+    navigate('/setup', { state: { mode, sessionName: meeting.subject, teamsJoinUrl: meeting.joinUrl, startTime: meeting.startTime, endTime: meeting.endTime } });
   };
 
   return (
@@ -410,9 +465,13 @@ export function HomeView() {
               />
             </motion.div>
 
-            {hasActiveSession && (
+            {recoverable && (
               <motion.div variants={staggerItem}>
-                <ActiveSessionCard onResume={handleResume} />
+                <ActiveSessionCard
+                  session={recoverable}
+                  onResume={handleResume}
+                  onDiscard={handleDiscard}
+                />
               </motion.div>
             )}
 
