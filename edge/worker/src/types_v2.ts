@@ -389,3 +389,6 @@ export interface MergeCheckpointsRequestPayload {
 // ── Caption Source ──────────────────────────────────────────────────────
 /** Caption data source. 'none' = use audio ASR, 'acs-teams' = use ACS captions. */
 export type CaptionSource = 'none' | 'acs-teams';
+
+/** Finalize mode. 'full' = normal pipeline, 'report-only' = skip audio stages. */
+export type FinalizeMode = 'full' | 'report-only';

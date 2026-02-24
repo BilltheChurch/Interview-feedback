@@ -11,7 +11,7 @@ interface DesktopAPI {
   pickFile(): Promise<{ canceled: boolean; filePath?: string }>;
   openPath(filePath: string): Promise<{ ok: boolean; error?: string }>;
   apiRequest(payload: { method: string; url: string; headers?: Record<string, string>; body?: string }): Promise<{ ok: boolean; status: number; text: string }>;
-  finalizeV2(payload: { baseUrl: string; sessionId: string; metadata?: Record<string, unknown> }): Promise<unknown>;
+  finalizeV2(payload: { baseUrl: string; sessionId: string; metadata?: Record<string, unknown>; mode?: 'full' | 'report-only' }): Promise<unknown>;
   getFinalizeStatus(payload: { baseUrl: string; sessionId: string; jobId?: string }): Promise<unknown>;
   getTier2Status(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
   getResultV2(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;

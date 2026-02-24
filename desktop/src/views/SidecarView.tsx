@@ -18,6 +18,7 @@ import {
   AudioLines,
   ArrowLeft,
   ArrowRight,
+  Radio,
 } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { StatusDot } from '../components/ui/StatusDot';
@@ -26,8 +27,9 @@ import { MeterBar } from '../components/ui/MeterBar';
 import { ConfidenceBadge } from '../components/ui/ConfidenceBadge';
 import { RichNoteEditor, type RichNoteEditorRef } from '../components/RichNoteEditor';
 import { useSessionStore } from '../stores/sessionStore';
-import type { MemoType, StageArchive } from '../stores/sessionStore';
+import type { MemoType, StageArchive, AcsStatus } from '../stores/sessionStore';
 import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
+import { CaptionPanel } from '../components/CaptionPanel';
 
 /* ─── Types ─────────────────────────────────── */
 
@@ -95,6 +97,51 @@ function CollapsibleSection({
   );
 }
 
+/* ─── ACS Status Badge ─────────────────────── */
+
+const acsStatusConfig: Record<AcsStatus, { label: string; color: string; dotColor: string; animate?: boolean }> = {
+  off: { label: '', color: '', dotColor: '' },
+  connecting: { label: 'Teams', color: 'text-amber-600 bg-amber-50', dotColor: 'bg-amber-400', animate: true },
+  connected: { label: 'Teams', color: 'text-blue-600 bg-blue-50', dotColor: 'bg-blue-400' },
+  receiving: { label: 'Teams', color: 'text-emerald-600 bg-emerald-50', dotColor: 'bg-emerald-400', animate: true },
+  error: { label: 'Teams', color: 'text-red-600 bg-red-50', dotColor: 'bg-red-400' },
+};
+
+function AcsStatusBadge({ status, captionCount }: { status: AcsStatus; captionCount: number }) {
+  if (status === 'off') return null;
+
+  const cfg = acsStatusConfig[status];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.8 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.color} select-none`}
+      title={
+        status === 'connecting' ? 'Connecting to Teams meeting...'
+        : status === 'connected' ? 'Connected — waiting for captions'
+        : status === 'receiving' ? `Receiving captions (${captionCount})`
+        : 'ACS connection error'
+      }
+    >
+      <span className="relative flex h-2 w-2">
+        {cfg.animate && (
+          <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${cfg.dotColor}`} />
+        )}
+        <span className={`relative inline-flex rounded-full h-2 w-2 ${cfg.dotColor}`} />
+      </span>
+      <Radio className="w-3 h-3" />
+      <span>{cfg.label}</span>
+      {status === 'receiving' && (
+        <span className="tabular-nums opacity-75">{captionCount}</span>
+      )}
+      {status === 'error' && (
+        <X className="w-3 h-3" />
+      )}
+    </motion.div>
+  );
+}
+
 /* ─── SidecarHeader (with audio heartbeat) ──── */
 
 function SidecarHeader({
@@ -103,6 +150,8 @@ function SidecarHeader({
   audioActive,
   currentStage,
   stages,
+  acsStatus,
+  acsCaptionCount,
   onEndSession,
 }: {
   elapsed: number;
@@ -110,6 +159,8 @@ function SidecarHeader({
   audioActive: boolean;
   currentStage: number;
   stages: string[];
+  acsStatus: AcsStatus;
+  acsCaptionCount: number;
   onEndSession: () => void;
 }) {
   return (
@@ -118,12 +169,15 @@ function SidecarHeader({
         audioActive ? 'border-accent/60' : 'border-border'
       }`}
     >
-      {/* Left: status + session name */}
-      <div className="flex items-center gap-2 min-w-0">
+      {/* Left: status + session name + ACS badge */}
+      <div className="flex items-center gap-2 min-w-0 overflow-hidden">
         <StatusDot status="recording" />
-        <span className="text-sm text-ink truncate max-w-[180px]">
+        <span className="text-sm text-ink truncate max-w-[120px]">
           {sessionName}
         </span>
+        <div className="shrink-0">
+          <AcsStatusBadge status={acsStatus} captionCount={acsCaptionCount} />
+        </div>
       </div>
 
       {/* Center: timer + compact stage */}
@@ -911,6 +965,9 @@ export function SidecarView() {
   const storeStages = useSessionStore((s) => s.stages);
   const storeSessionName = useSessionStore((s) => s.sessionName);
   const storeSessionId = useSessionStore((s) => s.sessionId);
+  const acsStatus = useSessionStore((s) => s.acsStatus);
+  const acsCaptionCount = useSessionStore((s) => s.acsCaptionCount);
+  const captions = useSessionStore((s) => s.captions);
 
   const { end } = useSessionOrchestrator();
 
@@ -966,23 +1023,35 @@ export function SidecarView() {
 
   // ── Local audio-level-based talk time accumulation ──
   // Uses real audio levels (not chunk counts which are always ~50/50)
+  // Refs are seeded from sessionStore so values survive session resume.
   const storeStatus = useSessionStore((s) => s.status);
-  const micTimeRef = useRef(0);
-  const sysTimeRef = useRef(0);
+  const storeMicActive = useSessionStore((s) => s.micActiveSeconds);
+  const storeSysActive = useSessionStore((s) => s.sysActiveSeconds);
+  const micTimeRef = useRef(storeMicActive);
+  const sysTimeRef = useRef(storeSysActive);
+
+  // Re-seed refs when store values change (e.g. after restoreSession)
+  useEffect(() => {
+    micTimeRef.current = storeMicActive;
+    sysTimeRef.current = storeSysActive;
+  }, [storeMicActive, storeSysActive]);
 
   useEffect(() => {
     if (storeStatus !== 'recording') {
-      micTimeRef.current = 0;
-      sysTimeRef.current = 0;
       return;
     }
 
     const THRESHOLD = 1; // minimum RMS level (0-100 scale) to count as active
 
     const interval = setInterval(() => {
-      const levels = useSessionStore.getState().audioLevels;
+      const store = useSessionStore.getState();
+      const levels = store.audioLevels;
       if (levels.mic > THRESHOLD) micTimeRef.current++;
       if (levels.system > THRESHOLD) sysTimeRef.current++;
+
+      // Sync accumulated values back to store (persisted by auto-save)
+      store.setMicActiveSeconds(micTimeRef.current);
+      store.setSysActiveSeconds(sysTimeRef.current);
 
       const micT = micTimeRef.current;
       const sysT = sysTimeRef.current;
@@ -1208,6 +1277,8 @@ export function SidecarView() {
         audioActive={audioActive}
         currentStage={currentStage}
         stages={stages}
+        acsStatus={acsStatus}
+        acsCaptionCount={acsCaptionCount}
         onEndSession={handleEndSession}
       />
 
@@ -1216,6 +1287,9 @@ export function SidecarView() {
 
       {/* Body */}
       <div className="flex flex-1 min-h-0 relative">
+        {/* Caption panel — left side, conditional on ACS status */}
+        <CaptionPanel captions={captions} acsStatus={acsStatus} />
+
         {/* Notes workspace — takes maximum space */}
         <div className="flex-1 flex flex-col min-w-0">
           {/* Notes editor — hero element, fills available space */}

@@ -41,6 +41,18 @@ export type WebSocketStatus =
 
 export type StreamRole = 'teacher' | 'students';
 
+export type AcsStatus = 'off' | 'connecting' | 'connected' | 'receiving' | 'error';
+
+export type CaptionEntry = {
+  id: string;
+  speaker: string;
+  text: string;
+  timestamp: number;
+  language: string;
+};
+
+const MAX_CAPTIONS = 200;
+
 export type SessionStatus =
   | 'idle'
   | 'setup'
@@ -69,6 +81,57 @@ export type SessionConfig = {
   teamsJoinUrl?: string;
   templateId?: string;
 };
+
+/* ── Persistence key & helpers ─────────────── */
+
+const ACTIVE_SESSION_KEY = 'ifb_active_session';
+const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Serializable subset of session state that can be persisted & restored. */
+export type PersistedSession = {
+  sessionId: string;
+  sessionName: string;
+  mode: '1v1' | 'group';
+  participants: Participant[];
+  stages: string[];
+  currentStage: number;
+  startedAt: number;
+  elapsedSeconds: number;
+  baseApiUrl: string;
+  interviewerName: string;
+  teamsInterviewerName: string;
+  teamsJoinUrl: string;
+  templateId: string;
+  memos: Memo[];
+  notes: string;
+  stageArchives: StageArchive[];
+  micActiveSeconds: number;
+  sysActiveSeconds: number;
+  savedAt: number;
+};
+
+/** Read persisted active session from localStorage, if valid. */
+export function getPersistedSession(): PersistedSession | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_SESSION_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as PersistedSession;
+    if (!data.sessionId || !data.startedAt) return null;
+    // Discard sessions older than 24 hours
+    if (Date.now() - data.savedAt > MAX_SESSION_AGE_MS) {
+      localStorage.removeItem(ACTIVE_SESSION_KEY);
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear persisted active session. */
+export function clearPersistedSession(): void {
+  localStorage.removeItem(ACTIVE_SESSION_KEY);
+}
 
 /* ── Store shape ───────────────────────────── */
 
@@ -103,6 +166,11 @@ interface SessionStore {
   wsError: string | null;
   wsConnected: boolean;
 
+  // ACS Caption
+  acsStatus: AcsStatus;
+  acsCaptionCount: number;
+  captions: CaptionEntry[];
+
   // Finalization guard
   finalizeRequested: boolean;
 
@@ -111,9 +179,16 @@ interface SessionStore {
   notes: string;
   stageArchives: StageArchive[];
 
+  // Speaker activity (accumulated active seconds for talk-time calculation)
+  micActiveSeconds: number;
+  sysActiveSeconds: number;
+  setMicActiveSeconds: (v: number) => void;
+  setSysActiveSeconds: (v: number) => void;
+
   // Actions
   startSession: (config: SessionConfig) => void;
   endSession: () => void;
+  restoreSession: (persisted: PersistedSession) => void;
   addMemo: (type: MemoType, text: string) => void;
   advanceStage: () => void;
   addStageArchive: (archive: StageArchive) => void;
@@ -125,6 +200,9 @@ interface SessionStore {
   setIsCapturing: (capturing: boolean) => void;
   setWsStatus: (role: StreamRole, status: WebSocketStatus) => void;
   setWsError: (error: string | null) => void;
+  setAcsStatus: (status: AcsStatus) => void;
+  incrementAcsCaptionCount: () => void;
+  addCaption: (entry: Omit<CaptionEntry, 'id'>) => void;
   setFinalizeRequested: (value: boolean) => void;
   reset: () => void;
 }
@@ -158,11 +236,17 @@ const INITIAL_STATE = {
   wsError: null as string | null,
   wsConnected: false,
 
+  acsStatus: 'off' as AcsStatus,
+  acsCaptionCount: 0,
+  captions: [] as CaptionEntry[],
+
   finalizeRequested: false,
 
   memos: [] as Memo[],
   notes: '',
   stageArchives: [] as StageArchive[],
+  micActiveSeconds: 0,
+  sysActiveSeconds: 0,
 };
 
 /* ── Store ─────────────────────────────────── */
@@ -187,12 +271,40 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       templateId: config.templateId ?? '',
       elapsedSeconds: 0,
       memos: [],
+      captions: [],
       notes: '',
       stageArchives: [],
+      micActiveSeconds: 0,
+      sysActiveSeconds: 0,
     }),
 
-  endSession: () =>
-    set({ status: 'feedback_draft' }),
+  endSession: () => {
+    clearPersistedSession();
+    set({ status: 'feedback_draft' });
+  },
+
+  restoreSession: (persisted) =>
+    set({
+      sessionId: persisted.sessionId,
+      sessionName: persisted.sessionName,
+      mode: persisted.mode,
+      status: 'recording',
+      participants: persisted.participants,
+      stages: persisted.stages,
+      currentStage: persisted.currentStage,
+      startedAt: persisted.startedAt,
+      baseApiUrl: persisted.baseApiUrl,
+      interviewerName: persisted.interviewerName,
+      teamsInterviewerName: persisted.teamsInterviewerName,
+      teamsJoinUrl: persisted.teamsJoinUrl,
+      templateId: persisted.templateId,
+      elapsedSeconds: persisted.elapsedSeconds,
+      memos: persisted.memos,
+      notes: persisted.notes,
+      stageArchives: persisted.stageArchives,
+      micActiveSeconds: persisted.micActiveSeconds ?? 0,
+      sysActiveSeconds: persisted.sysActiveSeconds ?? 0,
+    }),
 
   addMemo: (type, text) =>
     set((s) => ({
@@ -245,7 +357,65 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
 
   setWsError: (error) => set({ wsError: error }),
 
+  setMicActiveSeconds: (v) => set({ micActiveSeconds: v }),
+  setSysActiveSeconds: (v) => set({ sysActiveSeconds: v }),
+
+  setAcsStatus: (status) => set({ acsStatus: status }),
+  incrementAcsCaptionCount: () => set((s) => ({ acsCaptionCount: s.acsCaptionCount + 1 })),
+
+  addCaption: (entry) =>
+    set((s) => {
+      const id = `cap_${entry.timestamp}_${s.captions.length}`;
+      const next = [...s.captions, { ...entry, id }];
+      return { captions: next.length > MAX_CAPTIONS ? next.slice(-MAX_CAPTIONS) : next };
+    }),
+
   setFinalizeRequested: (value) => set({ finalizeRequested: value }),
 
-  reset: () => set({ ...INITIAL_STATE }),
+  reset: () => {
+    clearPersistedSession();
+    set({ ...INITIAL_STATE });
+  },
 }));
+
+/* ── Auto-save active session to localStorage ── */
+
+const SAVE_INTERVAL_MS = 5_000; // throttle writes to every 5 seconds
+let lastSaveAt = 0;
+
+useSessionStore.subscribe((state) => {
+  // Only persist while actively recording
+  if (state.status !== 'recording' || !state.sessionId || !state.startedAt) return;
+
+  const now = Date.now();
+  if (now - lastSaveAt < SAVE_INTERVAL_MS) return;
+  lastSaveAt = now;
+
+  const snapshot: PersistedSession = {
+    sessionId: state.sessionId,
+    sessionName: state.sessionName,
+    mode: state.mode,
+    participants: state.participants,
+    stages: state.stages,
+    currentStage: state.currentStage,
+    startedAt: state.startedAt,
+    elapsedSeconds: state.elapsedSeconds,
+    baseApiUrl: state.baseApiUrl,
+    interviewerName: state.interviewerName,
+    teamsInterviewerName: state.teamsInterviewerName,
+    teamsJoinUrl: state.teamsJoinUrl,
+    templateId: state.templateId,
+    memos: state.memos,
+    notes: state.notes,
+    stageArchives: state.stageArchives,
+    micActiveSeconds: state.micActiveSeconds,
+    sysActiveSeconds: state.sysActiveSeconds,
+    savedAt: now,
+  };
+
+  try {
+    localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Storage full or unavailable — non-fatal
+  }
+});

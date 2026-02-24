@@ -35,3 +35,6 @@ desktop/test-results/
 # Desktop sidecar artifacts
 desktop/bin/
 desktop/sidecar/pyannote-rs-server/target/
+
+# Git worktrees
+.worktrees/

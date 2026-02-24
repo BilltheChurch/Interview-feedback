@@ -33,8 +33,11 @@ import {
   Link2,
   Loader2,
   Sparkles,
+  ScrollText,
 } from 'lucide-react';
 import { useSessionStore } from '../stores/sessionStore';
+import { TranscriptSection, type TranscriptUtterance, type UtteranceEvidenceMap } from '../components/TranscriptSection';
+import { SplitButton } from '../components/ui/SplitButton';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Chip } from '../components/ui/Chip';
@@ -115,6 +118,9 @@ type FeedbackReport = {
   overall: OverallFeedback;
   persons: PersonFeedback[];
   evidence: EvidenceRef[];
+  transcript: TranscriptUtterance[];
+  utteranceEvidenceMap: UtteranceEvidenceMap;
+  captionSource?: string;
 };
 
 /* ─── API → Frontend Report Transformer ───────────────── */
@@ -274,6 +280,37 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     weak_reason: e.weak_reason,
   }));
 
+  // ── transcript: extract from raw.transcript ──
+  const normalizedTranscript: TranscriptUtterance[] = (() => {
+    if (!Array.isArray(raw.transcript)) return [];
+    return raw.transcript.map((u: any) => ({
+      utterance_id: u.utterance_id || '',
+      speaker_name: u.speaker_name || null,
+      text: u.text || '',
+      start_ms: typeof u.start_ms === 'number' ? u.start_ms : 0,
+      end_ms: typeof u.end_ms === 'number' ? u.end_ms : 0,
+    }));
+  })();
+
+  // ── utteranceEvidenceMap: build from evidence[].utterance_ids ──
+  const utteranceEvidenceMap: UtteranceEvidenceMap = {};
+  const rawEvidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+  for (const ev of rawEvidence) {
+    const evId = ev.evidence_id || ev.id || '';
+    const uttIds = Array.isArray(ev.utterance_ids) ? ev.utterance_ids : [];
+    for (const uid of uttIds) {
+      if (!utteranceEvidenceMap[uid]) utteranceEvidenceMap[uid] = [];
+      utteranceEvidenceMap[uid].push(evId);
+    }
+  }
+
+  // ── captionSource: from session metadata ──
+  const captionSource = typeof raw.session?.caption_source === 'string'
+    ? raw.session.caption_source
+    : typeof raw.caption_source === 'string'
+      ? raw.caption_source
+      : undefined;
+
   return {
     session_id: raw.session?.session_id || raw.session_id || '',
     session_name: sessionMeta?.name || raw.session_name || '',
@@ -291,6 +328,9 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     },
     persons,
     evidence,
+    transcript: normalizedTranscript,
+    utteranceEvidenceMap,
+    captionSource,
   };
 }
 
@@ -627,6 +667,8 @@ const DEMO_REPORT: FeedbackReport = {
       confidence: 0.90,
     },
   ],
+  transcript: [],
+  utteranceEvidenceMap: {},
 };
 
 /* ─── Helpers ─────────────────────────────────────────── */
@@ -1007,9 +1049,10 @@ function FeedbackHeader({
   isEnhanced,
   sessionNotes,
   sessionMemos,
+  captionSource,
 }: {
   report: FeedbackReport;
-  onRegenerate: () => void;
+  onRegenerate: (mode?: 'full' | 'report-only') => void;
   onBack: () => void;
   statusLabel?: string;
   statusVariant?: 'success' | 'warning' | 'info' | 'error';
@@ -1017,6 +1060,7 @@ function FeedbackHeader({
   isEnhanced?: boolean;
   sessionNotes?: string;
   sessionMemos?: Memo[];
+  captionSource?: string;
 }) {
   const [copiedText, setCopiedText] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -1171,9 +1215,9 @@ function FeedbackHeader({
     URL.revokeObjectURL(url);
   }, [report, sessionNotes, sessionMemos]);
 
-  const handleRegenerate = () => {
+  const handleRegenerate = (mode?: 'full' | 'report-only') => {
     setRegenerating(true);
-    onRegenerate();
+    onRegenerate(mode);
     setTimeout(() => setRegenerating(false), 3000);
   };
 
@@ -1227,10 +1271,21 @@ function FeedbackHeader({
           Export DOCX
         </Button>
         <div className="w-px h-5 bg-border mx-1" />
-        <Button variant="secondary" size="sm" onClick={handleRegenerate} loading={regenerating} className="transition-all duration-200">
-          <RefreshCw className="w-3.5 h-3.5" />
-          Re-generate
-        </Button>
+        {captionSource === 'acs-teams' ? (
+          <SplitButton
+            options={[
+              { label: 'Re-generate Report', value: 'report-only', icon: <RefreshCw className="w-3.5 h-3.5" /> },
+              { label: 'Full Re-analysis', value: 'full', icon: <Layers className="w-3.5 h-3.5" /> },
+            ]}
+            onSelect={(v) => handleRegenerate(v as 'full' | 'report-only')}
+            loading={regenerating}
+          />
+        ) : (
+          <Button variant="secondary" size="sm" onClick={() => handleRegenerate('full')} loading={regenerating} className="transition-all duration-200">
+            <RefreshCw className="w-3.5 h-3.5" />
+            Re-generate
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -2232,6 +2287,7 @@ function SectionNav({
     { id: 'overview', label: 'Overview' },
     { id: 'notes', label: 'Session Notes' },
     ...report.persons.map((p) => ({ id: `person-${p.speaker_id}`, label: p.person_name })),
+    ...(report.transcript.length > 0 ? [{ id: 'transcript', label: 'Transcript' }] : []),
     { id: 'evidence', label: 'Evidence' },
   ];
 
@@ -2740,6 +2796,8 @@ export function FeedbackView() {
           },
           persons: [],
           evidence: [],
+          transcript: [],
+          utteranceEvidenceMap: {},
         };
       }
 
@@ -2761,6 +2819,8 @@ export function FeedbackView() {
         },
         persons: [],
         evidence: [],
+        transcript: [],
+        utteranceEvidenceMap: {},
       };
     }
 
@@ -2849,7 +2909,7 @@ export function FeedbackView() {
     }
   }, [sessionId, sessionData?.baseApiUrl, buildFinalizeMetadata]);
 
-  const handleRegenerate = useCallback(async () => {
+  const handleRegenerate = useCallback(async (mode: 'full' | 'report-only' = 'full') => {
     if (!sessionId || !sessionData?.baseApiUrl || finalizingRef.current) return;
     // Guard against double finalization via store flag
     const storeState = useSessionStore.getState();
@@ -2864,6 +2924,7 @@ export function FeedbackView() {
         baseUrl: sessionData.baseApiUrl,
         sessionId: sessionId!,
         metadata: buildFinalizeMetadata(),
+        mode,
       });
       // Polling will pick up the new report
     } catch {
@@ -2958,7 +3019,7 @@ export function FeedbackView() {
           <div className="max-w-5xl mx-auto px-6 pt-6 pb-4">
             <FeedbackHeader
               report={report}
-              onRegenerate={handleRegenerate}
+              onRegenerate={(mode) => handleRegenerate(mode || (apiReport?.captionSource === 'acs-teams' ? 'report-only' : 'full'))}
               onBack={() => navigate('/history')}
               statusLabel={statusLabel}
               statusVariant={statusVariant}
@@ -2966,6 +3027,7 @@ export function FeedbackView() {
               isEnhanced={finalizeStatus === 'tier2_ready'}
               sessionNotes={sessionNotes}
               sessionMemos={sessionMemos}
+              captionSource={apiReport?.captionSource}
             />
 
             {/* Draft / demo banner */}
@@ -3061,6 +3123,28 @@ export function FeedbackView() {
                 </motion.div>
               </section>
             ))}
+
+            {/* ── Transcript section ── */}
+            {report.transcript.length > 0 && (
+              <section id="transcript" data-section className="pb-4">
+                <SectionStickyHeader icon={ScrollText} title="Transcript" />
+                <motion.div variants={fadeInUp} custom={report.persons.length + 3}>
+                  <TranscriptSection
+                    transcript={report.transcript}
+                    evidenceMap={report.utteranceEvidenceMap}
+                    onEvidenceBadgeClick={(evId) => {
+                      const ev = report.evidence.find(e => e.id === evId);
+                      if (ev) {
+                        setHighlightEvidence(evId);
+                        setDetailEvidence(ev);
+                        setEvidenceModalMode('browse');
+                      }
+                    }}
+                    scrollToUtteranceId={null}
+                  />
+                </motion.div>
+              </section>
+            )}
 
             {/* ── Evidence section ── */}
             <section id="evidence" data-section className="pb-6">
