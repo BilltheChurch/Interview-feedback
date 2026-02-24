@@ -5043,6 +5043,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
           cache.overall_summary_cache = resultV2.overall;
           cache.evidence_index_cache = this.buildEvidenceIndex(resultV2.per_person);
           cache.quality = resultV2.quality;
+          cache.report_source = reportSource;
+          cache.blocking_reason = reportBlockingReason;
+          cache.quality_gate_passed = ACCEPTED_REPORT_SOURCES.has(reportSource)
+            && finalStrictValidation.needsEvidenceCount === 0;
+          cache.ready = cache.quality_gate_passed && !tentative;
           await this.storeFeedbackCache(cache);
 
           await this.updateFinalizeV2Status(jobId, {
