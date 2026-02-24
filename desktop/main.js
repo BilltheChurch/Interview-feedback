@@ -489,7 +489,10 @@ function registerIpcHandlers() {
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ metadata: payload.metadata || {} })
+        body: JSON.stringify({
+          metadata: payload.metadata || {},
+          mode: payload.mode || 'full'
+        })
       }
     );
     if (!response.ok) {
