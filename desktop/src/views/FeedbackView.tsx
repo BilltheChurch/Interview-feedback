@@ -47,10 +47,10 @@ import { Chip } from '../components/ui/Chip';
 import { EvidenceChip } from '../components/ui/EvidenceChip';
 import { ConfidenceBadge } from '../components/ui/ConfidenceBadge';
 import { Modal } from '../components/ui/Modal';
-import { Select } from '../components/ui/Select';
 import { TextArea } from '../components/ui/TextArea';
 import { FootnoteRef } from '../components/ui/FootnoteRef';
 import { FootnoteList, type FootnoteEntry } from '../components/ui/FootnoteList';
+import { InlineEvidenceCard } from '../components/ui/InlineEvidenceCard';
 import { useFootnotes } from '../hooks/useFootnotes';
 
 /* ─── Motion Variants ────────────────────────────────── */
@@ -1436,6 +1436,7 @@ function OverallCard({
 
   const narrativeEvidenceRefs = report.overall.teamSummaryEvidenceRefs ?? report.overall.evidence_refs;
   const { footnoteEntries: overallFootnotes, getFootnoteIndex: getOverallFootnoteIndex } = useFootnotes(narrativeEvidenceRefs, overallEvidenceMap);
+  const [expandedOverallRef, setExpandedOverallRef] = useState<string | null>(null);
 
   const hasNarrative = !!report.overall.teamSummaryNarrative;
 
@@ -1444,10 +1445,10 @@ function OverallCard({
       {/* Interview metadata header */}
       <div className="flex items-center gap-3 text-xs text-secondary mb-4">
         <span>{report.date}</span>
-        <span>\u00b7</span>
+        <span>·</span>
         <span>{report.durationLabel ?? formatDuration(report.duration_ms)}</span>
-        {report.interviewType && <><span>\u00b7</span><span>{report.interviewType}</span></>}
-        {report.positionTitle && <><span>\u00b7</span><span>\u76ee\u6807: {report.positionTitle}</span></>}
+        {report.interviewType && <><span>·</span><span>{report.interviewType}</span></>}
+        {report.positionTitle && <><span>·</span><span>目标: {report.positionTitle}</span></>}
       </div>
 
       <h2 className="text-sm font-semibold text-ink mb-3">Team Summary</h2>
@@ -1457,14 +1458,39 @@ function OverallCard({
         <div className="mb-4">
           <p className="text-sm text-ink-secondary leading-relaxed">
             {report.overall.teamSummaryNarrative}
-            {narrativeEvidenceRefs.map((refId) => (
-              <FootnoteRef
-                key={refId}
-                index={getOverallFootnoteIndex(refId)}
-                onClick={() => onFootnoteClick?.(refId)}
-              />
-            ))}
+            {narrativeEvidenceRefs.map((refId) => {
+              const idx = getOverallFootnoteIndex(refId);
+              if (idx === 0) return null;
+              return (
+                <FootnoteRef
+                  key={refId}
+                  index={idx}
+                  expanded={expandedOverallRef === refId}
+                  onClick={() => setExpandedOverallRef(expandedOverallRef === refId ? null : refId)}
+                />
+              );
+            })}
           </p>
+          <AnimatePresence>
+            {expandedOverallRef && (() => {
+              const evData = overallEvidenceMap.get(expandedOverallRef);
+              if (!evData) return null;
+              const startMs = evData.time_range_ms?.[0] ?? 0;
+              const minutes = Math.floor(startMs / 60000);
+              const seconds = Math.floor((startMs % 60000) / 1000);
+              const ts = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+              return (
+                <InlineEvidenceCard
+                  key={expandedOverallRef}
+                  quote={evData.quote ?? ''}
+                  speaker={evData.speaker?.display_name ?? '?'}
+                  timestamp={ts}
+                  confidence={0.8}
+                  onViewContext={() => onFootnoteClick?.(expandedOverallRef)}
+                />
+              );
+            })()}
+          </AnimatePresence>
           <FootnoteList entries={overallFootnotes} onFootnoteClick={onFootnoteClick} />
         </div>
       ) : (
@@ -1483,8 +1509,8 @@ function OverallCard({
               : finding.type === 'risk'
                 ? 'border-l-amber-400 bg-amber-50/50'
                 : 'border-l-blue-400 bg-blue-50/50';
-            const findingLabel = finding.type === 'strength' ? '\u4f18\u52bf'
-              : finding.type === 'risk' ? '\u98ce\u9669' : '\u89c2\u5bdf';
+            const findingLabel = finding.type === 'strength' ? '优势'
+              : finding.type === 'risk' ? '风险' : '观察';
             return (
               <div key={i} className={`border-l-4 ${findingColor} rounded-r-lg p-3`}>
                 <div className="flex items-center gap-2 mb-1">
@@ -1492,13 +1518,18 @@ function OverallCard({
                 </div>
                 <p className="text-sm text-ink leading-relaxed">
                   {finding.text}
-                  {(finding.evidence_refs ?? []).map((refId) => (
-                    <FootnoteRef
-                      key={refId}
-                      index={getOverallFootnoteIndex(refId)}
-                      onClick={() => onFootnoteClick?.(refId)}
-                    />
-                  ))}
+                  {(finding.evidence_refs ?? []).map((refId) => {
+                    const idx = getOverallFootnoteIndex(refId);
+                    if (idx === 0) return null;
+                    return (
+                      <FootnoteRef
+                        key={refId}
+                        index={idx}
+                        expanded={expandedOverallRef === refId}
+                        onClick={() => setExpandedOverallRef(expandedOverallRef === refId ? null : refId)}
+                      />
+                    );
+                  })}
                 </p>
               </div>
             );
@@ -1671,6 +1702,7 @@ function ClaimCard({
   onFootnoteClick?: (evidenceId: string) => void;
 }) {
   const hasFootnotes = !!getFootnoteIndex;
+  const [expandedRef, setExpandedRef] = useState<string | null>(null);
 
   return (
     <div
@@ -1679,13 +1711,18 @@ function ClaimCard({
       <div className="flex items-start gap-2 mb-2">
         <p className="text-sm text-ink flex-1 leading-relaxed">
           {claim.text}
-          {hasFootnotes && (claim.evidence_refs ?? []).map((refId) => (
-            <FootnoteRef
-              key={refId}
-              index={getFootnoteIndex(refId)}
-              onClick={() => onFootnoteClick?.(refId)}
-            />
-          ))}
+          {hasFootnotes && (claim.evidence_refs ?? []).map((refId) => {
+            const idx = getFootnoteIndex(refId);
+            if (idx === 0) return null;
+            return (
+              <FootnoteRef
+                key={refId}
+                index={idx}
+                expanded={expandedRef === refId}
+                onClick={() => setExpandedRef(expandedRef === refId ? null : refId)}
+              />
+            );
+          })}
         </p>
         <ConfidenceBadge score={claim.confidence} />
         <button
@@ -1697,6 +1734,23 @@ function ClaimCard({
           <Pencil className="w-3.5 h-3.5" />
         </button>
       </div>
+      {/* Inline evidence expansion */}
+      <AnimatePresence>
+        {expandedRef && (() => {
+          const ev = getEvidenceById(report, expandedRef);
+          if (!ev) return null;
+          return (
+            <InlineEvidenceCard
+              key={expandedRef}
+              quote={ev.text}
+              speaker={ev.speaker}
+              timestamp={formatTimestamp(ev.timestamp_ms)}
+              confidence={ev.confidence}
+              onViewContext={() => onFootnoteClick?.(expandedRef)}
+            />
+          );
+        })()}
+      </AnimatePresence>
       {/* Needs Evidence badge */}
       {claim.evidence_refs.length === 0 && (
         <div className="flex flex-wrap gap-1.5">
@@ -1889,192 +1943,6 @@ function PersonFeedbackCard({
   );
 }
 
-/* ─── EvidenceCard (tier-aware) ───────────────────────── */
-
-function EvidenceCard({ evidence, claimCount, dimensions, onTimestampClick, isHighlighted }: {
-  evidence: EvidenceRef & { source_tier?: number };
-  claimCount: number;
-  dimensions: string[];
-  onTimestampClick: (evidenceId: string) => void;
-  isHighlighted?: boolean;
-}) {
-  const tierConfig: Record<number, { color: string; label: string }> = {
-    1: { color: 'bg-emerald-50 border-emerald-200', label: '\u9762\u8bd5\u8005\u53d1\u8a00' },
-    2: { color: 'bg-blue-50 border-blue-200', label: '\u9762\u8bd5\u5b98\u89c2\u5bdf' },
-    3: { color: 'bg-gray-50 border-gray-200', label: '\u8f85\u52a9\u4f50\u8bc1' },
-  };
-  const tier = tierConfig[evidence.source_tier ?? 1] ?? tierConfig[1];
-
-  return (
-    <div className={`rounded-lg border p-3 ${tier.color} ${isHighlighted ? 'ring-2 ring-accent' : ''}`}>
-      <div className="flex items-center gap-2 text-xs text-secondary mb-1.5">
-        <span>{tier.label}</span>
-        {evidence.weak && <Chip variant="warning" className="text-xs">weak</Chip>}
-        <ConfidenceBadge score={evidence.confidence} />
-      </div>
-      <p className="text-sm text-ink leading-relaxed">&quot;{evidence.text}&quot;</p>
-      <div className="flex items-center gap-3 mt-2 text-xs text-secondary">
-        <span
-          className="cursor-pointer hover:text-accent"
-          onClick={() => onTimestampClick(evidence.id)}
-        >
-          {evidence.speaker} \u00b7 {formatTimestamp(evidence.timestamp_ms)}
-        </span>
-        <span>\u88ab\u5f15\u7528 {claimCount} \u6b21</span>
-        {dimensions.length > 0 && (
-          <span>\u5173\u8054: {dimensions.join(', ')}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─── EvidenceTimeline (redesigned with tier filter + EvidenceCard) ─── */
-
-function EvidenceTimeline({
-  report,
-  highlightEvidence,
-  onEvidenceClick,
-}: {
-  report: FeedbackReport;
-  highlightEvidence: string | null;
-  onEvidenceClick: (ev: EvidenceRef) => void;
-}) {
-  const [speakerFilter, setSpeakerFilter] = useState('');
-  const [tierFilter, setTierFilter] = useState<'all' | 1 | 2 | 3>('all');
-  const [showTier3, setShowTier3] = useState(false);
-  const [sortAsc, setSortAsc] = useState(true);
-  const [showAll, setShowAll] = useState(false);
-
-  const speakers = useMemo(() => {
-    const set = new Set(report.evidence.map((e) => e.speaker));
-    return Array.from(set).sort();
-  }, [report.evidence]);
-
-  // Build a map: evidenceId -> { claimCount, dimensions }
-  const evidenceMeta = useMemo(() => {
-    const meta = new Map<string, { claimCount: number; dimensions: string[] }>();
-    for (const ev of report.evidence) {
-      const claims = getClaimsForEvidence(report, ev.id);
-      const dims = new Set<string>();
-      for (const { claim } of claims) {
-        // Find which dimension this claim belongs to
-        for (const person of report.persons) {
-          for (const dim of person.dimensions) {
-            if (dim.claims.some(c => c.id === claim.id)) {
-              dims.add(dim.label_zh ?? dim.dimension);
-            }
-          }
-        }
-      }
-      meta.set(ev.id, { claimCount: claims.length, dimensions: Array.from(dims) });
-    }
-    return meta;
-  }, [report]);
-
-  const filtered = useMemo(() => {
-    let items = [...report.evidence] as Array<EvidenceRef & { source_tier?: number }>;
-    if (speakerFilter) {
-      items = items.filter((e) => e.speaker === speakerFilter);
-    }
-    // Tier filter: tier_3 is collapsed by default unless showTier3 is true
-    if (tierFilter === 'all') {
-      items = items.filter(e => ((e as any).source_tier !== 3) || showTier3);
-    } else {
-      items = items.filter(e => ((e as any).source_tier ?? 1) === tierFilter);
-    }
-    items.sort((a, b) =>
-      sortAsc ? a.timestamp_ms - b.timestamp_ms : b.timestamp_ms - a.timestamp_ms
-    );
-    return items;
-  }, [report.evidence, speakerFilter, tierFilter, showTier3, sortAsc]);
-
-  const speakerOptions = [
-    { value: '', label: 'All Speakers' },
-    ...speakers.map((s) => ({ value: s, label: s })),
-  ];
-
-  const INITIAL_SHOW = 10;
-  const displayItems = showAll ? filtered : filtered.slice(0, INITIAL_SHOW);
-  const hasMore = filtered.length > INITIAL_SHOW && !showAll;
-
-  // Check if any evidence has tier 3
-  const hasTier3 = report.evidence.some(e => (e as any).source_tier === 3);
-
-  return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <h3 className="text-base font-semibold text-ink">Evidence Timeline</h3>
-        <div className="flex items-center gap-2 flex-wrap">
-          <Select
-            options={speakerOptions}
-            value={speakerFilter}
-            onChange={(e) => setSpeakerFilter(e.target.value)}
-            className="w-40"
-          />
-          {/* Tier filter buttons */}
-          <div className="flex items-center gap-0.5 border border-border rounded-lg p-0.5">
-            {([['all', '\u5168\u90e8'], [1, 'T1'], [2, 'T2'], [3, 'T3']] as const).map(([val, label]) => (
-              <button
-                key={String(val)}
-                onClick={() => {
-                  if (val === 3 && tierFilter !== 3) setShowTier3(true);
-                  setTierFilter(val as 'all' | 1 | 2 | 3);
-                }}
-                className={`px-2 py-1 text-xs rounded-md transition-colors cursor-pointer ${
-                  tierFilter === val
-                    ? 'bg-accent text-white'
-                    : 'text-ink-secondary hover:bg-surface-hover'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setSortAsc((v) => !v)}
-          >
-            {sortAsc ? 'Oldest first' : 'Newest first'}
-          </Button>
-        </div>
-      </div>
-      <div className="space-y-2">
-        {displayItems.map((ev) => {
-          const meta = evidenceMeta.get(ev.id) ?? { claimCount: 0, dimensions: [] };
-          return (
-            <div key={ev.id} onClick={() => onEvidenceClick(ev)} className="cursor-pointer">
-              <EvidenceCard
-                evidence={ev}
-                claimCount={meta.claimCount}
-                dimensions={meta.dimensions}
-                onTimestampClick={(id) => {
-                  const evObj = report.evidence.find(e => e.id === id);
-                  if (evObj) onEvidenceClick(evObj);
-                }}
-                isHighlighted={highlightEvidence === ev.id}
-              />
-            </div>
-          );
-        })}
-      </div>
-      {/* Show more / Tier 3 toggle */}
-      <div className="flex items-center gap-3 mt-3">
-        {hasMore && (
-          <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
-            \u663e\u793a\u66f4\u591a ({filtered.length - INITIAL_SHOW} \u6761)
-          </Button>
-        )}
-        {hasTier3 && tierFilter === 'all' && !showTier3 && (
-          <Button variant="ghost" size="sm" onClick={() => setShowTier3(true)}>
-            \u663e\u793a\u8f85\u52a9\u4f50\u8bc1 (Tier 3)
-          </Button>
-        )}
-      </div>
-    </Card>
-  );
-}
 
 function EvidenceDetailModal({
   open,
@@ -2687,7 +2555,6 @@ function SectionNav({
     { id: 'notes', label: 'Session Notes' },
     ...report.persons.map((p) => ({ id: `person-${p.speaker_id}`, label: p.person_name })),
     ...(report.transcript.length > 0 ? [{ id: 'transcript', label: 'Transcript' }] : []),
-    { id: 'evidence', label: 'Evidence' },
   ];
 
   return (
@@ -2758,7 +2625,7 @@ function DimensionSummaryRow({
               {typeof dim.score === 'number' ? dim.score.toFixed(1) : dim.score}
             </span>
           )}
-          {dim.not_applicable && <span className="text-xs text-secondary/50">\u4e0d\u9002\u7528</span>}
+          {dim.not_applicable && <span className="text-xs text-secondary/50">不适用</span>}
         </div>
         <span className="text-xs text-ink-tertiary">
           {strengthCount > 0 && <span className="text-success">{strengthCount}S</span>}
@@ -3163,7 +3030,6 @@ export function FeedbackView() {
   const [editClaim, setEditClaim] = useState<Claim | null>(null);
   const [detailEvidence, setDetailEvidence] = useState<EvidenceRef | null>(null);
   const [evidenceModalMode, setEvidenceModalMode] = useState<'browse' | 'claim-editor'>('browse');
-  const [highlightEvidence, setHighlightEvidence] = useState<string | null>(null);
 
   // Suggestion banner state
   const [dismissedSuggestions, setDismissedSuggestions] = useState(false);
@@ -3380,11 +3246,6 @@ export function FeedbackView() {
     }
   }, [sessionId, sessionData?.baseApiUrl, buildFinalizeMetadata]);
 
-  const handleTimelineEvidenceClick = (ev: EvidenceRef) => {
-    setHighlightEvidence(ev.id);
-    setDetailEvidence(ev);
-    setEvidenceModalMode('browse');
-  };
 
   // Section navigation + scroll-spy
   const [activeSection, setActiveSection] = useState('overview');
@@ -3636,7 +3497,6 @@ export function FeedbackView() {
                     onEvidenceBadgeClick={(evId) => {
                       const ev = report.evidence.find(e => e.id === evId);
                       if (ev) {
-                        setHighlightEvidence(evId);
                         setDetailEvidence(ev);
                         setEvidenceModalMode('browse');
                       }
@@ -3647,17 +3507,6 @@ export function FeedbackView() {
               </section>
             )}
 
-            {/* ── Evidence section ── */}
-            <section id="evidence" data-section className="pb-6">
-              <SectionStickyHeader icon={MessageSquare} title="Evidence Timeline" />
-              <motion.div variants={fadeInUp} custom={report.persons.length + 3}>
-                <EvidenceTimeline
-                  report={report}
-                  highlightEvidence={highlightEvidence}
-                  onEvidenceClick={handleTimelineEvidenceClick}
-                />
-              </motion.div>
-            </section>
           </motion.div>
         </div>
         </div>
@@ -3682,7 +3531,6 @@ export function FeedbackView() {
                 onEvidenceBadgeClick={(evId) => {
                   const ev = report.evidence.find(e => e.id === evId);
                   if (ev) {
-                    setHighlightEvidence(evId);
                     setDetailEvidence(ev);
                     setEvidenceModalMode('browse');
                   }
@@ -3714,7 +3562,6 @@ export function FeedbackView() {
         open={detailEvidence !== null}
         onClose={() => {
           setDetailEvidence(null);
-          setHighlightEvidence(null);
         }}
         evidence={detailEvidence}
         report={report}

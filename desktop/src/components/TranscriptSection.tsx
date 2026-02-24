@@ -234,16 +234,14 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                     {group.speaker}
                   </span>
                   {group.hasEvidence && (
-                    <div className="flex gap-1 ml-auto">
-                      {[...new Set(group.evidenceIds)].slice(0, 3).map(eid => (
-                        <button
-                          key={eid}
-                          onClick={() => onEvidenceBadgeClick?.(eid)}
-                          className="px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent rounded cursor-pointer hover:bg-accent/20 transition-colors"
-                        >
-                          {eid.slice(0, 6)}
-                        </button>
-                      ))}
+                    <div className="flex gap-1 ml-auto items-center">
+                      <button
+                        onClick={() => onEvidenceBadgeClick?.([...new Set(group.evidenceIds)][0])}
+                        className="px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent rounded cursor-pointer hover:bg-accent/20 transition-colors"
+                        title={`${[...new Set(group.evidenceIds)].length} 条证据引用`}
+                      >
+                        {[...new Set(group.evidenceIds)].length} 引用
+                      </button>
                     </div>
                   )}
                 </div>
