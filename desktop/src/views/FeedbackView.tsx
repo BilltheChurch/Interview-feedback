@@ -2469,6 +2469,7 @@ export function FeedbackView() {
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(!isDemo && !!sessionData?.baseApiUrl);
   const [tier2Progress, setTier2Progress] = useState(0);
+  const [finalizeProgressInfo, setFinalizeProgressInfo] = useState<{ stage: string; progress: number } | null>(null);
   // Guard against double finalization (orchestrator setTimeout + FeedbackView retry)
   const finalizingRef = useRef(false);
   const tier2PollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -2496,16 +2497,25 @@ export function FeedbackView() {
 
     async function tryLoadReport() {
       try {
-        // First check finalization status — detect 'failed' early
+        // First check finalization status — detect 'failed' or 'running' early
         const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! });
         if (!cancelled && status && typeof status === 'object') {
-          if ((status as any).status === 'failed') {
+          const backendStatus = (status as any).status;
+          if (backendStatus === 'failed') {
             const errors = (status as any).errors;
             const msg = Array.isArray(errors) && errors.length > 0
               ? errors.join('; ')
               : 'Finalization failed on the server.';
             setFinalizeError(msg);
             setFinalizeStatus('error');
+            return;
+          }
+          // If finalization is still running, skip openFeedback — the poll
+          // loop will pick it up once finalization completes. Calling
+          // openFeedback while finalizeV2 is in progress can trigger a stale
+          // cache rebuild that produces a broken report in caption mode.
+          if (backendStatus === 'running' || backendStatus === 'queued') {
+            setFinalizeStatus('awaiting');
             return;
           }
         }
@@ -2555,7 +2565,7 @@ export function FeedbackView() {
     const baseUrl = sessionData.baseApiUrl;
     // Set poll start time once when this effect mounts
     pollStartedAtRef.current = Date.now();
-    const POLL_TIMEOUT_MS = 180_000;
+    const POLL_TIMEOUT_MS = 600_000; // 10 min — local_asr can take 10+ min for long sessions
 
     // Declare interval before poll so the closure can clear it
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -2565,7 +2575,7 @@ export function FeedbackView() {
       if (Date.now() - pollStartedAtRef.current > POLL_TIMEOUT_MS) {
         if (interval) clearInterval(interval);
         if (!cancelled) {
-          setFinalizeError('Finalization timed out after 3 minutes. The server may still be processing.');
+          setFinalizeError('Finalization timed out after 10 minutes. The server may still be processing — try refreshing from History.');
           setFinalizeStatus('error');
         }
         return;
@@ -2577,6 +2587,12 @@ export function FeedbackView() {
 
         if (status && typeof status === 'object') {
           const backendStatus = (status as any).status;
+          // Surface progress info from Worker so user sees what stage we're at
+          const stage = (status as any).stage as string | undefined;
+          const progress = (status as any).progress as number | undefined;
+          if (stage && typeof progress === 'number') {
+            setFinalizeProgressInfo({ stage, progress });
+          }
 
           if (backendStatus === 'failed') {
             // Backend explicitly says finalization failed — stop polling immediately
@@ -3101,9 +3117,25 @@ export function FeedbackView() {
                   <p className="text-sm text-ink-secondary">
                     Generating feedback report...
                   </p>
-                  <p className="text-xs text-ink-tertiary mt-1">
-                    This may take up to a minute. The page will update automatically.
-                  </p>
+                  {finalizeProgressInfo ? (
+                    <div className="mt-2">
+                      <div className="w-48 h-1.5 bg-border rounded-full mx-auto overflow-hidden">
+                        <div className="h-full bg-accent rounded-full transition-all duration-500" style={{ width: `${Math.min(finalizeProgressInfo.progress, 100)}%` }} />
+                      </div>
+                      <p className="text-xs text-ink-tertiary mt-1.5">
+                        {finalizeProgressInfo.stage === 'local_asr' ? 'Transcribing audio' :
+                         finalizeProgressInfo.stage === 'cluster' ? 'Identifying speakers' :
+                         finalizeProgressInfo.stage === 'reconcile' ? 'Reconciling transcript' :
+                         finalizeProgressInfo.stage === 'report' ? 'Generating analysis' :
+                         finalizeProgressInfo.stage === 'persist' ? 'Saving results' :
+                         finalizeProgressInfo.stage}... {finalizeProgressInfo.progress}%
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-ink-tertiary mt-1">
+                      This may take a few minutes. The page will update automatically.
+                    </p>
+                  )}
                 </Card>
               </motion.div>
             )}

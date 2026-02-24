@@ -620,6 +620,7 @@ const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
 const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
 const STORAGE_KEY_FEEDBACK_CACHE = "feedback_cache";
 const STORAGE_KEY_DEPENDENCY_HEALTH = "dependency_health";
+const STORAGE_KEY_CAPTION_SOURCE = "caption_source";
 
 const STORAGE_KEY_INGEST_STATE = "ingest_state";
 const STORAGE_KEY_ASR_STATE = "asr_state";
@@ -2636,6 +2637,31 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const nowMs = Date.now();
     const updatedMs = Date.parse(current.updated_at);
     if (!force && Number.isFinite(updatedMs) && nowMs - updatedMs < FEEDBACK_REFRESH_INTERVAL_MS) {
+      return current;
+    }
+
+    // ── Guard: do not rebuild cache while finalizeV2 is actively running ──
+    // maybeRefreshFeedbackCache uses an audio-only transcript path that is
+    // unaware of caption mode.  If finalizeV2 is in progress it will build
+    // the definitive caption-aware cache; rebuilding here with empty audio
+    // data would produce a broken cache that overwrites the correct one.
+    const v2Status = await this.loadFinalizeV2Status();
+    if (v2Status && (v2Status.status === "running" || v2Status.status === "queued")) {
+      return current;
+    }
+
+    // Rehydrate captionSource from DO storage (survives DO eviction)
+    if (this.captionSource === "none") {
+      const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
+      if (persisted === "acs-teams") this.captionSource = persisted;
+    }
+
+    // ── Guard: skip audio-only rebuild when caption-mode finalizeV2 has NOT
+    // yet completed ── captionBuffer lives in memory only; the audio-only
+    // path here would produce an empty transcript.  Once finalizeV2 has
+    // finished (succeeded or failed), its cache is stored to DO storage and
+    // loadFeedbackCache will return it — no rebuild needed, no guard needed.
+    if (this.captionSource === "acs-teams" && v2Status && v2Status.status !== "succeeded" && v2Status.status !== "failed") {
       return current;
     }
 
@@ -4714,6 +4740,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
     let finalizeBackendUsed: FinalizeV2Status["backend_used"] = "primary";
     let finalizeDegraded = false;
 
+    // Rehydrate captionSource from DO storage in case DO was evicted
+    if (this.captionSource === "none") {
+      const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
+      if (persisted === "acs-teams") this.captionSource = persisted;
+    }
+
     const startedAt = this.currentIsoTs();
     await this.updateFinalizeV2Status(jobId, {
       status: "running",
@@ -5090,6 +5122,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           const diagIngest = await this.loadIngestByStream(sessionId);
           const diagAsr = await this.loadAsrByStream();
           console.log(`[finalize-v2] local-whisper pre-check: teacher.last_seq=${diagIngest.teacher.last_seq} students.last_seq=${diagIngest.students.last_seq} asr_enabled=${diagAsr.students.enabled} window_seconds=${diagAsr.students.window_seconds}`);
+          console.log(`[finalize-v2] ASR_PROVIDER=${this.env.ASR_PROVIDER} localWhisperProvider=${!!this.localWhisperProvider} getAsrProvider=${this.getAsrProvider()}`);
 
           // Process each stream sequentially, in small batches (BATCH_SIZE windows)
           // with heartbeat updates between batches. This prevents the DO from being
@@ -5337,7 +5370,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
         speakerLogsStored = speakerLogsLoaded;
         asrByStream = asrByStreamLoaded;
         locale = getSessionLocale(state, this.env);
-        diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
+        // When caption source is set to acs-teams (even if buffer is empty due to
+        // ACS join failure), force cloud diarization — edge diarization requires
+        // edge speaker-logs which are not collected in caption mode.
+        diarizationBackend = this.captionSource === 'acs-teams'
+          ? "cloud"
+          : (state.config?.diarization_backend === "edge" ? "edge" : "cloud");
 
         const cutoffUtterances = [...rawByStream.teacher, ...rawByStream.students]
           .filter((item) => item.end_seq <= cutoff[item.stream_role]);
@@ -5392,13 +5430,23 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
         const hasStudentTranscript = transcript.some((item) => item.stream_role === "students");
         if (diarizationBackend === "edge") {
-          if (hasStudentTranscript && speakerLogsStored.source !== "edge") {
-            throw new Error("diarization_backend=edge requires edge speaker-logs source");
+          const edgeLogsUsable = !hasStudentTranscript
+            || (speakerLogsStored.source === "edge" && speakerLogsStored.turns.length > 0);
+          if (edgeLogsUsable) {
+            speakerLogs = this.buildEdgeSpeakerLogsForFinalize(this.currentIsoTs(), speakerLogsStored, state);
+          } else {
+            // Fallback to cloud diarization when edge speaker-logs are unavailable
+            finalizeWarnings.push(`diarization fallback: edge speaker-logs unavailable (source=${speakerLogsStored.source}, turns=${speakerLogsStored.turns.length}), using cloud`);
+            diarizationBackend = "cloud";
+            const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
+            speakerLogs = this.deriveSpeakerLogsFromTranscript(
+              this.currentIsoTs(),
+              transcript,
+              state,
+              cloudBase,
+              "cloud"
+            );
           }
-          if (hasStudentTranscript && speakerLogsStored.turns.length === 0) {
-            throw new Error("diarization_backend=edge requires non-empty edge speaker-logs turns");
-          }
-          speakerLogs = this.buildEdgeSpeakerLogsForFinalize(this.currentIsoTs(), speakerLogsStored, state);
         } else {
           const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
           speakerLogs = this.deriveSpeakerLogsFromTranscript(
@@ -7036,6 +7084,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         cache.blocking_reason ??
         (withinBudget ? null : `feedback-open exceeded budget: opened_in_ms=${elapsedMs} target<=${FEEDBACK_TOTAL_BUDGET_MS}`);
       const isReady = (cache.ready ?? false) && withinBudget && ACCEPTED_REPORT_SOURCES.has(cache.report_source ?? "");
+      // Even when quality gate fails, still return the report if it comes from
+      // an accepted LLM source — frontend can display it as degraded/draft
+      const hasAcceptedSource = ACCEPTED_REPORT_SOURCES.has(cache.report_source ?? "");
+      const shouldReturnReport = isReady || hasAcceptedSource;
       return jsonResponse({
         session_id: sessionId,
         ready: isReady,
@@ -7047,7 +7099,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         report_source: cache.report_source,
         blocking_reason: isReady ? null : openBlockingReason,
         quality_gate_passed: cache.quality_gate_passed,
-        report: isReady ? cache.report : null
+        report: shouldReturnReport ? cache.report : null
       });
     }
 
