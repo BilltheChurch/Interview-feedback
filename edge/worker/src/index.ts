@@ -2655,12 +2655,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
       if (persisted === "acs-teams") this.captionSource = persisted;
     }
 
-    // ── Guard: skip audio-only rebuild when caption-mode finalizeV2 has NOT
-    // yet completed ── captionBuffer lives in memory only; the audio-only
-    // path here would produce an empty transcript.  Once finalizeV2 has
-    // finished (succeeded or failed), its cache is stored to DO storage and
-    // loadFeedbackCache will return it — no rebuild needed, no guard needed.
-    if (this.captionSource === "acs-teams" && v2Status && v2Status.status !== "succeeded" && v2Status.status !== "failed") {
+    // ── Guard: caption-mode sessions must NEVER use the audio-only rebuild
+    // path below.  The audio-only transcript builder (buildTranscriptForFeedback)
+    // is unaware of captionBuffer and will produce an empty transcript that
+    // overwrites the correct cache stored by finalizeV2.
+    //
+    // • finalize running/queued → return current (wait for it to finish)
+    // • finalize succeeded/failed → return current (cache already has the result)
+    // • finalize never started (idle) → return current (nothing to rebuild from)
+    if (this.captionSource === "acs-teams") {
       return current;
     }
 
