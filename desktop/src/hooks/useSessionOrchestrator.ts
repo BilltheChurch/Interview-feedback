@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSessionStore } from '../stores/sessionStore';
-import type { SessionConfig } from '../stores/sessionStore';
+import type { SessionConfig, PersistedSession, AcsStatus } from '../stores/sessionStore';
 import { audioService } from '../services/AudioService';
 import { wsService } from '../services/WebSocketService';
 import { timerService } from '../services/TimerService';
@@ -69,18 +69,45 @@ export function useSessionOrchestrator() {
 
     // ── ACS Caption Integration ──
     const isTeamsMeeting = config.teamsJoinUrl?.includes('teams.microsoft.com');
+    console.log('[Orchestrator] Teams meeting check:', { isTeamsMeeting, teamsJoinUrl: config.teamsJoinUrl });
     if (isTeamsMeeting) {
       try {
         const acsEnabled = await window.desktopAPI.acsGetEnabled();
+        console.log('[Orchestrator] ACS enabled:', acsEnabled);
         if (acsEnabled) {
           const acsResult = await window.desktopAPI.acsGetToken();
+          console.log('[Orchestrator] ACS token result:', { ok: acsResult.ok, hasToken: !!acsResult.token, error: acsResult.error });
           if (acsResult.ok && acsResult.token) {
+            console.log('[Orchestrator] Connecting ACS caption service...');
+            // Map CaptionStatus → AcsStatus for the store
+            const mapStatus = (s: string): AcsStatus => {
+              if (s === 'connecting') return 'connecting';
+              if (s === 'connected') return 'connected';
+              if (s === 'error') return 'error';
+              return 'off';
+            };
+            useSessionStore.getState().setAcsStatus('connecting');
             await acsCaptionService.connect(
               config.teamsJoinUrl!,
               acsResult.token,
               (caption) => {
                 // Forward caption to Worker via existing WebSocket (teacher channel)
                 const ws = wsService.getSocket('teacher');
+                // Mark as 'receiving' on first caption arrival
+                const store = useSessionStore.getState();
+                if (store.acsStatus === 'connected') {
+                  store.setAcsStatus('receiving');
+                }
+                store.incrementAcsCaptionCount();
+                // Store Final captions locally for UI display
+                if (caption.resultType === 'Final') {
+                  store.addCaption({
+                    speaker: caption.speaker,
+                    text: caption.text,
+                    timestamp: caption.timestamp,
+                    language: caption.language,
+                  });
+                }
                 if (ws && ws.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({
                     type: 'caption',
@@ -91,19 +118,37 @@ export function useSessionOrchestrator() {
                     resultType: caption.resultType,
                     teamsUserId: caption.teamsUserId,
                   }));
+                } else {
+                  console.warn('[Orchestrator] Caption dropped: teacher WS not open', {
+                    hasWs: !!ws,
+                    readyState: ws?.readyState,
+                    speaker: caption.speaker,
+                    text: caption.text?.slice(0, 40),
+                  });
                 }
               },
+              undefined, // displayName — use default
+              (captionStatus) => {
+                useSessionStore.getState().setAcsStatus(mapStatus(captionStatus));
+              },
             );
+            console.log('[Orchestrator] ACS caption connected successfully');
             // Notify Worker to switch to caption mode
             const teacherWs = wsService.getSocket('teacher');
             if (teacherWs && teacherWs.readyState === WebSocket.OPEN) {
               teacherWs.send(JSON.stringify({ type: 'session_config', captionSource: 'acs-teams' }));
+              console.log('[Orchestrator] Sent session_config captionSource=acs-teams to Worker');
+            } else {
+              console.error('[Orchestrator] FAILED to send session_config: teacher WS not open', {
+                hasWs: !!teacherWs,
+                readyState: teacherWs?.readyState,
+              });
             }
           }
         }
-      } catch {
+      } catch (acsErr) {
         // ACS connection is non-fatal; falls back to audio ASR
-        console.warn('[Orchestrator] ACS caption connection failed, using audio ASR');
+        console.error('[Orchestrator] ACS caption connection failed:', acsErr);
       }
     }
   };
@@ -147,6 +192,7 @@ export function useSessionOrchestrator() {
     if (acsStatus === 'connected' || acsStatus === 'connecting') {
       acsCaptionService.disconnect().catch(() => {});
     }
+    useSessionStore.getState().setAcsStatus('off');
 
     timerService.stop();
     wsService.disconnect();
@@ -223,5 +269,124 @@ export function useSessionOrchestrator() {
     }
   };
 
-  return { start, end };
+  const resume = async (persisted: PersistedSession) => {
+    // Restore store state first (synchronous — UI updates immediately)
+    const store = useSessionStore.getState();
+    store.restoreSession(persisted);
+
+    // Navigate to session view with location state matching what SetupView passes
+    navigate('/session', {
+      state: {
+        sessionId: persisted.sessionId,
+        sessionName: persisted.sessionName,
+        mode: persisted.mode,
+        participants: persisted.participants.map(p => p.name),
+        stages: persisted.stages,
+        teamsUrl: persisted.teamsJoinUrl,
+      },
+    });
+
+    // Wait one frame for the route to mount before starting services
+    await new Promise(resolve => requestAnimationFrame(resolve));
+
+    // Restart timer — it will continue from the restored elapsedSeconds
+    timerService.start();
+
+    // Re-init audio capture (mic + system)
+    try {
+      await audioService.initMic();
+    } catch {
+      // Non-fatal in dev mode
+    }
+    try {
+      await audioService.initSystem();
+    } catch {
+      // System audio is non-fatal
+    }
+    audioService.startCapture();
+
+    // Reconnect WebSocket to resume streaming
+    try {
+      await wsService.connect({
+        baseWsUrl: persisted.baseApiUrl.replace(/^http/, 'ws'),
+        sessionId: persisted.sessionId,
+        interviewerName: persisted.interviewerName,
+        teamsInterviewerName: persisted.teamsInterviewerName,
+        participants: persisted.participants,
+      });
+    } catch {
+      // WS connect may fail; non-fatal for session UI
+    }
+
+    // Re-connect ACS caption service if this was a Teams meeting
+    const isTeamsMeeting = persisted.teamsJoinUrl?.includes('teams.microsoft.com');
+    if (isTeamsMeeting) {
+      try {
+        const acsEnabled = await window.desktopAPI.acsGetEnabled();
+        if (acsEnabled) {
+          const acsResult = await window.desktopAPI.acsGetToken();
+          if (acsResult.ok && acsResult.token) {
+            const mapStatus = (s: string): AcsStatus => {
+              if (s === 'connecting') return 'connecting';
+              if (s === 'connected') return 'connected';
+              if (s === 'error') return 'error';
+              return 'off';
+            };
+            useSessionStore.getState().setAcsStatus('connecting');
+            await acsCaptionService.connect(
+              persisted.teamsJoinUrl,
+              acsResult.token,
+              (caption) => {
+                const ws = wsService.getSocket('teacher');
+                const store = useSessionStore.getState();
+                if (store.acsStatus === 'connected') {
+                  store.setAcsStatus('receiving');
+                }
+                store.incrementAcsCaptionCount();
+                // Store Final captions locally for UI display
+                if (caption.resultType === 'Final') {
+                  store.addCaption({
+                    speaker: caption.speaker,
+                    text: caption.text,
+                    timestamp: caption.timestamp,
+                    language: caption.language,
+                  });
+                }
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({
+                    type: 'caption',
+                    speaker: caption.speaker,
+                    text: caption.text,
+                    language: caption.language,
+                    timestamp: caption.timestamp,
+                    resultType: caption.resultType,
+                    teamsUserId: caption.teamsUserId,
+                  }));
+                } else {
+                  console.warn('[Orchestrator] Resume caption dropped: teacher WS not open');
+                }
+              },
+              undefined,
+              (captionStatus) => {
+                useSessionStore.getState().setAcsStatus(mapStatus(captionStatus));
+              },
+            );
+            const teacherWs = wsService.getSocket('teacher');
+            if (teacherWs && teacherWs.readyState === WebSocket.OPEN) {
+              teacherWs.send(JSON.stringify({ type: 'session_config', captionSource: 'acs-teams' }));
+              console.log('[Orchestrator] Resume: sent session_config captionSource=acs-teams');
+            } else {
+              console.error('[Orchestrator] Resume: FAILED to send session_config, WS not open');
+            }
+          }
+        }
+      } catch {
+        // ACS reconnection is non-fatal
+      }
+    }
+
+    console.log('[Orchestrator] Session resumed:', persisted.sessionId);
+  };
+
+  return { start, end, resume };
 }
