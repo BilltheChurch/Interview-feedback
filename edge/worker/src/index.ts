@@ -631,6 +631,8 @@ const STORAGE_KEY_UTTERANCES_RAW_BY_STREAM = "utterances_raw_by_stream";
 const STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM = "utterances_merged_by_stream";
 const STORAGE_KEY_CHECKPOINTS = "checkpoints";
 const STORAGE_KEY_LAST_CHECKPOINT_AT = "last_checkpoint_at";
+const STORAGE_KEY_CAPTION_SOURCE = "caption_source";
+const STORAGE_KEY_CAPTION_BUFFER = "caption_buffer";
 
 const TARGET_FORMAT = "pcm_s16le";
 const INFERENCE_MAX_AUDIO_SECONDS = 30;
@@ -1626,6 +1628,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
   readonly embeddingCache: EmbeddingCache = new EmbeddingCache();
   /** Buffer for ACS Teams caption events. */
   private captionBuffer: CaptionEvent[] = [];
+  private captionFlushPending = 0;        // count of un-flushed captions
+  private captionFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly CAPTION_FLUSH_BATCH = 10;
+  private readonly CAPTION_FLUSH_INTERVAL_MS = 5_000;
+  private readonly CAPTION_BUFFER_MAX = 2000;
   /** Caption data source for this session. */
   private captionSource: CaptionSource = 'none';
   /** Session start time in epoch ms, set on first "hello". 0 = not yet initialized.
@@ -1635,6 +1642,36 @@ export class MeetingSessionDO extends DurableObject<Env> {
   /** Get the caption buffer for finalization. */
   getCaptionBuffer(): CaptionEvent[] {
     return this.captionBuffer;
+  }
+
+  /** Flush captionBuffer to DO storage (batched: 10 items or 5s, whichever first). */
+  private flushCaptionBuffer(): void {
+    if (this.captionFlushTimer) {
+      clearTimeout(this.captionFlushTimer);
+      this.captionFlushTimer = null;
+    }
+    const toStore = this.captionBuffer.length > this.CAPTION_BUFFER_MAX
+      ? this.captionBuffer.slice(-this.CAPTION_BUFFER_MAX)
+      : this.captionBuffer;
+    this.ctx.storage.put(STORAGE_KEY_CAPTION_BUFFER, toStore).catch((err) => {
+      console.warn(`[caption-persist] flush failed: ${(err as Error).message}`);
+    });
+    this.captionFlushPending = 0;
+  }
+
+  /** Schedule a batched flush: immediately if batch size reached, else after interval. */
+  private scheduleCaptionFlush(): void {
+    this.captionFlushPending++;
+    if (this.captionFlushPending >= this.CAPTION_FLUSH_BATCH) {
+      this.flushCaptionBuffer();
+      return;
+    }
+    if (!this.captionFlushTimer) {
+      this.captionFlushTimer = setTimeout(() => {
+        this.captionFlushTimer = null;
+        this.flushCaptionBuffer();
+      }, this.CAPTION_FLUSH_INTERVAL_MS);
+    }
   }
 
   /** Get the current caption source mode. */
@@ -4669,7 +4706,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
   private async runFinalizeV2Job(
     sessionId: string,
     jobId: string,
-    metadata: Record<string, unknown>
+    metadata: Record<string, unknown>,
+    mode: 'full' | 'report-only' = 'full'
   ): Promise<void> {
     const finalizeWarnings: string[] = [];
     const backendTimeline: InferenceBackendTimelineItem[] = [];
@@ -4697,6 +4735,304 @@ export class MeetingSessionDO extends DurableObject<Env> {
         teacher: ingestByStream.teacher.last_seq,
         students: ingestByStream.students.last_seq
       };
+
+      // Rehydrate captionSource from DO storage if still default (DO was evicted)
+      if (this.captionSource === "none") {
+        const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
+        if (persisted === "acs-teams") this.captionSource = persisted;
+      }
+      // Rehydrate captionBuffer from DO storage if empty (DO was evicted or re-generate)
+      if (this.captionSource === "acs-teams" && this.captionBuffer.length === 0) {
+        const stored = await this.ctx.storage.get<CaptionEvent[]>(STORAGE_KEY_CAPTION_BUFFER);
+        if (Array.isArray(stored) && stored.length > 0) {
+          this.captionBuffer = stored;
+          console.log(`[finalize-v2] restored ${stored.length} captions from DO storage`);
+        }
+      }
+
+      // ── report-only mode: skip audio stages, reload existing transcript from R2 ──
+      if (mode === 'report-only') {
+        await this.updateFinalizeV2Status(jobId, {
+          status: "running",
+          stage: "reconcile",
+          progress: 42,
+          started_at: startedAt,
+          warnings: [],
+          degraded: false,
+          backend_used: "primary"
+        });
+        await this.setFinalizeLock(true);
+
+        try {
+          // Load existing ResultV2 from R2
+          const existingKey = resultObjectKeyV2(sessionId);
+          const existingObj = await this.env.RESULT_BUCKET.get(existingKey);
+          if (!existingObj) {
+            throw new Error("report-only: no existing ResultV2 in R2");
+          }
+          const existingResult = JSON.parse(await existingObj.text()) as ResultV2;
+
+          // Extract previously computed data
+          const transcript = existingResult.transcript;
+          const speakerLogs = existingResult.speaker_logs;
+          const stats = existingResult.stats;
+          const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+          const memos = await this.loadMemos();
+          const locale = getSessionLocale(state, this.env);
+
+          // Merge any new metadata memos
+          if (Array.isArray((metadata as Record<string, unknown>)?.memos)) {
+            const incomingMemos = (metadata as Record<string, unknown>).memos as Array<Record<string, unknown>>;
+            const existingIds = new Set(memos.map((m) => m.memo_id));
+            for (const raw of incomingMemos) {
+              const memoId = typeof raw.memo_id === "string" ? raw.memo_id : `m_meta_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+              if (existingIds.has(memoId)) continue;
+              memos.push({
+                memo_id: memoId,
+                created_at_ms: typeof raw.created_at_ms === "number" ? raw.created_at_ms : Date.now(),
+                author_role: "teacher",
+                type: (["observation", "evidence", "question", "decision", "score"].includes(raw.type as string) ? raw.type : "observation") as MemoItem["type"],
+                tags: Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === "string") : [],
+                text: typeof raw.text === "string" ? raw.text : "",
+                stage: typeof raw.stage === "string" ? raw.stage : undefined,
+                stage_index: typeof raw.stage_index === "number" ? raw.stage_index : undefined,
+              });
+              existingIds.add(memoId);
+            }
+            await this.storeMemos(memos);
+          }
+
+          // Re-run events → report → persist (reuse transcript + stats)
+          // Jump to events stage
+          await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 55 });
+          await this.ensureFinalizeJobActive(jobId);
+
+          const knownSpeakers = stats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
+          const memoBindings = extractMemoNames(memos, knownSpeakers);
+          const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
+          const enrichedMemos = addStageMetadata(memos, configStages);
+          let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
+          const enrichedEvidence = enrichEvidencePack(transcript, stats);
+          evidence = [...evidence, ...enrichedEvidence];
+
+          const legacyEvidence = buildEvidence({ memos, transcript });
+          const memosWithEvidence = attachEvidenceToMemos(memos, legacyEvidence);
+
+          const eventsPayload = {
+            session_id: sessionId,
+            transcript,
+            memos: memosWithEvidence,
+            stats,
+            locale
+          };
+          const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
+          const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
+          if (eventsResult.warnings.length > 0) finalizeWarnings.push(...eventsResult.warnings);
+          if (eventsResult.degraded) finalizeDegraded = true;
+          finalizeBackendUsed = eventsResult.backend_used === "local" ? "local" : eventsResult.backend_used;
+
+          // Report stage
+          await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 75 });
+          await this.ensureFinalizeJobActive(jobId);
+
+          const audioDurationMs = transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+          const statsObservations = generateStatsObservations(stats, audioDurationMs);
+          const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats });
+          let finalOverall = memoFirstReport.overall;
+          let finalPerPerson = memoFirstReport.per_person;
+          let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
+          let reportModel: string | null = null;
+          let reportError: string | null = null;
+          let reportBlockingReason: string | null = null;
+          let pipelineMode: "memo_first_with_llm_polish" | "llm_core_synthesis" = "memo_first_with_llm_polish";
+
+          // Try LLM synthesis
+          const storedCheckpoints = await this.loadCheckpoints();
+          try {
+            const fullConfig = (state.config ?? {}) as Record<string, unknown>;
+            const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
+              sessionConfig: {
+                mode: fullConfig.mode as "1v1" | "group" | undefined,
+                interviewer_name: fullConfig.interviewer_name as string | undefined,
+                position_title: fullConfig.position_title as string | undefined,
+                company_name: fullConfig.company_name as string | undefined,
+                stages: configStages,
+                free_form_notes: fullConfig.free_form_notes as string | undefined,
+                rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
+              },
+            });
+
+            const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
+            const synthPayload = buildSynthesizePayload({
+              sessionId,
+              transcript,
+              memos: enrichedMemos,
+              evidence,
+              stats,
+              events: analysisEvents.map((evt: Record<string, unknown>) => ({
+                event_id: String(evt.event_id ?? ""),
+                event_type: String(evt.event_type ?? ""),
+                actor: evt.actor != null ? String(evt.actor) : null,
+                target: evt.target != null ? String(evt.target) : null,
+                time_range_ms: Array.isArray(evt.time_range_ms) ? (evt.time_range_ms as number[]) : [],
+                utterance_ids: Array.isArray(evt.utterance_ids) ? (evt.utterance_ids as string[]) : [],
+                quote: evt.quote != null ? String(evt.quote) : null,
+                confidence: typeof evt.confidence === "number" ? evt.confidence : 0.5,
+                rationale: evt.rationale != null ? String(evt.rationale) : null,
+              })),
+              bindings: memoBindings,
+              rubric,
+              sessionContext,
+              freeFormNotes,
+              historical: [],
+              stages: contextStages.length > 0 ? contextStages : configStages,
+              locale,
+              nameAliases: configNameAliases,
+              statsObservations,
+            });
+
+            const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
+            const synthData = synthResult.data;
+            if (synthResult.warnings.length > 0) finalizeWarnings.push(...synthResult.warnings);
+            if (synthResult.degraded) finalizeDegraded = true;
+
+            const candidatePerPerson = Array.isArray(synthData?.per_person) ? (synthData.per_person as PersonFeedbackItem[]) : [];
+            if (candidatePerPerson.length > 0) {
+              const { sanitized, strippedCount } = this.sanitizeClaimEvidenceRefs(candidatePerPerson, evidence);
+              if (strippedCount > 0) finalizeWarnings.push(`sanitized ${strippedCount} claims with empty/invalid evidence_refs`);
+              const validation = this.validateClaimEvidenceRefs({ evidence, per_person: sanitized } as ResultV2);
+              if (validation.valid) {
+                finalPerPerson = sanitized;
+                finalOverall = synthData?.overall ?? finalOverall;
+                reportSource = "llm_synthesized";
+                pipelineMode = "llm_core_synthesis";
+                evidence = backfillSupportingUtterances(evidence, finalPerPerson);
+              } else {
+                reportSource = "memo_first_fallback";
+                reportBlockingReason = validation.failures[0] || "invalid evidence refs";
+              }
+            }
+          } catch (synthErr) {
+            reportSource = "memo_first_fallback";
+            reportError = (synthErr as Error).message;
+            finalizeWarnings.push(`report-only synthesis failed: ${(synthErr as Error).message}`);
+          }
+
+          if (!ACCEPTED_REPORT_SOURCES.has(reportSource)) {
+            evidence = legacyEvidence;
+          }
+
+          // Persist stage
+          await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 92 });
+          await this.ensureFinalizeJobActive(jobId);
+          const finalizedAt = this.currentIsoTs();
+
+          const memoFirstValidation = validatePersonFeedbackEvidence(finalPerPerson);
+          const finalStrictValidation = this.validateClaimEvidenceRefs({ evidence, per_person: finalPerPerson } as ResultV2);
+          const synthQualityGate = enforceQualityGates({
+            perPerson: finalPerPerson,
+            unknownRatio: computeUnknownRatio(transcript),
+          });
+
+          const captureByStream = (normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE))).capture_by_stream ?? defaultCaptureByStream();
+          const qualityMetrics = this.buildQualityMetrics(transcript, captureByStream);
+          const quality: ReportQualityMeta = {
+            ...memoFirstValidation.quality,
+            generated_at: finalizedAt,
+            build_ms: 0,
+            validation_ms: 0,
+            claim_count: finalStrictValidation.claimCount,
+            invalid_claim_count: finalStrictValidation.invalidCount,
+            needs_evidence_count: finalStrictValidation.needsEvidenceCount,
+            report_source: reportSource,
+            report_model: reportModel,
+            report_degraded: !ACCEPTED_REPORT_SOURCES.has(reportSource),
+            report_error: reportError
+          };
+
+          const confidenceLevel = existingResult.session.confidence_level ?? "high";
+          const tentative = confidenceLevel === "low" || !this.evaluateFeedbackQualityGates({
+            unknownRatio: qualityMetrics.unknown_ratio,
+            ingestP95Ms: null,
+            claimValidationFailures: [
+              ...(finalStrictValidation.failures ?? []),
+              ...synthQualityGate.failures,
+              ...(ACCEPTED_REPORT_SOURCES.has(reportSource) ? [] : [reportBlockingReason || "llm report unavailable"])
+            ]
+          }).passed;
+
+          const resultV2 = buildResultV2({
+            sessionId,
+            finalizedAt,
+            tentative,
+            confidenceLevel,
+            unresolvedClusterCount: existingResult.session.unresolved_cluster_count ?? 0,
+            diarizationBackend: existingResult.session.diarization_backend ?? "cloud",
+            transcript,
+            speakerLogs,
+            stats,
+            memos,
+            evidence,
+            overall: finalOverall,
+            perPerson: finalPerPerson,
+            quality,
+            finalizeJobId: jobId,
+            modelVersions: existingResult.trace?.model_versions ?? {},
+            thresholds: existingResult.trace?.thresholds ?? {},
+            backendTimeline: [],
+            qualityGateSnapshot: existingResult.trace?.quality_gate_snapshot,
+            reportPipeline: {
+              mode: pipelineMode,
+              source: reportSource,
+              llm_attempted: true,
+              llm_success: reportSource === "llm_synthesized",
+              llm_elapsed_ms: 0,
+              blocking_reason: reportBlockingReason
+            },
+            qualityGateFailures: []
+          });
+
+          const resultV2Key = resultObjectKeyV2(sessionId);
+          await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
+            httpMetadata: { contentType: "application/json" }
+          });
+          await this.ctx.storage.put(STORAGE_KEY_RESULT_KEY_V2, resultV2Key);
+          await this.ctx.storage.put(STORAGE_KEY_FINALIZED_AT, finalizedAt);
+          await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, finalizedAt);
+
+          const cache = await this.loadFeedbackCache(sessionId);
+          cache.updated_at = finalizedAt;
+          cache.report = resultV2;
+          cache.person_summary_cache = resultV2.per_person;
+          cache.overall_summary_cache = resultV2.overall;
+          cache.evidence_index_cache = this.buildEvidenceIndex(resultV2.per_person);
+          cache.quality = resultV2.quality;
+          await this.storeFeedbackCache(cache);
+
+          await this.updateFinalizeV2Status(jobId, {
+            status: "succeeded",
+            stage: "persist",
+            progress: 100,
+            finished_at: finalizedAt,
+            warnings: finalizeWarnings,
+            degraded: finalizeDegraded,
+            backend_used: finalizeBackendUsed
+          });
+
+          console.log(`[finalize-v2] report-only completed for session=${sessionId}`);
+        } catch (err) {
+          const errMsg = (err as Error).message || "unknown error";
+          console.error(`[finalize-v2] report-only failed: ${errMsg}`);
+          await this.updateFinalizeV2Status(jobId, {
+            status: "failed",
+            errors: [errMsg],
+            finished_at: this.currentIsoTs()
+          });
+        } finally {
+          await this.setFinalizeLock(false);
+        }
+        return; // exit early — do not run full pipeline
+      }
 
       // ── Caption mode: skip audio-dependent stages ──
       const useCaptions = this.captionSource === 'acs-teams' && this.captionBuffer.length > 0;
@@ -6246,6 +6582,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
                 timestamp_ms: timestampMs,
                 teamsUserId: message.teamsUserId ? String(message.teamsUserId) : undefined,
               });
+              this.scheduleCaptionFlush();
             }
             return;
           }
@@ -6254,6 +6591,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
             const src = String(message.captionSource ?? "");
             if (src === "acs-teams" || src === "none") {
               this.captionSource = src;
+              this.ctx.storage.put(STORAGE_KEY_CAPTION_SOURCE, src).catch((err) => {
+                console.warn(`[caption-persist] captionSource flush failed: ${(err as Error).message}`);
+              });
             }
             return;
           }
@@ -7502,9 +7842,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
           finished_at: null
         };
         await this.storeFinalizeV2Status(nextStatus);
+        const mode = (payload as Record<string, unknown>).mode === 'report-only' ? 'report-only' : 'full';
         this.ctx.waitUntil(
           this.enqueueMutation(async () => {
-            await this.runFinalizeV2Job(sessionId, nextStatus.job_id, payload.metadata ?? {});
+            await this.runFinalizeV2Job(sessionId, nextStatus.job_id, payload.metadata ?? {}, mode);
           })
         );
         return jsonResponse({
