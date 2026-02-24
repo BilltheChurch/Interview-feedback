@@ -167,6 +167,24 @@ async function main() {
       console.log(`    Last utterance: "${report.transcript[report.transcript.length - 1].text?.slice(0, 60)}..."`);
     }
     console.log(`    quality.report_source = ${report.quality?.report_source}`);
+
+    // === Report v2 field checks ===
+    console.log(`    dimensions[0].score = ${report.per_person[0]?.dimensions[0]?.score}`);
+    console.log(`    dimensions[0].label_zh = ${report.per_person[0]?.dimensions[0]?.label_zh}`);
+    console.log(`    overall.narrative length = ${report.overall?.narrative?.length || 0}`);
+    console.log(`    suggested_dimensions = ${report.overall?.suggested_dimensions?.length || 0}`);
+
+    // Validation checks
+    const dim0 = report.per_person?.[0]?.dimensions?.[0];
+    if (dim0) {
+      if (typeof dim0.score !== 'number') console.warn('    ⚠ WARNING: dimension score is not a number');
+      if (dim0.score < 0 || dim0.score > 10) console.warn('    ⚠ WARNING: dimension score out of range 0-10');
+      if (!dim0.label_zh) console.warn('    ⚠ WARNING: dimension label_zh is missing');
+      if (!dim0.score_rationale) console.warn('    ⚠ WARNING: dimension score_rationale is missing');
+    }
+    if (report.overall?.narrative) {
+      if (report.overall.narrative.includes('[e_')) console.warn('    ⚠ WARNING: narrative contains [e_XXXXX] references');
+    }
   } else {
     console.log(`  ❌ No report returned`);
     console.log(`    blocking_reason: ${feedbackRes.data?.blocking_reason}`);

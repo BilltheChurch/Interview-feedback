@@ -80,6 +80,14 @@ export type SessionConfig = {
   teamsInterviewerName?: string;
   teamsJoinUrl?: string;
   templateId?: string;
+  interviewType?: string;
+  dimensionPresets?: Array<{
+    key: string;
+    label_zh: string;
+    label_en: string;
+    description: string;
+    weight: number;
+  }>;
 };
 
 /* ── Persistence key & helpers ─────────────── */

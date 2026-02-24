@@ -71,7 +71,9 @@ import type {
   SpeakerMapItem,
   SynthesizeRequestPayload,
   Tier2Status,
-  CaptionSource
+  CaptionSource,
+  DimensionPresetItem,
+  OverallFeedback
 } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
@@ -165,6 +167,8 @@ interface SessionConfigRequest {
   teams_join_url?: string;
   stages?: string[];
   free_form_notes?: string;
+  interview_type?: string;
+  dimension_presets?: DimensionPresetItem[];
 }
 
 interface CaptureState {
@@ -4897,6 +4901,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
               },
             });
 
+            // Augment sessionContext with dimension presets from config
+            if (sessionContext) {
+              const it = fullConfig.interview_type;
+              if (typeof it === "string" && it) sessionContext.interview_type = it;
+              const dp = fullConfig.dimension_presets;
+              if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
+            }
+
             const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
             const synthPayload = buildSynthesizePayload({
               sessionId,
@@ -5586,6 +5598,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
           },
         });
 
+
+        // Augment sessionContext with dimension presets from config
+        if (sessionContext) {
+          const it = fullConfig.interview_type;
+          if (typeof it === "string" && it) sessionContext.interview_type = it;
+          const dp = fullConfig.dimension_presets;
+          if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
+        }
         let synthData: Record<string, unknown>;
         const synthStart = Date.now();
 
@@ -6221,6 +6241,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
           rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
         },
       });
+
+      // Augment sessionContext with dimension presets from config
+      if (sessionContext) {
+        const it = fullConfig.interview_type;
+        if (typeof it === "string" && it) sessionContext.interview_type = it;
+        const dp = fullConfig.dimension_presets;
+        if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
+      }
       const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
       const synthPayload = buildSynthesizePayload({
         sessionId,
@@ -6264,7 +6292,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         } as ResultV2);
         if (validation.valid) {
           finalPerPerson = sanitized;
-          finalOverall = (synthData?.overall ?? tier1Result.overall) as unknown;
+          finalOverall = (synthData?.overall ?? tier1Result.overall) as OverallFeedback;
           const candidateQuality = synthData?.quality && typeof synthData.quality === "object"
             ? (synthData.quality as Partial<ReportQualityMeta>)
             : null;
@@ -6849,6 +6877,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const freeFormNotes = valueAsString(payload.free_form_notes);
         if (freeFormNotes) {
           config.free_form_notes = freeFormNotes;
+        }
+
+        const interviewType = valueAsString(payload.interview_type);
+        if (interviewType) {
+          config.interview_type = interviewType;
+        }
+        if (Array.isArray(payload.dimension_presets)) {
+          config.dimension_presets = payload.dimension_presets;
         }
 
         const roster = parseRosterEntries(payload.participants ?? payload.teams_participants);

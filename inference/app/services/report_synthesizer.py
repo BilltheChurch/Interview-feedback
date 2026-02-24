@@ -10,10 +10,13 @@ from app.schemas import (
     AnalysisReportResponse,
     DimensionClaim,
     DimensionFeedback,
+    DimensionPreset,
+    KeyFinding,
     OverallFeedback,
     PersonFeedbackItem,
     PersonSummary,
     ReportQualityMeta,
+    SuggestedDimension,
     SummarySection,
     SynthesisContextMeta,
     SynthesizeReportRequest,
@@ -24,7 +27,42 @@ from app.services.dashscope_llm import DashScopeLLM
 
 logger = logging.getLogger(__name__)
 
+# Legacy default dimensions (used when no dimension_presets provided)
 DIMENSIONS = ["leadership", "collaboration", "logic", "structure", "initiative"]
+
+# Default dimension presets with Chinese labels and guidance
+DEFAULT_DIMENSION_PRESETS: list[dict] = [
+    {"key": "leadership", "label_zh": "领导力", "description": "展现领导力、主动推进讨论、统筹全局的能力"},
+    {"key": "collaboration", "label_zh": "协作能力", "description": "团队合作、倾听他人、建设性互动的能力"},
+    {"key": "logic", "label_zh": "逻辑思维", "description": "分析问题、推理论证、逻辑清晰度"},
+    {"key": "structure", "label_zh": "结构化表达", "description": "表达条理性、信息组织能力、框架化思维"},
+    {"key": "initiative", "label_zh": "主动性", "description": "主动提出方案、积极参与、展现进取心"},
+]
+
+
+def _get_dimension_keys(req: SynthesizeReportRequest) -> list[str]:
+    """Get dimension keys from session_context.dimension_presets or defaults."""
+    if (
+        req.session_context
+        and req.session_context.dimension_presets
+        and len(req.session_context.dimension_presets) > 0
+    ):
+        return [d.key for d in req.session_context.dimension_presets]
+    return DIMENSIONS
+
+
+def _get_dimension_presets_dicts(req: SynthesizeReportRequest) -> list[dict]:
+    """Get dimension presets as dicts from session_context or defaults."""
+    if (
+        req.session_context
+        and req.session_context.dimension_presets
+        and len(req.session_context.dimension_presets) > 0
+    ):
+        return [
+            {"key": d.key, "label_zh": d.label_zh, "description": d.description}
+            for d in req.session_context.dimension_presets
+        ]
+    return list(DEFAULT_DIMENSION_PRESETS)
 
 
 class ReportSynthesizer:
@@ -259,9 +297,15 @@ class ReportSynthesizer:
                             logger.info("SYNTH-DIAG   person=%s dims=%d [%s]", pk, len(dims), " ".join(dim_info))
         except Exception as diag_exc:
             logger.debug("SYNTH-DIAG logging failed: %s", diag_exc)
+
+        dimension_keys = _get_dimension_keys(req)
+        dim_presets = _get_dimension_presets_dicts(req)
+        dim_label_map = {d["key"]: d["label_zh"] for d in dim_presets}
+
         overall, per_person = self._parse_llm_output(
             parsed, valid_evidence_ids, locale=req.locale,
             interviewer_keys=interviewer_keys, eligible_keys=eligible_keys,
+            dimension_keys=dimension_keys, dim_label_map=dim_label_map,
         )
 
         # 4b. Merge alias entries back into primary (safety net if LLM ignores instruction)
@@ -318,26 +362,61 @@ class ReportSynthesizer:
 
     def _build_system_prompt(self, req: SynthesizeReportRequest) -> str:
         locale_hint = "Chinese (zh-CN)" if req.locale == "zh-CN" else "English"
+
+        # Build interview context anchoring
+        ctx = req.session_context or {}
+        if hasattr(ctx, "model_dump"):
+            ctx_dict = ctx.model_dump() if req.session_context else {}
+        else:
+            ctx_dict = ctx if isinstance(ctx, dict) else {}
+
+        interview_type = ctx_dict.get("interview_type", "未指定") if ctx_dict else "未指定"
+        position_title = ctx_dict.get("position_title", "未指定") if ctx_dict else "未指定"
+        company_name = ctx_dict.get("company_name", "") if ctx_dict else ""
+        interviewer_name = ctx_dict.get("interviewer_name", "未指定") if ctx_dict else "未指定"
+
+        context_anchor = (
+            f"你正在为以下面试生成评估报告：\n"
+            f"- 面试类型: {interview_type}\n"
+            f"- 目标职位/项目: {position_title}"
+            f"{' @ ' + company_name if company_name else ''}\n"
+            f"- 面试官: {interviewer_name}\n"
+            f"\n所有评价必须围绕候选人是否适合「{position_title if position_title != '未指定' else '该职位'}」展开。"
+            f"不要给出泛泛的能力评估——每个 claim 都要与目标职位/项目的具体要求关联。\n\n"
+        )
+
+        # Build scoring rubric text
+        scoring_rubric = (
+            "评分标准（0-10 量表）：\n"
+            "  0-2: 严重不足 — 缺乏基本能力表现\n"
+            "  3-4: 偏弱 — 有零星表现但整体不足\n"
+            "  5-6: 基本达标 — 满足基本要求但无亮点\n"
+            "  7-8: 良好 — 有明显优势和具体案例支撑\n"
+            "  9-10: 优秀 — 表现突出，有多个强有力的证据\n\n"
+        )
+
         return (
             "You are an expert interview analyst generating structured feedback reports.\n\n"
-            "CRITICAL RULES:\n"
+            + context_anchor
+            + scoring_rubric
+            + "CRITICAL RULES:\n"
             "1. Every claim MUST cite 1-5 evidence references using the evidence_id values from the evidence_pack.\n"
             "2. DO NOT invent evidence IDs — only use IDs from the evidence_pack.\n"
             "3. Cross-reference the interviewer's memos and free-form notes with the actual transcript.\n"
             "4. If a memo says someone showed a skill — find the specific transcript moment and cite it.\n"
             "5. If memo observations conflict with transcript evidence, flag the discrepancy.\n"
             "6. Only generate feedback for INTERVIEWEES (stream_role: \"students\"), NOT the interviewer (stream_role: \"teacher\"). The interviewer's role is to observe and take notes, not to be evaluated.\n"
-            "7. For each interviewee, evaluate ALL 5 dimensions. Use memos, evidence quotes, and transcript to build claims. A memo that mentions a person by name IS evidence for that person.\n"
+            "7. 使用 `session_context.dimension_presets` 作为评估框架。对每个预设维度分配 0-10 分。\n"
             "8. For dimensions with weak evidence, generate ONE claim with low confidence (0.3-0.4) rather than empty arrays. Only use empty arrays if truly ZERO mentions exist.\n"
             "9. Group observations by interview stage when stage data is available.\n"
             "10. Use the free-form notes AND structured memos as primary evidence sources alongside transcript quotes.\n"
             "11. If a person has talk_time_ms of 0 AND has no evidence or memos mentioning them, skip them entirely — do not generate per_person entry for them.\n"
-            "15. IMPORTANT: Match evidence to speakers by reading the quote TEXT content. If an evidence quote mentions a person by name (e.g., 'Tina gave a good suggestion about X'), that evidence is attributable to that person. Use the speaker_key field AND the quote text together to determine attribution.\n"
-            "16. Even if a person has low talk_time_ms, generate claims for them if memos or evidence mention their contributions.\n"
-            "17. MINIMUM OUTPUT: For each person in interviewee_stats, you MUST generate at least 1 strength claim and 1 risk claim across all dimensions combined. A report with all empty claim arrays is INVALID.\n"
             "12. Ground every claim in evidence. Use evidence_pack quotes, memos, and transcript as sources. A memo like 'Tina gave good suggestions' IS valid evidence for a Tina leadership claim.\n"
             "13. Set confidence below 0.4 for any claim based on a single piece of evidence.\n"
             "14. Memos and free-form notes from the interviewer are FIRST-CLASS evidence sources — they should be cited and referenced just like transcript quotes.\n"
+            "15. IMPORTANT: Match evidence to speakers by reading the quote TEXT content. If an evidence quote mentions a person by name (e.g., 'Tina gave a good suggestion about X'), that evidence is attributable to that person. Use the speaker_key field AND the quote text together to determine attribution.\n"
+            "16. Even if a person has low talk_time_ms, generate claims for them if memos or evidence mention their contributions.\n"
+            "17. MINIMUM OUTPUT: For each person in interviewee_stats, you MUST generate at least 1 strength claim and 1 risk claim across all dimensions combined. A report with all empty claim arrays is INVALID.\n"
             "18. CRITICAL: If name_aliases are provided, treat aliases as the SAME person. "
             "For example, if name_aliases = {\"Rice\": [\"小米\"], \"Stephenie\": [\"思涵\"]}, then 小米 IS Rice and 思涵 IS Stephenie. "
             "Merge all observations about an alias into the primary name's per_person entry. Use the primary name as person_key. "
@@ -345,10 +424,14 @@ class ReportSynthesizer:
             "19. For each claim, also select 1-3 transcript segments that best support the claim. "
             "Output as `supporting_utterances: [utterance_id, ...]` in each claim object. "
             "Prefer segments containing key arguments, specific examples, or behavioral evidence.\n"
-            "20. MINIMUM SECTIONS: Generate at least 2 summary_sections (e.g., discussion stages, key themes). "
-            "Generate at least 2 team_dynamics highlights and at least 2 risks.\n"
+            "20. 生成 `narrative`（2-4 句连贯段落）+ ≥3 个 `key_findings`（类型: strength/risk/observation）。\n"
             "21. Use stats_observations (if provided) to enrich analysis with quantitative insights. "
-            "Incorporate relevant statistics into claims naturally.\n\n"
+            "Incorporate relevant statistics into claims naturally.\n"
+            "22. claim.text 必须是纯自然语言 — 不要在文本中嵌入 [e_XXXXX] 引用。引用放在 evidence_refs 数组中。\n"
+            "23. 优先使用 tier_1 证据（面试者发言）。tier_3（面试官评价性发言）仅作为补充佐证。\n"
+            "24. 生成 `overall.narrative` 作为围绕 `session_context.position_title` 的连贯段落，不要使用要点列表。\n"
+            "25. 如果某个预设维度无法评估（证据完全不足），设置 `not_applicable: true` 和 `score: 5`。\n"
+            "26. 如果面试内容暗示需要预设之外的维度，输出 `suggested_dimensions`。\n\n"
             "OUTPUT FORMAT: Strict JSON matching the output_contract.\n"
             f"LANGUAGE: {locale_hint} — use professional, concise language.\n"
         )
@@ -358,15 +441,19 @@ class ReportSynthesizer:
         req: SynthesizeReportRequest,
         truncated_transcript: list[TranscriptUtterance],
     ) -> str:
-        evidence_pack = [
-            {
+        # Build evidence_pack with source_tier
+        evidence_pack = []
+        for e in req.evidence:
+            item: dict = {
                 "evidence_id": e.evidence_id,
                 "speaker_key": e.speaker_key,
                 "time_range_ms": e.time_range_ms,
                 "quote": e.quote[:400],
             }
-            for e in req.evidence
-        ]
+            # Add source_tier: use existing value if available, default to 1
+            source_tier = getattr(e, "source_tier", None)
+            item["source_tier"] = source_tier if source_tier is not None else 1
+            evidence_pack.append(item)
 
         transcript_segments = [
             {
@@ -433,6 +520,65 @@ class ReportSynthesizer:
             for s in eligible_stats
         ]
 
+        # Get dimension presets
+        dim_presets = _get_dimension_presets_dicts(req)
+
+        # Build output contract (v2 with scores and narrative)
+        output_contract = {
+            "overall": {
+                "narrative": "string — cohesive 2-4 sentence paragraph, NO [e_XXXXX] references",
+                "narrative_evidence_refs": ["e_XXXXX"],
+                "key_findings": [
+                    {
+                        "type": "strength|risk|observation",
+                        "text": "string — pure text, no citations",
+                        "evidence_refs": ["e_XXXXX"],
+                    }
+                ],
+                "suggested_dimensions": [
+                    {
+                        "key": "string",
+                        "label_zh": "string",
+                        "reason": "string",
+                        "action": "add|replace|mark_not_applicable",
+                        "replaces": "string|null",
+                    }
+                ],
+            },
+            "per_person": [
+                {
+                    "person_key": "string (from stats speaker_key, interviewees only)",
+                    "display_name": "string",
+                    "dimensions": [
+                        {
+                            "dimension": "string (from dimension_presets[].key)",
+                            "label_zh": "string (from dimension_presets[].label_zh)",
+                            "score": 8.5,
+                            "score_rationale": "string — 1-2 sentences",
+                            "evidence_insufficient": False,
+                            "not_applicable": False,
+                            "strengths": [
+                                {
+                                    "claim_id": "c_{person}_{dim}_{nn}",
+                                    "text": "string — pure natural language, NO [e_XXXXX]",
+                                    "evidence_refs": ["e_XXXXX"],
+                                    "confidence": 0.85,
+                                    "supporting_utterances": ["utterance_id"],
+                                }
+                            ],
+                            "risks": ["...same structure as strengths..."],
+                            "actions": ["...same structure as strengths..."],
+                        }
+                    ],
+                    "summary": {
+                        "strengths": ["string"],
+                        "risks": ["string"],
+                        "actions": ["string"],
+                    },
+                }
+            ],
+        }
+
         prompt_data: dict = {
             "task": "synthesize_report",
             "session_id": req.session_id,
@@ -443,29 +589,8 @@ class ReportSynthesizer:
             "interviewee_stats (ONLY generate per_person entries for these speakers)": interviewee_stats,
             "interviewer_keys (DO NOT evaluate these speakers)": list(interviewer_keys),
             "stages": req.stages,
-            "output_contract": {
-                "overall": {
-                    "summary_sections": [
-                        {"topic": "string", "bullets": ["string with [e_XXXXX] citations"], "evidence_ids": ["string"]}
-                    ],
-                    "team_dynamics": {"highlights": ["string"], "risks": ["string"]},
-                },
-                "per_person": [
-                    {
-                        "person_key": "string (from stats speaker_key, interviewees only)",
-                        "display_name": "string",
-                        "dimensions": [
-                            {
-                                "dimension": "leadership|collaboration|logic|structure|initiative",
-                                "strengths": [{"claim_id": "c_{person}_{dim}_{nn}", "text": "string with [e_XXXXX]", "evidence_refs": ["e_XXXXX"], "confidence": 0.7}],
-                                "risks": [{"claim_id": "...", "text": "...", "evidence_refs": ["..."], "confidence": 0.7}],
-                                "actions": [{"claim_id": "...", "text": "...", "evidence_refs": ["..."], "confidence": 0.7}]
-                            }
-                        ],
-                        "summary": {"strengths": ["string"], "risks": ["string"], "actions": ["string"]},
-                    }
-                ],
-            },
+            "evaluation_dimensions": dim_presets,
+            "output_contract": output_contract,
         }
 
         if req.rubric:
@@ -478,11 +603,16 @@ class ReportSynthesizer:
             }
 
         if req.session_context:
-            prompt_data["session_context"] = {
+            sc_dict: dict = {
                 "mode": req.session_context.mode,
                 "interviewer_name": req.session_context.interviewer_name,
                 "position_title": req.session_context.position_title,
             }
+            if req.session_context.company_name:
+                sc_dict["company_name"] = req.session_context.company_name
+            if req.session_context.interview_type:
+                sc_dict["interview_type"] = req.session_context.interview_type
+            prompt_data["session_context"] = sc_dict
 
         if req.free_form_notes:
             prompt_data["free_form_notes"] = normalize(req.free_form_notes[:2000])
@@ -570,10 +700,63 @@ class ReportSynthesizer:
         self, parsed: dict, valid_evidence_ids: set[str], locale: str = "zh-CN",
         interviewer_keys: set[str] | None = None,
         eligible_keys: set[str] | None = None,
+        dimension_keys: list[str] | None = None,
+        dim_label_map: dict[str, str] | None = None,
     ) -> tuple[OverallFeedback, list[PersonFeedbackItem]]:
-        """Parse and validate LLM JSON output into Pydantic models."""
+        """Parse and validate LLM JSON output into Pydantic models.
+
+        Supports both v2 format (narrative + key_findings + scores) and
+        legacy format (summary_sections + team_dynamics) for backward compatibility.
+        """
+        _dim_keys = dimension_keys or DIMENSIONS
+        _dim_label_map = dim_label_map or {}
+
         # Parse overall
         overall_raw = parsed.get("overall", {})
+
+        # --- v2 fields ---
+        narrative = str(overall_raw.get("narrative", "")).strip()
+        narrative_evidence_refs = [
+            str(r).strip()
+            for r in overall_raw.get("narrative_evidence_refs", [])
+            if str(r).strip() in valid_evidence_ids
+        ]
+        key_findings = []
+        for kf in overall_raw.get("key_findings", []):
+            if not isinstance(kf, dict):
+                continue
+            kf_type = str(kf.get("type", "observation")).strip()
+            if kf_type not in ("strength", "risk", "observation"):
+                kf_type = "observation"
+            kf_text = str(kf.get("text", "")).strip()
+            if not kf_text:
+                continue
+            kf_refs = [
+                str(r).strip()
+                for r in kf.get("evidence_refs", [])
+                if str(r).strip() in valid_evidence_ids
+            ]
+            key_findings.append(KeyFinding(type=kf_type, text=kf_text, evidence_refs=kf_refs[:5]))
+
+        suggested_dimensions = []
+        for sd in overall_raw.get("suggested_dimensions", []):
+            if not isinstance(sd, dict):
+                continue
+            sd_key = str(sd.get("key", "")).strip()
+            if not sd_key:
+                continue
+            sd_action = str(sd.get("action", "add")).strip()
+            if sd_action not in ("add", "replace", "mark_not_applicable"):
+                sd_action = "add"
+            suggested_dimensions.append(SuggestedDimension(
+                key=sd_key,
+                label_zh=str(sd.get("label_zh", "")).strip(),
+                reason=str(sd.get("reason", "")).strip(),
+                action=sd_action,
+                replaces=sd.get("replaces"),
+            ))
+
+        # --- Legacy fields (backward compat) ---
         summary_sections = []
         for section in overall_raw.get("summary_sections", []):
             if not isinstance(section, dict):
@@ -595,7 +778,24 @@ class ReportSynthesizer:
         highlights = [str(h).strip() for h in team_raw.get("highlights", []) if str(h).strip()]
         risks = [str(r).strip() for r in team_raw.get("risks", []) if str(r).strip()]
 
+        # Fallback: if LLM returned old format (summary_sections) but no narrative,
+        # convert summary_sections to narrative
+        if not narrative and summary_sections:
+            narrative = " ".join(
+                " ".join(s.bullets) for s in summary_sections
+            )[:2000]
+        # Fallback: if no key_findings, generate from team_dynamics
+        if not key_findings:
+            for h in highlights:
+                key_findings.append(KeyFinding(type="strength", text=h, evidence_refs=[]))
+            for r in risks:
+                key_findings.append(KeyFinding(type="risk", text=r, evidence_refs=[]))
+
         overall = OverallFeedback(
+            narrative=narrative,
+            narrative_evidence_refs=narrative_evidence_refs[:10],
+            key_findings=key_findings[:10],
+            suggested_dimensions=suggested_dimensions[:5],
             summary_sections=summary_sections[:6],
             team_dynamics=TeamDynamics(highlights=highlights[:6], risks=risks[:6]),
         )
@@ -627,8 +827,20 @@ class ReportSynthesizer:
                 if not isinstance(dim_raw, dict):
                     continue
                 dim_name = str(dim_raw.get("dimension", "")).strip()
-                if dim_name not in DIMENSIONS:
+                if dim_name not in _dim_keys:
                     continue
+
+                # Parse v2 dimension fields
+                label_zh = str(dim_raw.get("label_zh", _dim_label_map.get(dim_name, ""))).strip()
+                score = dim_raw.get("score", 5.0)
+                try:
+                    score = float(score)
+                    score = max(0.0, min(10.0, score))
+                except (TypeError, ValueError):
+                    score = 5.0
+                score_rationale = str(dim_raw.get("score_rationale", "")).strip()
+                evidence_insufficient = bool(dim_raw.get("evidence_insufficient", False))
+                not_applicable = bool(dim_raw.get("not_applicable", False))
 
                 def parse_claims(claims_raw: list) -> list[DimensionClaim]:
                     claims = []
@@ -670,27 +882,37 @@ class ReportSynthesizer:
                 dimensions.append(
                     DimensionFeedback(
                         dimension=dim_name,
+                        label_zh=label_zh,
+                        score=score,
+                        score_rationale=score_rationale,
+                        evidence_insufficient=evidence_insufficient,
+                        not_applicable=not_applicable,
                         strengths=strengths,
                         risks=risks_list,
                         actions=actions,
                     )
                 )
 
-            # Ensure all 5 dimensions present with empty arrays for missing ones
+            # Ensure all dimension_keys present with empty arrays for missing ones
             present_dims = {d.dimension for d in dimensions}
-            for dim_name in DIMENSIONS:
-                if dim_name not in present_dims:
+            for dk in _dim_keys:
+                if dk not in present_dims:
                     dimensions.append(
                         DimensionFeedback(
-                            dimension=dim_name,
+                            dimension=dk,
+                            label_zh=_dim_label_map.get(dk, ""),
+                            score=5.0,
+                            score_rationale="",
+                            evidence_insufficient=True,
+                            not_applicable=False,
                             strengths=[],
                             risks=[],
                             actions=[],
                         )
                     )
 
-            # Sort dimensions to canonical order
-            dim_order = {d: i for i, d in enumerate(DIMENSIONS)}
+            # Sort dimensions to match preset order
+            dim_order = {d: i for i, d in enumerate(_dim_keys)}
             dimensions.sort(key=lambda d: dim_order.get(d.dimension, 99))
 
             summary_raw = person_raw.get("summary", {})
@@ -745,6 +967,8 @@ class ReportSynthesizer:
             locale=req.locale,
         )
 
+        dim_keys = _get_dimension_keys(req)
+
         try:
             result = fallback_gen.generate(fallback_req)
             # Filter out interviewer from fallback result
@@ -771,7 +995,7 @@ class ReportSynthesizer:
                                 risks=[],
                                 actions=[],
                             )
-                            for dim in DIMENSIONS
+                            for dim in dim_keys
                         ],
                     )
                     for s in eligible_stats
@@ -786,7 +1010,7 @@ class ReportSynthesizer:
                                 risks=[],
                                 actions=[],
                             )
-                            for dim in DIMENSIONS
+                            for dim in dim_keys
                         ],
                     )
                 ],

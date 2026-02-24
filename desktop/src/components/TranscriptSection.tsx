@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback } from 'react';
+import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Search, Filter } from 'lucide-react';
 
@@ -19,6 +19,7 @@ type Props = {
   evidenceMap: UtteranceEvidenceMap;
   onEvidenceBadgeClick?: (evidenceId: string) => void;
   scrollToUtteranceId?: string | null;
+  highlightedUtteranceIds?: Set<string>;
 };
 
 const SPEAKER_COLORS = [
@@ -56,7 +57,7 @@ type UtteranceGroup = {
   evidenceIds: string[];
 };
 
-export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClick, scrollToUtteranceId }: Props) {
+export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClick, scrollToUtteranceId, highlightedUtteranceIds }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const parentRef = useRef<HTMLDivElement>(null);
@@ -125,18 +126,18 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
     overscan: 10,
   });
 
-  // Scroll to a specific utterance
-  const scrollToRef = useRef(scrollToUtteranceId);
-  scrollToRef.current = scrollToUtteranceId;
+  // Scroll to a specific utterance when scrollToUtteranceId changes
   const scrolledRef = useRef<string | null>(null);
 
-  if (scrollToUtteranceId && scrollToUtteranceId !== scrolledRef.current) {
-    const idx = groups.findIndex(g => g.items.some(u => u.utterance_id === scrollToUtteranceId));
-    if (idx >= 0) {
-      virtualizer.scrollToIndex(idx, { align: 'center' });
-      scrolledRef.current = scrollToUtteranceId;
+  useEffect(() => {
+    if (scrollToUtteranceId && scrollToUtteranceId !== scrolledRef.current) {
+      const idx = groups.findIndex(g => g.items.some(u => u.utterance_id === scrollToUtteranceId));
+      if (idx >= 0) {
+        virtualizer.scrollToIndex(idx, { align: 'center' });
+        scrolledRef.current = scrollToUtteranceId;
+      }
     }
-  }
+  }, [scrollToUtteranceId, groups, virtualizer]);
 
   const highlightText = useCallback((text: string) => {
     if (!searchQuery.trim()) return text;
@@ -205,6 +206,8 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const group = groups[virtualRow.index];
             const isHighlighted = scrollToUtteranceId && group.items.some(u => u.utterance_id === scrollToUtteranceId);
+            const isGroupHighlighted = highlightedUtteranceIds && highlightedUtteranceIds.size > 0 &&
+              group.items.some(u => highlightedUtteranceIds.has(u.utterance_id));
             return (
               <div
                 key={virtualRow.key}
@@ -219,7 +222,9 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                 }}
                 className={`px-4 py-2 border-b border-border/50 ${
                   group.hasEvidence ? 'bg-accent/5' : ''
-                } ${isHighlighted ? 'ring-2 ring-accent/30 ring-inset' : ''}`}
+                } ${isHighlighted ? 'ring-2 ring-accent/30 ring-inset' : ''} ${
+                  isGroupHighlighted ? 'border-l-2 border-l-accent bg-accent/5' : ''
+                }`}
               >
                 {/* Speaker header */}
                 <div className="flex items-center gap-2 mb-1">

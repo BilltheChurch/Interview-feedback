@@ -34,6 +34,9 @@ import {
   Loader2,
   Sparkles,
   ScrollText,
+  PanelRight,
+  PanelRightClose,
+  Lightbulb,
 } from 'lucide-react';
 import { useSessionStore } from '../stores/sessionStore';
 import { TranscriptSection, type TranscriptUtterance, type UtteranceEvidenceMap } from '../components/TranscriptSection';
@@ -46,6 +49,9 @@ import { ConfidenceBadge } from '../components/ui/ConfidenceBadge';
 import { Modal } from '../components/ui/Modal';
 import { Select } from '../components/ui/Select';
 import { TextArea } from '../components/ui/TextArea';
+import { FootnoteRef } from '../components/ui/FootnoteRef';
+import { FootnoteList, type FootnoteEntry } from '../components/ui/FootnoteList';
+import { useFootnotes } from '../hooks/useFootnotes';
 
 /* ─── Motion Variants ────────────────────────────────── */
 
@@ -80,6 +86,11 @@ type Claim = {
 
 type DimensionFeedback = {
   dimension: string;
+  label_zh?: string;
+  score?: number;                   // 0-10, from LLM
+  score_rationale?: string;
+  evidence_insufficient?: boolean;
+  not_applicable?: boolean;
   claims: Claim[];
 };
 
@@ -105,6 +116,21 @@ type OverallFeedback = {
   interaction_events: string[];
   team_dynamics: TeamDynamic[];
   evidence_refs: string[];
+  // New narrative-based fields
+  teamSummaryNarrative?: string;
+  teamSummaryEvidenceRefs?: string[];
+  keyFindings?: Array<{
+    type: 'strength' | 'risk' | 'observation';
+    text: string;
+    evidence_refs: string[];
+  }>;
+  suggestedDimensions?: Array<{
+    key: string;
+    label_zh: string;
+    reason: string;
+    action: 'add' | 'replace' | 'mark_not_applicable';
+    replaces?: string;
+  }>;
 };
 
 type FeedbackReport = {
@@ -112,6 +138,7 @@ type FeedbackReport = {
   session_name: string;
   date: string;
   duration_ms: number;
+  durationLabel?: string;
   status: 'draft' | 'final';
   mode: '1v1' | 'group';
   participants: string[];
@@ -121,7 +148,37 @@ type FeedbackReport = {
   transcript: TranscriptUtterance[];
   utteranceEvidenceMap: UtteranceEvidenceMap;
   captionSource?: string;
+  interviewType?: string;
+  positionTitle?: string;
 };
+
+/* ─── Legacy Score Helpers ─────────────────────────────── */
+
+function calculateLegacyScore(dim: any): number {
+  const total = (dim.strengths?.length ?? 0) + (dim.risks?.length ?? 0) + (dim.actions?.length ?? 0);
+  if (total === 0) return 5;
+  const strengthRatio = (dim.strengths?.length ?? 0) / total;
+  return Math.round(strengthRatio * 10 * 10) / 10;
+}
+
+function legacyDimensionLabel(dimension: string): string {
+  const map: Record<string, string> = {
+    leadership: '领导力', collaboration: '协作能力', logic: '逻辑推理',
+    structure: '表达结构', initiative: '主动性',
+  };
+  return map[dimension] ?? dimension;
+}
+
+/* ─── Inline Evidence Ref Stripper ─────────────────────── */
+
+function stripInlineEvidenceRefs(text: string): { cleanText: string; extractedRefs: string[] } {
+  const refs: string[] = [];
+  const clean = text.replace(/\[e_\d+\]/g, (match) => {
+    refs.push(match.slice(1, -1));  // "e_000921"
+    return '';
+  });
+  return { cleanText: clean.trim(), extractedRefs: refs };
+}
 
 /* ─── API → Frontend Report Transformer ───────────────── */
 // The backend API (ResultV2) uses a different schema than the frontend FeedbackReport.
@@ -156,6 +213,24 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     }
     return '';
   })();
+
+  // ── Team Summary — new narrative format ──
+  let teamSummaryNarrative = '';
+  let teamSummaryEvidenceRefs: string[] = [];
+  const overall = raw.overall;
+  if (overall?.narrative) {
+    teamSummaryNarrative = overall.narrative;
+    teamSummaryEvidenceRefs = overall.narrative_evidence_refs ?? [];
+  } else if (overall?.summary_sections) {
+    // Legacy: flatten bullets into narrative
+    teamSummaryNarrative = (overall.summary_sections as any[])
+      .map((s: any) => s.bullets?.join(' '))
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  const keyFindings = overall?.key_findings ?? [];
+  const suggestedDimensions = overall?.suggested_dimensions ?? [];
 
   // ── overall.teacher_memos: from memos[] or overall ──
   const teacherMemos: string[] = (() => {
@@ -251,7 +326,24 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
             });
           }
         }
-        return { dimension: d.dimension || 'unknown', claims };
+        // Strip inline evidence refs like [e_000921] from claim text
+        const cleanedClaims = claims.map(claim => {
+          const { cleanText, extractedRefs } = stripInlineEvidenceRefs(claim.text);
+          return {
+            ...claim,
+            text: cleanText || claim.text,
+            evidence_refs: [...claim.evidence_refs, ...extractedRefs],
+          };
+        });
+        return {
+          dimension: d.dimension || 'unknown',
+          label_zh: typeof d.label_zh === 'string' ? d.label_zh : legacyDimensionLabel(d.dimension || 'unknown'),
+          score: typeof d.score === 'number' ? d.score : calculateLegacyScore(d),
+          score_rationale: typeof d.score_rationale === 'string' ? d.score_rationale : '',
+          evidence_insufficient: d.evidence_insufficient || false,
+          not_applicable: d.not_applicable || false,
+          claims: cleanedClaims,
+        };
       });
 
       // Summary: join arrays into single strings
@@ -311,11 +403,14 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
       ? raw.caption_source
       : undefined;
 
+  const durationMs = sessionMeta?.durationMs || raw.duration_ms || 0;
+
   return {
     session_id: raw.session?.session_id || raw.session_id || '',
     session_name: sessionMeta?.name || raw.session_name || '',
     date: sessionMeta?.date || raw.date || new Date().toISOString().slice(0, 10),
-    duration_ms: sessionMeta?.durationMs || raw.duration_ms || 0,
+    duration_ms: durationMs,
+    durationLabel: formatDuration(durationMs),
     status: 'final',
     mode: (sessionMeta?.mode as '1v1' | 'group') || raw.mode || '1v1',
     participants,
@@ -325,12 +420,19 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
       interaction_events: interactionEvents,
       team_dynamics: teamDynamics,
       evidence_refs: overallEvidenceRefs,
+      // New narrative-based fields
+      teamSummaryNarrative: teamSummaryNarrative || undefined,
+      teamSummaryEvidenceRefs: teamSummaryEvidenceRefs.length > 0 ? teamSummaryEvidenceRefs : undefined,
+      keyFindings: keyFindings.length > 0 ? keyFindings : undefined,
+      suggestedDimensions: suggestedDimensions.length > 0 ? suggestedDimensions : undefined,
     },
     persons,
     evidence,
     transcript: normalizedTranscript,
     utteranceEvidenceMap,
     captionSource,
+    interviewType: raw.interview_type || raw.overall?.interview_type || undefined,
+    positionTitle: raw.position_title || raw.overall?.position_title || undefined,
   };
 }
 
@@ -1050,6 +1152,7 @@ function FeedbackHeader({
   sessionNotes,
   sessionMemos,
   captionSource,
+  onTranscriptToggle,
 }: {
   report: FeedbackReport;
   onRegenerate: (mode?: 'full' | 'report-only') => void;
@@ -1061,6 +1164,7 @@ function FeedbackHeader({
   sessionNotes?: string;
   sessionMemos?: Memo[];
   captionSource?: string;
+  onTranscriptToggle?: () => void;
 }) {
   const [copiedText, setCopiedText] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
@@ -1271,6 +1375,13 @@ function FeedbackHeader({
           Export DOCX
         </Button>
         <div className="w-px h-5 bg-border mx-1" />
+        {onTranscriptToggle && (
+          <Button variant="secondary" size="sm" onClick={onTranscriptToggle} className="transition-all duration-200">
+            <PanelRight className="w-3.5 h-3.5" />
+            Transcript
+          </Button>
+        )}
+        <div className="w-px h-5 bg-border mx-1" />
         {captionSource === 'acs-teams' ? (
           <SplitButton
             options={[
@@ -1294,42 +1405,131 @@ function FeedbackHeader({
 function OverallCard({
   report,
   onEvidenceClick,
+  onFootnoteClick,
+  suggestedDimensions,
+  onAcceptSuggestions,
+  onDismissSuggestions,
 }: {
   report: FeedbackReport;
   onEvidenceClick: (ev: EvidenceRef) => void;
+  onFootnoteClick?: (evidenceId: string) => void;
+  suggestedDimensions?: OverallFeedback['suggestedDimensions'];
+  onAcceptSuggestions?: () => void;
+  onDismissSuggestions?: () => void;
 }) {
   const [memosOpen, setMemosOpen] = useState(true);
   const [eventsOpen, setEventsOpen] = useState((report.overall?.interaction_events?.length ?? 0) > 0);
 
+  // Build evidence map for useFootnotes
+  const overallEvidenceMap = useMemo(() => {
+    const map = new Map<string, { evidence_id: string; speaker?: { display_name?: string }; time_range_ms?: [number, number]; quote?: string }>();
+    for (const ev of report.evidence) {
+      map.set(ev.id, {
+        evidence_id: ev.id,
+        speaker: { display_name: ev.speaker },
+        time_range_ms: [ev.timestamp_ms, ev.timestamp_ms],
+        quote: ev.text,
+      });
+    }
+    return map;
+  }, [report.evidence]);
+
+  const narrativeEvidenceRefs = report.overall.teamSummaryEvidenceRefs ?? report.overall.evidence_refs;
+  const { footnoteEntries: overallFootnotes, getFootnoteIndex: getOverallFootnoteIndex } = useFootnotes(narrativeEvidenceRefs, overallEvidenceMap);
+
+  const hasNarrative = !!report.overall.teamSummaryNarrative;
+
   return (
     <Card glass className="border-t-2 border-t-accent p-5">
-      <h2 className="text-sm font-semibold text-ink mb-3">Team Summary</h2>
-      <p className="text-sm text-ink-secondary leading-relaxed mb-4">
-        {report.overall.team_summary}
-      </p>
-
-      {/* Evidence chips */}
-      <div className="flex flex-wrap gap-2 mb-4">
-        {report.overall.evidence_refs.map((refId) => {
-          const ev = getEvidenceById(report, refId);
-          if (!ev) return null;
-          return (
-            <motion.div
-              key={refId}
-              whileHover={{ scale: 1.03 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 17 }}
-            >
-              <EvidenceChip
-                timestamp={formatTimestamp(ev.timestamp_ms)}
-                speaker={ev.speaker}
-                quote={ev.text}
-                onClick={() => onEvidenceClick(ev)}
-                className={ev.weak ? 'border-dashed opacity-80' : ''}
-              />
-            </motion.div>
-          );
-        })}
+      {/* Interview metadata header */}
+      <div className="flex items-center gap-3 text-xs text-secondary mb-4">
+        <span>{report.date}</span>
+        <span>\u00b7</span>
+        <span>{report.durationLabel ?? formatDuration(report.duration_ms)}</span>
+        {report.interviewType && <><span>\u00b7</span><span>{report.interviewType}</span></>}
+        {report.positionTitle && <><span>\u00b7</span><span>\u76ee\u6807: {report.positionTitle}</span></>}
       </div>
+
+      <h2 className="text-sm font-semibold text-ink mb-3">Team Summary</h2>
+
+      {/* New narrative format with footnotes */}
+      {hasNarrative ? (
+        <div className="mb-4">
+          <p className="text-sm text-ink-secondary leading-relaxed">
+            {report.overall.teamSummaryNarrative}
+            {narrativeEvidenceRefs.map((refId) => (
+              <FootnoteRef
+                key={refId}
+                index={getOverallFootnoteIndex(refId)}
+                onClick={() => onFootnoteClick?.(refId)}
+              />
+            ))}
+          </p>
+          <FootnoteList entries={overallFootnotes} onFootnoteClick={onFootnoteClick} />
+        </div>
+      ) : (
+        <p className="text-sm text-ink-secondary leading-relaxed mb-4">
+          {report.overall.team_summary}
+        </p>
+      )}
+
+      {/* Key Findings */}
+      {report.overall.keyFindings && report.overall.keyFindings.length > 0 && (
+        <div className="mb-4 space-y-2">
+          <h3 className="text-xs font-semibold text-ink-secondary uppercase tracking-wide">Key Findings</h3>
+          {report.overall.keyFindings.map((finding, i) => {
+            const findingColor = finding.type === 'strength'
+              ? 'border-l-emerald-400 bg-emerald-50/50'
+              : finding.type === 'risk'
+                ? 'border-l-amber-400 bg-amber-50/50'
+                : 'border-l-blue-400 bg-blue-50/50';
+            const findingLabel = finding.type === 'strength' ? '\u4f18\u52bf'
+              : finding.type === 'risk' ? '\u98ce\u9669' : '\u89c2\u5bdf';
+            return (
+              <div key={i} className={`border-l-4 ${findingColor} rounded-r-lg p-3`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-xs font-medium text-ink-secondary">{findingLabel}</span>
+                </div>
+                <p className="text-sm text-ink leading-relaxed">
+                  {finding.text}
+                  {(finding.evidence_refs ?? []).map((refId) => (
+                    <FootnoteRef
+                      key={refId}
+                      index={getOverallFootnoteIndex(refId)}
+                      onClick={() => onFootnoteClick?.(refId)}
+                    />
+                  ))}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Legacy: Evidence chips (when no narrative) */}
+      {!hasNarrative && (
+        <div className="flex flex-wrap gap-2 mb-4">
+          {report.overall.evidence_refs.map((refId) => {
+            const ev = getEvidenceById(report, refId);
+            if (!ev) return null;
+            return (
+              <motion.div
+                key={refId}
+                whileHover={{ scale: 1.03 }}
+                transition={{ type: 'spring', stiffness: 400, damping: 17 }}
+              >
+                <EvidenceChip
+                  timestamp={formatTimestamp(ev.timestamp_ms)}
+                  speaker={ev.speaker}
+                  quote={ev.text}
+                  onClick={() => onEvidenceClick(ev)}
+                  className={ev.weak ? 'border-dashed opacity-80' : ''}
+                />
+              </motion.div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Teacher Memos */}
       <div className="border-t border-border pt-3 mb-3">
@@ -1417,6 +1617,38 @@ function OverallCard({
           ))}
         </div>
       </div>
+
+      {/* AI Dimension Suggestions */}
+      {suggestedDimensions && suggestedDimensions.length > 0 && (
+        <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 mt-4">
+          <div className="flex items-center gap-2 text-sm font-medium text-accent mb-2">
+            <Lightbulb className="w-4 h-4" />
+            AI 建议
+          </div>
+          <div className="space-y-1.5">
+            {suggestedDimensions.map((s) => (
+              <p key={s.key} className="text-sm text-ink">
+                • {s.action === 'add' ? '新增' : s.action === 'mark_not_applicable' ? '标记不适用' : '替换'}
+                「{s.label_zh}」— {s.reason}
+              </p>
+            ))}
+          </div>
+          <div className="flex gap-2 mt-3">
+            <button
+              className="px-3 py-1 rounded-md bg-accent text-white text-xs hover:bg-accent/90 transition-colors cursor-pointer"
+              onClick={() => onAcceptSuggestions?.()}
+            >
+              接受建议
+            </button>
+            <button
+              className="px-3 py-1 rounded-md border border-border text-xs text-secondary hover:text-ink transition-colors cursor-pointer"
+              onClick={() => onDismissSuggestions?.()}
+            >
+              保持原维度
+            </button>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -1427,19 +1659,34 @@ function ClaimCard({
   onEditClick,
   onEvidenceClick,
   onNeedsEvidenceClick,
+  getFootnoteIndex,
+  onFootnoteClick,
 }: {
   claim: Claim;
   report: FeedbackReport;
   onEditClick: () => void;
   onEvidenceClick: (ev: EvidenceRef) => void;
   onNeedsEvidenceClick: () => void;
+  getFootnoteIndex?: (evidenceId: string) => number;
+  onFootnoteClick?: (evidenceId: string) => void;
 }) {
+  const hasFootnotes = !!getFootnoteIndex;
+
   return (
     <div
       className={`group border border-border border-l-4 ${CATEGORY_BORDER[claim.category]} rounded-[--radius-button] p-3 hover:bg-surface-hover transition-colors`}
     >
       <div className="flex items-start gap-2 mb-2">
-        <p className="text-sm text-ink flex-1">{claim.text}</p>
+        <p className="text-sm text-ink flex-1 leading-relaxed">
+          {claim.text}
+          {hasFootnotes && (claim.evidence_refs ?? []).map((refId) => (
+            <FootnoteRef
+              key={refId}
+              index={getFootnoteIndex(refId)}
+              onClick={() => onFootnoteClick?.(refId)}
+            />
+          ))}
+        </p>
         <ConfidenceBadge score={claim.confidence} />
         <button
           type="button"
@@ -1450,38 +1697,51 @@ function ClaimCard({
           <Pencil className="w-3.5 h-3.5" />
         </button>
       </div>
-      <div className="flex flex-wrap gap-1.5">
-        {claim.evidence_refs.length === 0 && (
+      {/* Needs Evidence badge */}
+      {claim.evidence_refs.length === 0 && (
+        <div className="flex flex-wrap gap-1.5">
           <button type="button" onClick={onNeedsEvidenceClick} className="cursor-pointer">
             <Chip variant="error">Needs Evidence</Chip>
           </button>
-        )}
-        {claim.evidence_refs.map((refId) => {
-          const ev = getEvidenceById(report, refId);
-          if (!ev) return null;
-          return (
-            <motion.div
-              key={refId}
-              whileHover={{ scale: 1.03 }}
-              transition={{ type: 'spring', stiffness: 400, damping: 17 }}
-            >
-              <EvidenceChip
-                timestamp={formatTimestamp(ev.timestamp_ms)}
-                speaker={ev.speaker}
-                quote={ev.text}
-                onClick={() => onEvidenceClick(ev)}
-                className={ev.weak ? 'border-dashed' : ''}
-              />
-            </motion.div>
-          );
-        })}
-        {claim.evidence_refs.some((refId) => {
-          const ev = getEvidenceById(report, refId);
-          return ev?.weak;
-        }) && (
-          <Chip variant="warning" className="text-xs">weak</Chip>
-        )}
-      </div>
+        </div>
+      )}
+      {/* Legacy: show EvidenceChips only when footnote system is not active */}
+      {!hasFootnotes && claim.evidence_refs.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {claim.evidence_refs.map((refId) => {
+            const ev = getEvidenceById(report, refId);
+            if (!ev) return null;
+            return (
+              <motion.div
+                key={refId}
+                whileHover={{ scale: 1.03 }}
+                transition={{ type: 'spring', stiffness: 400, damping: 17 }}
+              >
+                <EvidenceChip
+                  timestamp={formatTimestamp(ev.timestamp_ms)}
+                  speaker={ev.speaker}
+                  quote={ev.text}
+                  onClick={() => onEvidenceClick(ev)}
+                  className={ev.weak ? 'border-dashed' : ''}
+                />
+              </motion.div>
+            );
+          })}
+          {claim.evidence_refs.some((refId) => {
+            const ev = getEvidenceById(report, refId);
+            return ev?.weak;
+          }) && (
+            <Chip variant="warning" className="text-xs">weak</Chip>
+          )}
+        </div>
+      )}
+      {/* Weak indicator for footnote mode */}
+      {hasFootnotes && claim.evidence_refs.some((refId) => {
+        const ev = getEvidenceById(report, refId);
+        return ev?.weak;
+      }) && (
+        <Chip variant="warning" className="text-xs mt-1">weak evidence</Chip>
+      )}
     </div>
   );
 }
@@ -1549,13 +1809,42 @@ function PersonFeedbackCard({
   onClaimEdit,
   onEvidenceClick,
   onNeedsEvidence,
+  onFootnoteClick,
 }: {
   person: PersonFeedback;
   report: FeedbackReport;
   onClaimEdit: (claim: Claim, person: PersonFeedback) => void;
   onEvidenceClick: (ev: EvidenceRef) => void;
   onNeedsEvidence: (claim: Claim) => void;
+  onFootnoteClick?: (evidenceId: string) => void;
 }) {
+  // Collect all evidence_refs across all claims for this person
+  const allPersonEvidenceRefs = useMemo(() => {
+    const refs: string[] = [];
+    for (const dim of person.dimensions) {
+      for (const claim of dim.claims) {
+        refs.push(...claim.evidence_refs);
+      }
+    }
+    return refs;
+  }, [person.dimensions]);
+
+  // Build evidence map for useFootnotes
+  const personEvidenceMap = useMemo(() => {
+    const map = new Map<string, { evidence_id: string; speaker?: { display_name?: string }; time_range_ms?: [number, number]; quote?: string }>();
+    for (const ev of report.evidence) {
+      map.set(ev.id, {
+        evidence_id: ev.id,
+        speaker: { display_name: ev.speaker },
+        time_range_ms: [ev.timestamp_ms, ev.timestamp_ms],
+        quote: ev.text,
+      });
+    }
+    return map;
+  }, [report.evidence]);
+
+  const { footnoteEntries, getFootnoteIndex } = useFootnotes(allPersonEvidenceRefs, personEvidenceMap);
+
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-1">
@@ -1587,12 +1876,60 @@ function PersonFeedbackCard({
           onClaimEdit={(claim) => onClaimEdit(claim, person)}
           onEvidenceClick={onEvidenceClick}
           onNeedsEvidence={onNeedsEvidence}
+          getFootnoteIndex={getFootnoteIndex}
+          onFootnoteClick={onFootnoteClick}
         />
       ))}
       <PersonSummary summary={person.summary} />
+      {/* Footnote list at the bottom of the person section */}
+      {footnoteEntries.length > 0 && (
+        <FootnoteList entries={footnoteEntries} onFootnoteClick={onFootnoteClick} />
+      )}
     </Card>
   );
 }
+
+/* ─── EvidenceCard (tier-aware) ───────────────────────── */
+
+function EvidenceCard({ evidence, claimCount, dimensions, onTimestampClick, isHighlighted }: {
+  evidence: EvidenceRef & { source_tier?: number };
+  claimCount: number;
+  dimensions: string[];
+  onTimestampClick: (evidenceId: string) => void;
+  isHighlighted?: boolean;
+}) {
+  const tierConfig: Record<number, { color: string; label: string }> = {
+    1: { color: 'bg-emerald-50 border-emerald-200', label: '\u9762\u8bd5\u8005\u53d1\u8a00' },
+    2: { color: 'bg-blue-50 border-blue-200', label: '\u9762\u8bd5\u5b98\u89c2\u5bdf' },
+    3: { color: 'bg-gray-50 border-gray-200', label: '\u8f85\u52a9\u4f50\u8bc1' },
+  };
+  const tier = tierConfig[evidence.source_tier ?? 1] ?? tierConfig[1];
+
+  return (
+    <div className={`rounded-lg border p-3 ${tier.color} ${isHighlighted ? 'ring-2 ring-accent' : ''}`}>
+      <div className="flex items-center gap-2 text-xs text-secondary mb-1.5">
+        <span>{tier.label}</span>
+        {evidence.weak && <Chip variant="warning" className="text-xs">weak</Chip>}
+        <ConfidenceBadge score={evidence.confidence} />
+      </div>
+      <p className="text-sm text-ink leading-relaxed">&quot;{evidence.text}&quot;</p>
+      <div className="flex items-center gap-3 mt-2 text-xs text-secondary">
+        <span
+          className="cursor-pointer hover:text-accent"
+          onClick={() => onTimestampClick(evidence.id)}
+        >
+          {evidence.speaker} \u00b7 {formatTimestamp(evidence.timestamp_ms)}
+        </span>
+        <span>\u88ab\u5f15\u7528 {claimCount} \u6b21</span>
+        {dimensions.length > 0 && (
+          <span>\u5173\u8054: {dimensions.join(', ')}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── EvidenceTimeline (redesigned with tier filter + EvidenceCard) ─── */
 
 function EvidenceTimeline({
   report,
@@ -1604,40 +1941,65 @@ function EvidenceTimeline({
   onEvidenceClick: (ev: EvidenceRef) => void;
 }) {
   const [speakerFilter, setSpeakerFilter] = useState('');
-  const [strengthFilter, setStrengthFilter] = useState('');
+  const [tierFilter, setTierFilter] = useState<'all' | 1 | 2 | 3>('all');
+  const [showTier3, setShowTier3] = useState(false);
   const [sortAsc, setSortAsc] = useState(true);
+  const [showAll, setShowAll] = useState(false);
 
   const speakers = useMemo(() => {
     const set = new Set(report.evidence.map((e) => e.speaker));
     return Array.from(set).sort();
   }, [report.evidence]);
 
+  // Build a map: evidenceId -> { claimCount, dimensions }
+  const evidenceMeta = useMemo(() => {
+    const meta = new Map<string, { claimCount: number; dimensions: string[] }>();
+    for (const ev of report.evidence) {
+      const claims = getClaimsForEvidence(report, ev.id);
+      const dims = new Set<string>();
+      for (const { claim } of claims) {
+        // Find which dimension this claim belongs to
+        for (const person of report.persons) {
+          for (const dim of person.dimensions) {
+            if (dim.claims.some(c => c.id === claim.id)) {
+              dims.add(dim.label_zh ?? dim.dimension);
+            }
+          }
+        }
+      }
+      meta.set(ev.id, { claimCount: claims.length, dimensions: Array.from(dims) });
+    }
+    return meta;
+  }, [report]);
+
   const filtered = useMemo(() => {
-    let items = [...report.evidence];
+    let items = [...report.evidence] as Array<EvidenceRef & { source_tier?: number }>;
     if (speakerFilter) {
       items = items.filter((e) => e.speaker === speakerFilter);
     }
-    if (strengthFilter === 'weak') {
-      items = items.filter((e) => e.weak);
-    } else if (strengthFilter === 'strong') {
-      items = items.filter((e) => !e.weak);
+    // Tier filter: tier_3 is collapsed by default unless showTier3 is true
+    if (tierFilter === 'all') {
+      items = items.filter(e => ((e as any).source_tier !== 3) || showTier3);
+    } else {
+      items = items.filter(e => ((e as any).source_tier ?? 1) === tierFilter);
     }
     items.sort((a, b) =>
       sortAsc ? a.timestamp_ms - b.timestamp_ms : b.timestamp_ms - a.timestamp_ms
     );
     return items;
-  }, [report.evidence, speakerFilter, strengthFilter, sortAsc]);
+  }, [report.evidence, speakerFilter, tierFilter, showTier3, sortAsc]);
 
   const speakerOptions = [
     { value: '', label: 'All Speakers' },
     ...speakers.map((s) => ({ value: s, label: s })),
   ];
 
-  const strengthOptions = [
-    { value: '', label: 'All Evidence' },
-    { value: 'strong', label: 'Strong Only' },
-    { value: 'weak', label: 'Weak Only' },
-  ];
+  const INITIAL_SHOW = 10;
+  const displayItems = showAll ? filtered : filtered.slice(0, INITIAL_SHOW);
+  const hasMore = filtered.length > INITIAL_SHOW && !showAll;
+
+  // Check if any evidence has tier 3
+  const hasTier3 = report.evidence.some(e => (e as any).source_tier === 3);
 
   return (
     <Card className="p-5">
@@ -1650,12 +2012,25 @@ function EvidenceTimeline({
             onChange={(e) => setSpeakerFilter(e.target.value)}
             className="w-40"
           />
-          <Select
-            options={strengthOptions}
-            value={strengthFilter}
-            onChange={(e) => setStrengthFilter(e.target.value)}
-            className="w-36"
-          />
+          {/* Tier filter buttons */}
+          <div className="flex items-center gap-0.5 border border-border rounded-lg p-0.5">
+            {([['all', '\u5168\u90e8'], [1, 'T1'], [2, 'T2'], [3, 'T3']] as const).map(([val, label]) => (
+              <button
+                key={String(val)}
+                onClick={() => {
+                  if (val === 3 && tierFilter !== 3) setShowTier3(true);
+                  setTierFilter(val as 'all' | 1 | 2 | 3);
+                }}
+                className={`px-2 py-1 text-xs rounded-md transition-colors cursor-pointer ${
+                  tierFilter === val
+                    ? 'bg-accent text-white'
+                    : 'text-ink-secondary hover:bg-surface-hover'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <Button
             variant="ghost"
             size="sm"
@@ -1666,53 +2041,36 @@ function EvidenceTimeline({
         </div>
       </div>
       <div className="space-y-2">
-        {filtered.map((ev) => {
-          const refClaims = getClaimsForEvidence(report, ev.id);
-          const isHighlighted = highlightEvidence === ev.id;
-
+        {displayItems.map((ev) => {
+          const meta = evidenceMeta.get(ev.id) ?? { claimCount: 0, dimensions: [] };
           return (
-            <button
-              key={ev.id}
-              type="button"
-              onClick={() => onEvidenceClick(ev)}
-              className={`
-                w-full text-left flex items-start gap-3 rounded-[--radius-button] p-3 transition-all cursor-pointer
-                ${isHighlighted
-                  ? 'bg-accent-soft border-2 border-accent'
-                  : `border ${ev.weak ? 'border-dashed border-amber-300' : 'border-border'} hover:bg-surface-hover`
-                }
-              `}
-            >
-              <span className="font-mono text-xs text-accent whitespace-nowrap mt-0.5">
-                [{formatTimestamp(ev.timestamp_ms)}]
-              </span>
-              <span className="text-xs font-medium text-ink whitespace-nowrap mt-0.5">
-                {ev.speaker}
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-ink-secondary leading-relaxed">
-                  &ldquo;{ev.text}&rdquo;
-                </p>
-                {refClaims.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-1.5">
-                    {refClaims.map(({ person, claim }) => (
-                      <span
-                        key={claim.id}
-                        className="text-xs text-ink-tertiary bg-surface-hover rounded px-1.5 py-0.5"
-                      >
-                        {person}: {claim.text.slice(0, 30)}...
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                {ev.weak && <Chip variant="warning" className="text-xs">weak</Chip>}
-                <ConfidenceBadge score={ev.confidence} />
-              </div>
-            </button>
+            <div key={ev.id} onClick={() => onEvidenceClick(ev)} className="cursor-pointer">
+              <EvidenceCard
+                evidence={ev}
+                claimCount={meta.claimCount}
+                dimensions={meta.dimensions}
+                onTimestampClick={(id) => {
+                  const evObj = report.evidence.find(e => e.id === id);
+                  if (evObj) onEvidenceClick(evObj);
+                }}
+                isHighlighted={highlightEvidence === ev.id}
+              />
+            </div>
           );
         })}
+      </div>
+      {/* Show more / Tier 3 toggle */}
+      <div className="flex items-center gap-3 mt-3">
+        {hasMore && (
+          <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
+            \u663e\u793a\u66f4\u591a ({filtered.length - INITIAL_SHOW} \u6761)
+          </Button>
+        )}
+        {hasTier3 && tierFilter === 'all' && !showTier3 && (
+          <Button variant="ghost" size="sm" onClick={() => setShowTier3(true)}>
+            \u663e\u793a\u8f85\u52a9\u4f50\u8bc1 (Tier 3)
+          </Button>
+        )}
       </div>
     </Card>
   );
@@ -2050,20 +2408,39 @@ function CompetencyRadar({
 }: {
   dimensions: DimensionFeedback[];
 }) {
+  // Filter out not_applicable dimensions
+  const activeDims = dimensions.filter((d) => !d.not_applicable);
+  if (activeDims.length < 3) return null;
+
   const cx = 90;
   const cy = 90;
   const r = 70;
-  const n = dimensions.length;
-  if (n < 3) return null;
-
+  const n = activeDims.length;
+  const maxScore = 10;
   const angleStep = (2 * Math.PI) / n;
 
-  // Score each dimension: ratio of strengths to total claims (0-1)
-  const scores = dimensions.map((dim) => {
+  // Score: use LLM score (0-10) when available, fallback to strengths ratio
+  const scores = activeDims.map((dim) => {
+    if (typeof dim.score === 'number') {
+      return Math.max(0, Math.min(dim.score, maxScore)) / maxScore;
+    }
+    // Fallback for old data without score field
     const total = dim.claims.length;
     if (total === 0) return 0.5;
     const strengths = dim.claims.filter((c) => c.category === 'strength').length;
     return strengths / total;
+  });
+
+  // Raw scores for label display
+  const rawScores = activeDims.map((dim) => {
+    if (typeof dim.score === 'number') {
+      return Math.max(0, Math.min(dim.score, maxScore));
+    }
+    // Fallback: compute from claims ratio and scale to 0-10
+    const total = dim.claims.length;
+    if (total === 0) return 5;
+    const strengths = dim.claims.filter((c) => c.category === 'strength').length;
+    return Math.round((strengths / total) * maxScore * 10) / 10;
   });
 
   // Generate polygon points for the radar
@@ -2076,33 +2453,47 @@ function CompetencyRadar({
     })
     .join(' ');
 
-  // Grid rings at 25%, 50%, 75%, 100%
+  // Grid rings at 2.5, 5.0, 7.5, 10
   const rings = [0.25, 0.5, 0.75, 1.0];
+  const ringLabels = ['2.5', '5.0', '7.5', '10'];
 
   return (
     <div className="flex items-center justify-center py-3">
       <svg width="180" height="180" viewBox="0 0 180 180" className="overflow-visible">
-        {/* Grid rings */}
-        {rings.map((ring) => (
-          <polygon
-            key={ring}
-            points={Array.from({ length: n })
-              .map((_, i) => {
-                const angle = -Math.PI / 2 + i * angleStep;
-                const x = cx + r * ring * Math.cos(angle);
-                const y = cy + r * ring * Math.sin(angle);
-                return `${x},${y}`;
-              })
-              .join(' ')}
-            fill="none"
-            stroke="var(--color-border)"
-            strokeWidth="0.5"
-            opacity={0.6}
-          />
+        {/* Grid rings with labels */}
+        {rings.map((ring, ri) => (
+          <g key={ring}>
+            <polygon
+              points={Array.from({ length: n })
+                .map((_, i) => {
+                  const angle = -Math.PI / 2 + i * angleStep;
+                  const x = cx + r * ring * Math.cos(angle);
+                  const y = cy + r * ring * Math.sin(angle);
+                  return `${x},${y}`;
+                })
+                .join(' ')}
+              fill="none"
+              stroke="var(--color-border)"
+              strokeWidth="0.5"
+              opacity={0.6}
+            />
+            {/* Ring label on the top axis */}
+            <text
+              x={cx}
+              y={cy - r * ring - 2}
+              textAnchor="middle"
+              dominantBaseline="auto"
+              fill="var(--color-ink-secondary)"
+              fontSize="7"
+              opacity={0.5}
+            >
+              {ringLabels[ri]}
+            </text>
+          </g>
         ))}
 
         {/* Axis lines */}
-        {dimensions.map((_, i) => {
+        {activeDims.map((_, i) => {
           const angle = -Math.PI / 2 + i * angleStep;
           const x = cx + r * Math.cos(angle);
           const y = cy + r * Math.sin(angle);
@@ -2139,13 +2530,21 @@ function CompetencyRadar({
           );
         })}
 
-        {/* Labels */}
-        {dimensions.map((dim, i) => {
+        {/* Labels: label_zh + score, low score (<4) in risk color */}
+        {activeDims.map((dim, i) => {
           const angle = -Math.PI / 2 + i * angleStep;
-          const labelR = r + 14;
+          const labelR = r + 16;
           const x = cx + labelR * Math.cos(angle);
           const y = cy + labelR * Math.sin(angle);
-          const label = dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1);
+          // Prefer label_zh, fallback to capitalized dimension key
+          const displayLabel = dim.label_zh || (dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1));
+          const scoreVal = rawScores[i];
+          const isLowScore = scoreVal < 4;
+          // Truncate long labels
+          const truncated = displayLabel.length > 6 ? displayLabel.slice(0, 5) + '…' : displayLabel;
+          const labelText = typeof dim.score === 'number'
+            ? `${truncated} ${scoreVal % 1 === 0 ? scoreVal.toFixed(0) : scoreVal.toFixed(1)}`
+            : truncated;
           return (
             <text
               key={i}
@@ -2153,11 +2552,11 @@ function CompetencyRadar({
               y={y}
               textAnchor="middle"
               dominantBaseline="central"
-              fill="var(--color-ink-secondary)"
+              fill={isLowScore ? 'var(--color-risk, #dc2626)' : 'var(--color-ink-secondary)'}
               fontSize="9"
-              fontWeight="500"
+              fontWeight={isLowScore ? '600' : '500'}
             >
-              {label.length > 10 ? label.slice(0, 8) + '...' : label}
+              {labelText}
             </text>
           );
         })}
@@ -2326,16 +2725,19 @@ function DimensionSummaryRow({
   onClaimEdit,
   onEvidenceClick,
   onNeedsEvidence,
+  getFootnoteIndex,
+  onFootnoteClick,
 }: {
   dim: DimensionFeedback;
   report: FeedbackReport;
   onClaimEdit: (claim: Claim) => void;
   onEvidenceClick: (ev: EvidenceRef) => void;
   onNeedsEvidence: (claim: Claim) => void;
+  getFootnoteIndex?: (evidenceId: string) => number;
+  onFootnoteClick?: (evidenceId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = DIMENSION_ICONS[dim.dimension] ?? Layers;
-  const label = dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1);
 
   const strengthCount = dim.claims.filter((c) => c.category === 'strength').length;
   const riskCount = dim.claims.filter((c) => c.category === 'risk').length;
@@ -2349,13 +2751,24 @@ function DimensionSummaryRow({
       >
         {expanded ? <ChevronDown className="w-3.5 h-3.5 text-ink-tertiary" /> : <ChevronRight className="w-3.5 h-3.5 text-ink-tertiary" />}
         <Icon className="w-4 h-4 text-accent" />
-        <span className="text-sm font-semibold text-ink flex-1 text-left">{label}</span>
+        <div className="flex items-center gap-2 flex-1 text-left">
+          <span className="text-sm font-semibold text-ink">{dim.label_zh ?? (dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1))}</span>
+          {dim.score !== undefined && (
+            <span className={`text-sm font-mono ${dim.score < 4 ? 'text-red-500' : dim.score >= 8 ? 'text-accent' : 'text-secondary'}`}>
+              {typeof dim.score === 'number' ? dim.score.toFixed(1) : dim.score}
+            </span>
+          )}
+          {dim.not_applicable && <span className="text-xs text-secondary/50">\u4e0d\u9002\u7528</span>}
+        </div>
         <span className="text-xs text-ink-tertiary">
           {strengthCount > 0 && <span className="text-success">{strengthCount}S</span>}
           {riskCount > 0 && <span className="ml-1.5 text-warning">{riskCount}R</span>}
           {actionCount > 0 && <span className="ml-1.5 text-blue-600">{actionCount}A</span>}
         </span>
       </button>
+      {dim.score_rationale && (
+        <p className="text-xs text-secondary mt-0.5 pl-8">{dim.score_rationale}</p>
+      )}
       <AnimatePresence>
         {expanded && (
           <motion.div
@@ -2374,6 +2787,8 @@ function DimensionSummaryRow({
                   onEditClick={() => onClaimEdit(claim)}
                   onEvidenceClick={onEvidenceClick}
                   onNeedsEvidenceClick={() => onNeedsEvidence(claim)}
+                  getFootnoteIndex={getFootnoteIndex}
+                  onFootnoteClick={onFootnoteClick}
                 />
               ))}
             </div>
@@ -2750,6 +3165,9 @@ export function FeedbackView() {
   const [evidenceModalMode, setEvidenceModalMode] = useState<'browse' | 'claim-editor'>('browse');
   const [highlightEvidence, setHighlightEvidence] = useState<string | null>(null);
 
+  // Suggestion banner state
+  const [dismissedSuggestions, setDismissedSuggestions] = useState(false);
+
   // ── Extract session metadata ──
   const sessionMemos: Memo[] = sessionData?.memos || [];
   const sessionStages: string[] = sessionData?.stages || [];
@@ -2843,6 +3261,17 @@ export function FeedbackView() {
     // Case 3: No session data at all -- demo fallback
     return DEMO_REPORT;
   }, [apiReport, sessionData, sessionId, derivedTeacherMemos, finalizeStatus]);
+
+  const handleAcceptSuggestions = useCallback(() => {
+    // Record acceptance — actual re-generate logic requires Worker API (future)
+    console.log('Accepted dimension suggestions:', report?.overall?.suggestedDimensions);
+    // TODO: call session config update + report regenerate
+    setDismissedSuggestions(true);
+  }, [report]);
+
+  const handleDismissSuggestions = useCallback(() => {
+    setDismissedSuggestions(true);
+  }, []);
 
   const handleClaimEdit = (claim: Claim, _person: PersonFeedback) => {
     setEditClaim(claim);
@@ -2961,6 +3390,11 @@ export function FeedbackView() {
   const [activeSection, setActiveSection] = useState('overview');
   const contentRef = useRef<HTMLDivElement>(null);
 
+  // Split view: transcript sidebar state
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [scrollToUtteranceId, setScrollToUtteranceId] = useState<string | null>(null);
+  const [highlightedUtteranceIds, setHighlightedUtteranceIds] = useState<Set<string>>(new Set());
+
   const handleSectionClick = useCallback((id: string) => {
     setActiveSection(id);
     const el = document.getElementById(id);
@@ -3027,6 +3461,29 @@ export function FeedbackView() {
     }
   }, [finalizeStatus, isDemo]);
 
+  // Handle footnote / evidence click → open transcript sidebar + scroll + highlight
+  const handleFootnoteClick = useCallback((evidenceId: string) => {
+    const ev = report.evidence.find(e => e.id === evidenceId);
+    if (!ev) return;
+    // Try to find utterance IDs from the utteranceEvidenceMap (reverse lookup)
+    const uttIds = new Set<string>();
+    for (const [uid, evIds] of Object.entries(report.utteranceEvidenceMap)) {
+      if (evIds.includes(evidenceId)) uttIds.add(uid);
+    }
+    // If no direct mapping, try to find transcript entries matching the evidence text
+    if (uttIds.size === 0) {
+      for (const u of report.transcript) {
+        if (u.text && ev.text && u.text.includes(ev.text.slice(0, 30))) {
+          uttIds.add(u.utterance_id);
+        }
+      }
+    }
+    setHighlightedUtteranceIds(uttIds);
+    const firstUttId = uttIds.size > 0 ? Array.from(uttIds)[0] : null;
+    setScrollToUtteranceId(firstUttId);
+    if (!transcriptOpen) setTranscriptOpen(true);
+  }, [report, transcriptOpen]);
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* ── Fixed header zone (never scrolls) ── */}
@@ -3042,6 +3499,7 @@ export function FeedbackView() {
               isDemo={isDemo}
               isEnhanced={finalizeStatus === 'tier2_ready'}
               sessionNotes={sessionNotes}
+              onTranscriptToggle={report.transcript.length > 0 ? () => setTranscriptOpen(v => !v) : undefined}
               sessionMemos={sessionMemos}
               captionSource={apiReport?.captionSource}
             />
@@ -3080,6 +3538,9 @@ export function FeedbackView() {
             <p className="text-sm text-ink-secondary">Loading report...</p>
           </div>
         ) : (
+        <div className="flex h-full">
+        {/* Main content area */}
+        <div className={`flex-1 overflow-hidden transition-all duration-300 ${transcriptOpen ? 'w-[60%]' : 'w-full'}`}>
         <div className="max-w-5xl mx-auto px-6 h-full flex gap-6">
           {/* Fixed left navigation (never scrolls) */}
           <SectionNav report={report} activeSection={activeSection} onSectionClick={handleSectionClick} />
@@ -3095,7 +3556,14 @@ export function FeedbackView() {
             <section id="overview" data-section className="pb-4 pt-6">
               <SectionStickyHeader icon={Activity} title="Overview" />
               <motion.div variants={fadeInUp} custom={1}>
-                <OverallCard report={report} onEvidenceClick={handleEvidenceClick} />
+                <OverallCard
+                    report={report}
+                    onEvidenceClick={handleEvidenceClick}
+                    onFootnoteClick={handleFootnoteClick}
+                    suggestedDimensions={!dismissedSuggestions ? report.overall.suggestedDimensions : undefined}
+                    onAcceptSuggestions={handleAcceptSuggestions}
+                    onDismissSuggestions={handleDismissSuggestions}
+                  />
               </motion.div>
             </section>
 
@@ -3151,6 +3619,7 @@ export function FeedbackView() {
                     onClaimEdit={handleClaimEdit}
                     onEvidenceClick={handleEvidenceClick}
                     onNeedsEvidence={handleNeedsEvidence}
+                    onFootnoteClick={handleFootnoteClick}
                   />
                 </motion.div>
               </section>
@@ -3190,6 +3659,40 @@ export function FeedbackView() {
               </motion.div>
             </section>
           </motion.div>
+        </div>
+        </div>
+
+        {/* Transcript sidebar */}
+        {transcriptOpen && (
+          <div className="w-[40%] border-l border-border flex flex-col bg-white shrink-0">
+            <div className="flex items-center justify-between p-3 border-b border-border shrink-0">
+              <span className="text-sm font-medium text-ink">Transcript</span>
+              <button
+                onClick={() => setTranscriptOpen(false)}
+                className="text-ink-secondary hover:text-ink transition-colors cursor-pointer"
+                aria-label="Close transcript panel"
+              >
+                <PanelRightClose className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <TranscriptSection
+                transcript={report.transcript}
+                evidenceMap={report.utteranceEvidenceMap}
+                onEvidenceBadgeClick={(evId) => {
+                  const ev = report.evidence.find(e => e.id === evId);
+                  if (ev) {
+                    setHighlightEvidence(evId);
+                    setDetailEvidence(ev);
+                    setEvidenceModalMode('browse');
+                  }
+                }}
+                scrollToUtteranceId={scrollToUtteranceId}
+                highlightedUtteranceIds={highlightedUtteranceIds}
+              />
+            </div>
+          </div>
+        )}
         </div>
         )}
       </div>

@@ -129,6 +129,16 @@ export interface SessionImport {
   passcode?: string;
 }
 
+
+/** Dimension preset item for interview evaluation */
+export interface DimensionPresetItem {
+  key: string;
+  label_zh: string;
+  label_en: string;
+  description: string;
+  weight: number;
+}
+
 declare global {
   interface Window {
     desktopAPI: DesktopAPI;

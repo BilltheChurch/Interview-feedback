@@ -5,6 +5,7 @@ import type {
   HistoricalSummary,
   MemoItem,
   MemoSpeakerBinding,
+  OverallFeedback,
   PersonFeedbackItem,
   ReportQualityMeta,
   ResultV2,
@@ -901,6 +902,20 @@ function toClaimId(personKey: string, dimension: DimensionFeedback["dimension"],
   return `c_${normalized}_${dimension}_${String(index).padStart(2, "0")}`;
 }
 
+// ── Evaluative keyword lists for teacher utterance classification ──────
+const EVALUATIVE_KEYWORDS_ZH = ["很好", "不错", "到位", "准确", "优秀", "出色", "需要改进", "不太对", "有进步", "深入", "清晰", "有趣"];
+const EVALUATIVE_KEYWORDS_EN = ["excellent", "good point", "impressive", "well done", "insightful", "needs improvement", "not quite", "interesting", "strong", "weak"];
+
+/** Classify a teacher utterance: returns 3 (tier_3 evaluative) or null (exclude). */
+export function classifyTeacherUtterance(text: string): 3 | null {
+  if (text.length <= 10) return null;
+  const lower = text.toLowerCase();
+  const hasEval = EVALUATIVE_KEYWORDS_ZH.some((k) => lower.includes(k))
+    || EVALUATIVE_KEYWORDS_EN.some((k) => lower.includes(k));
+  return hasEval ? 3 : null;
+}
+
+
 export function buildEvidence(options: {
   memos: MemoItem[];
   transcript: TranscriptItem[];
@@ -957,6 +972,8 @@ export function buildEvidence(options: {
       confidence: picked ? (weakUtterances.has(picked.utterance_id) ? 0.56 : 0.8) : 0.52,
       weak: picked ? weakUtterances.has(picked.utterance_id) : false,
       weak_reason: picked && weakUtterances.has(picked.utterance_id) ? "overlap_risk" : null,
+      source_tier: 2,
+      source_tier_label: "面试官观察",
     });
   }
 
@@ -979,7 +996,9 @@ export function buildEvidence(options: {
       quote: quoteFromUtterance(item.text),
       confidence: weakUtterances.has(item.utterance_id) ? 0.52 : 0.74,
       weak: weakUtterances.has(item.utterance_id),
-      weak_reason: weakUtterances.has(item.utterance_id) ? "overlap_risk" : null
+      weak_reason: weakUtterances.has(item.utterance_id) ? "overlap_risk" : null,
+      source_tier: item.stream_role === "teacher" ? (classifyTeacherUtterance(item.text) ?? undefined) : 1,
+      source_tier_label: item.stream_role === "teacher" ? (classifyTeacherUtterance(item.text) ? "辅助佐证" : undefined) : "面试者发言",
     });
     fallbackBySpeaker.add(key);
   }
@@ -1059,6 +1078,8 @@ export function buildMemoFirstReport(options: {
     const memoRows = options.memos.filter((memo) => inferMemoSpeakerKey(memo, evidenceById) === personKey);
     const dimensions: DimensionFeedback[] = DIMENSIONS.map((dimension) => ({
       dimension,
+      score: 5,
+      score_rationale: "",
       strengths: [],
       risks: [],
       actions: []
@@ -1645,7 +1666,7 @@ export function buildResultV2(params: {
     stats: params.stats,
     memos: params.memos,
     evidence: params.evidence,
-    overall: params.overall,
+    overall: params.overall as OverallFeedback,
     per_person: params.perPerson,
     quality: params.quality,
     trace: {

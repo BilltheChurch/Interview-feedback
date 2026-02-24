@@ -19,6 +19,8 @@ import {
   Loader2,
   Calendar,
   ExternalLink,
+  CheckSquare,
+  X,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -27,6 +29,7 @@ import { TextArea } from '../components/ui/TextArea';
 import { Chip } from '../components/ui/Chip';
 import { ShimmerButton } from '../components/magicui/shimmer-button';
 import { RubricTemplateModal, type CustomTemplate } from '../components/RubricTemplateModal';
+import { DIMENSION_PRESETS, type DimensionPresetItem } from '../lib/dimensionPresets';
 
 /* ─── Motion Variants ────────────────────────── */
 
@@ -696,6 +699,10 @@ export function SetupView() {
   const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
   const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
   const [template, setTemplate] = useState('general');
+  const [interviewType, setInterviewType] = useState<string>('academic');
+  const [dimensionPresets, setDimensionPresets] = useState<DimensionPresetItem[]>(
+    DIMENSION_PRESETS[0].dimensions
+  );
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [teamsUrl, setTeamsUrl] = useState(locationState?.teamsJoinUrl || '');
   const [stages, setStages] = useState<string[]>(
@@ -854,6 +861,8 @@ export function SetupView() {
       interviewerName: '',
       teamsJoinUrl: teamsUrl,
       templateId: template,
+      interviewType,
+      dimensionPresets,
     });
   }, [sessionName, mode, participants, template, stages, teamsUrl, startSession, navigate]);
 
@@ -1108,6 +1117,75 @@ export function SetupView() {
                         <span className="text-xs font-medium">Create Custom Template</span>
                       </button>
                     </motion.div>
+                  </div>
+                </Card>
+
+                {/* ── Interview Type & Dimension Presets ── */}
+                <Card className="p-4">
+                  <div className="space-y-3">
+                    <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider">
+                      面试类型
+                    </h3>
+                    <div className="flex gap-2 flex-wrap">
+                      {DIMENSION_PRESETS.map((preset) => (
+                        <button
+                          key={preset.interview_type}
+                          type="button"
+                          className={`px-3 py-1.5 rounded-lg text-sm border transition-colors cursor-pointer ${
+                            interviewType === preset.interview_type
+                              ? 'border-accent bg-accent/10 text-accent'
+                              : 'border-border text-secondary hover:border-accent/50'
+                          }`}
+                          onClick={() => {
+                            setInterviewType(preset.interview_type);
+                            setDimensionPresets(preset.dimensions);
+                          }}
+                        >
+                          {preset.label_zh}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 mt-4">
+                    <label className="text-sm font-medium text-ink">
+                      评估维度 <span className="text-secondary text-xs">(3-6 个)</span>
+                    </label>
+                    {dimensionPresets.map((dim, i) => (
+                      <div key={dim.key} className="flex items-center gap-2 p-2 rounded-lg bg-surface border border-border">
+                        <CheckSquare className="w-4 h-4 text-accent shrink-0" />
+                        <span className="text-sm font-medium">{dim.label_zh}</span>
+                        <span className="text-xs text-secondary flex-1 truncate">{dim.description}</span>
+                        {dimensionPresets.length > 3 && (
+                          <button
+                            type="button"
+                            className="cursor-pointer"
+                            onClick={() => {
+                              setDimensionPresets(prev => prev.filter((_, idx) => idx !== i));
+                            }}
+                          >
+                            <X className="w-3.5 h-3.5 text-secondary hover:text-red-500" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {dimensionPresets.length < 6 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allDims = DIMENSION_PRESETS.flatMap(p => p.dimensions);
+                          const usedKeys = new Set(dimensionPresets.map(d => d.key));
+                          const available = allDims.find(d => !usedKeys.has(d.key));
+                          if (available) {
+                            setDimensionPresets(prev => [...prev, available]);
+                          }
+                        }}
+                        className="text-xs text-accent hover:underline flex items-center gap-1 cursor-pointer"
+                      >
+                        <Plus className="w-3 h-3" />
+                        添加维度
+                      </button>
+                    )}
                   </div>
                 </Card>
 

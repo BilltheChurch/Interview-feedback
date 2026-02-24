@@ -1,9 +1,11 @@
 import json
+import re
 
 import pytest
 
 from app.schemas import (
     AnalysisReportResponse,
+    DimensionPreset,
     EvidenceRef,
     Memo,
     MemoSpeakerBinding,
@@ -19,7 +21,158 @@ from app.services.report_synthesizer import ReportSynthesizer
 
 
 class MockLLMForSynthesis:
-    """Returns a valid LLM JSON response matching the output contract."""
+    """Returns a valid LLM JSON response matching the v2 output contract."""
+
+    def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+        return {
+            "overall": {
+                "narrative": "Alice demonstrated strong system design skills and clear communication throughout the interview. She provided well-structured architecture proposals and handled scaling questions effectively.",
+                "narrative_evidence_refs": ["e_000001", "e_000002"],
+                "key_findings": [
+                    {
+                        "type": "strength",
+                        "text": "Strong system design fundamentals with layered architecture thinking",
+                        "evidence_refs": ["e_000001"],
+                    },
+                    {
+                        "type": "risk",
+                        "text": "Limited depth in behavioral questions",
+                        "evidence_refs": ["e_000002"],
+                    },
+                    {
+                        "type": "observation",
+                        "text": "Communication was clear and well-structured throughout",
+                        "evidence_refs": ["e_000001", "e_000002"],
+                    },
+                ],
+                "suggested_dimensions": [
+                    {
+                        "key": "system_design",
+                        "label_zh": "系统设计",
+                        "reason": "Interview heavily focused on system architecture",
+                        "action": "add",
+                        "replaces": None,
+                    }
+                ],
+            },
+            "per_person": [
+                {
+                    "person_key": "Alice",
+                    "display_name": "Alice",
+                    "dimensions": [
+                        {
+                            "dimension": "leadership",
+                            "label_zh": "领导力",
+                            "score": 7.5,
+                            "score_rationale": "Alice proactively led the system design discussion with clear structure.",
+                            "evidence_insufficient": False,
+                            "not_applicable": False,
+                            "strengths": [
+                                {
+                                    "claim_id": "c_Alice_leadership_01",
+                                    "text": "Effectively led the system design discussion with clear structure.",
+                                    "evidence_refs": ["e_000001", "e_000002"],
+                                    "confidence": 0.88,
+                                }
+                            ],
+                            "risks": [
+                                {
+                                    "claim_id": "c_Alice_leadership_02",
+                                    "text": "Could delegate more to other participants.",
+                                    "evidence_refs": ["e_000001"],
+                                    "confidence": 0.72,
+                                }
+                            ],
+                            "actions": [
+                                {
+                                    "claim_id": "c_Alice_leadership_03",
+                                    "text": "Practice active listening before proposing solutions.",
+                                    "evidence_refs": ["e_000002"],
+                                    "confidence": 0.75,
+                                }
+                            ],
+                        },
+                        {
+                            "dimension": "collaboration",
+                            "label_zh": "协作能力",
+                            "score": 6.0,
+                            "score_rationale": "Responded to questions but limited interaction with peers.",
+                            "evidence_insufficient": False,
+                            "not_applicable": False,
+                            "strengths": [
+                                {"claim_id": "c_Alice_collab_01", "text": "Responded to interviewer questions.", "evidence_refs": ["e_000001"], "confidence": 0.7}
+                            ],
+                            "risks": [
+                                {"claim_id": "c_Alice_collab_02", "text": "Limited interaction.", "evidence_refs": ["e_000002"], "confidence": 0.65}
+                            ],
+                            "actions": [
+                                {"claim_id": "c_Alice_collab_03", "text": "Acknowledge others.", "evidence_refs": ["e_000001"], "confidence": 0.68}
+                            ],
+                        },
+                        {
+                            "dimension": "logic",
+                            "label_zh": "逻辑思维",
+                            "score": 8.0,
+                            "score_rationale": "Clear reasoning throughout with well-connected arguments.",
+                            "evidence_insufficient": False,
+                            "not_applicable": False,
+                            "strengths": [
+                                {"claim_id": "c_Alice_logic_01", "text": "Clear reasoning.", "evidence_refs": ["e_000001"], "confidence": 0.8}
+                            ],
+                            "risks": [
+                                {"claim_id": "c_Alice_logic_02", "text": "Missing edge cases.", "evidence_refs": ["e_000002"], "confidence": 0.7}
+                            ],
+                            "actions": [
+                                {"claim_id": "c_Alice_logic_03", "text": "Consider edge cases.", "evidence_refs": ["e_000001"], "confidence": 0.72}
+                            ],
+                        },
+                        {
+                            "dimension": "structure",
+                            "label_zh": "结构化表达",
+                            "score": 7.0,
+                            "score_rationale": "Well organized but could improve time management.",
+                            "evidence_insufficient": False,
+                            "not_applicable": False,
+                            "strengths": [
+                                {"claim_id": "c_Alice_struct_01", "text": "Well organized.", "evidence_refs": ["e_000001"], "confidence": 0.82}
+                            ],
+                            "risks": [
+                                {"claim_id": "c_Alice_struct_02", "text": "Time management.", "evidence_refs": ["e_000002"], "confidence": 0.68}
+                            ],
+                            "actions": [
+                                {"claim_id": "c_Alice_struct_03", "text": "Use timeboxing.", "evidence_refs": ["e_000001"], "confidence": 0.7}
+                            ],
+                        },
+                        {
+                            "dimension": "initiative",
+                            "label_zh": "主动性",
+                            "score": 6.5,
+                            "score_rationale": "Proactive in proposing ideas but slow on follow-through.",
+                            "evidence_insufficient": False,
+                            "not_applicable": False,
+                            "strengths": [
+                                {"claim_id": "c_Alice_init_01", "text": "Proactive.", "evidence_refs": ["e_000001"], "confidence": 0.78}
+                            ],
+                            "risks": [
+                                {"claim_id": "c_Alice_init_02", "text": "Late on action items.", "evidence_refs": ["e_000002"], "confidence": 0.65}
+                            ],
+                            "actions": [
+                                {"claim_id": "c_Alice_init_03", "text": "Propose next steps earlier.", "evidence_refs": ["e_000001"], "confidence": 0.7}
+                            ],
+                        },
+                    ],
+                    "summary": {
+                        "strengths": ["Strong system design skills"],
+                        "risks": ["Time management needs improvement"],
+                        "actions": ["Practice structured responses"],
+                    },
+                }
+            ],
+        }
+
+
+class MockLLMLegacyFormat:
+    """Returns a legacy LLM JSON response (summary_sections + team_dynamics, no narrative)."""
 
     def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
         return {
@@ -28,8 +181,8 @@ class MockLLMForSynthesis:
                     {
                         "topic": "Interview Summary",
                         "bullets": [
-                            "Alice demonstrated strong system design skills [e_000001].",
-                            "Communication was clear and structured [e_000002].",
+                            "Alice demonstrated strong system design skills.",
+                            "Communication was clear and structured.",
                         ],
                         "evidence_ids": ["e_000001", "e_000002"],
                     }
@@ -49,7 +202,7 @@ class MockLLMForSynthesis:
                             "strengths": [
                                 {
                                     "claim_id": "c_Alice_leadership_01",
-                                    "text": "Effectively led the system design discussion with clear structure [e_000001].",
+                                    "text": "Effectively led the system design discussion with clear structure.",
                                     "evidence_refs": ["e_000001", "e_000002"],
                                     "confidence": 0.88,
                                 }
@@ -74,56 +227,36 @@ class MockLLMForSynthesis:
                         {
                             "dimension": "collaboration",
                             "strengths": [
-                                {"claim_id": "c_Alice_collab_01", "text": "Responded to interviewer questions.", "evidence_refs": ["e_000001"], "confidence": 0.7}
+                                {"claim_id": "c_Alice_collab_01", "text": "Responded well.", "evidence_refs": ["e_000001"], "confidence": 0.7}
                             ],
-                            "risks": [
-                                {"claim_id": "c_Alice_collab_02", "text": "Limited interaction.", "evidence_refs": ["e_000002"], "confidence": 0.65}
-                            ],
-                            "actions": [
-                                {"claim_id": "c_Alice_collab_03", "text": "Acknowledge others.", "evidence_refs": ["e_000001"], "confidence": 0.68}
-                            ],
+                            "risks": [],
+                            "actions": [],
                         },
                         {
                             "dimension": "logic",
                             "strengths": [
                                 {"claim_id": "c_Alice_logic_01", "text": "Clear reasoning.", "evidence_refs": ["e_000001"], "confidence": 0.8}
                             ],
-                            "risks": [
-                                {"claim_id": "c_Alice_logic_02", "text": "Missing edge cases.", "evidence_refs": ["e_000002"], "confidence": 0.7}
-                            ],
-                            "actions": [
-                                {"claim_id": "c_Alice_logic_03", "text": "Consider edge cases.", "evidence_refs": ["e_000001"], "confidence": 0.72}
-                            ],
+                            "risks": [],
+                            "actions": [],
                         },
                         {
                             "dimension": "structure",
-                            "strengths": [
-                                {"claim_id": "c_Alice_struct_01", "text": "Well organized.", "evidence_refs": ["e_000001"], "confidence": 0.82}
-                            ],
-                            "risks": [
-                                {"claim_id": "c_Alice_struct_02", "text": "Time management.", "evidence_refs": ["e_000002"], "confidence": 0.68}
-                            ],
-                            "actions": [
-                                {"claim_id": "c_Alice_struct_03", "text": "Use timeboxing.", "evidence_refs": ["e_000001"], "confidence": 0.7}
-                            ],
+                            "strengths": [],
+                            "risks": [],
+                            "actions": [],
                         },
                         {
                             "dimension": "initiative",
-                            "strengths": [
-                                {"claim_id": "c_Alice_init_01", "text": "Proactive.", "evidence_refs": ["e_000001"], "confidence": 0.78}
-                            ],
-                            "risks": [
-                                {"claim_id": "c_Alice_init_02", "text": "Late on action items.", "evidence_refs": ["e_000002"], "confidence": 0.65}
-                            ],
-                            "actions": [
-                                {"claim_id": "c_Alice_init_03", "text": "Propose next steps earlier.", "evidence_refs": ["e_000001"], "confidence": 0.7}
-                            ],
+                            "strengths": [],
+                            "risks": [],
+                            "actions": [],
                         },
                     ],
                     "summary": {
-                        "strengths": ["Strong system design skills"],
-                        "risks": ["Time management needs improvement"],
-                        "actions": ["Practice structured responses"],
+                        "strengths": ["Good leader"],
+                        "risks": [],
+                        "actions": [],
                     },
                 }
             ],
@@ -432,15 +565,19 @@ def test_zero_talk_time_speaker_filtered() -> None:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
             return {
                 "overall": {
-                    "summary_sections": [],
-                    "team_dynamics": {"highlights": [], "risks": []},
+                    "narrative": "Summary of the interview.",
+                    "narrative_evidence_refs": [],
+                    "key_findings": [
+                        {"type": "observation", "text": "General observation", "evidence_refs": []}
+                    ],
+                    "suggested_dimensions": [],
                 },
                 "per_person": [
                     {
                         "person_key": "Alice",
                         "display_name": "Alice",
                         "dimensions": [
-                            {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                            {"dimension": dim, "label_zh": "", "score": 5.0, "strengths": [], "risks": [], "actions": []}
                             for dim in ["leadership", "collaboration", "logic", "structure", "initiative"]
                         ],
                         "summary": {"strengths": [], "risks": [], "actions": []},
@@ -449,7 +586,7 @@ def test_zero_talk_time_speaker_filtered() -> None:
                         "person_key": "Silent",
                         "display_name": "Silent Person",
                         "dimensions": [
-                            {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                            {"dimension": dim, "label_zh": "", "score": 5.0, "strengths": [], "risks": [], "actions": []}
                             for dim in ["leadership", "collaboration", "logic", "structure", "initiative"]
                         ],
                         "summary": {"strengths": [], "risks": [], "actions": []},
@@ -485,10 +622,12 @@ def test_dimensions_without_evidence_get_empty_arrays() -> None:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
             return {
                 "overall": {
-                    "summary_sections": [
-                        {"topic": "Summary", "bullets": ["Good [e_000001]"], "evidence_ids": ["e_000001"]}
+                    "narrative": "Alice showed leadership potential.",
+                    "narrative_evidence_refs": ["e_000001"],
+                    "key_findings": [
+                        {"type": "strength", "text": "Good leadership", "evidence_refs": ["e_000001"]}
                     ],
-                    "team_dynamics": {"highlights": [], "risks": []},
+                    "suggested_dimensions": [],
                 },
                 "per_person": [
                     {
@@ -497,15 +636,18 @@ def test_dimensions_without_evidence_get_empty_arrays() -> None:
                         "dimensions": [
                             {
                                 "dimension": "leadership",
+                                "label_zh": "领导力",
+                                "score": 7.0,
+                                "score_rationale": "Led discussion well.",
                                 "strengths": [
-                                    {"claim_id": "c_Alice_leadership_01", "text": "Led well [e_000001].", "evidence_refs": ["e_000001"], "confidence": 0.85}
+                                    {"claim_id": "c_Alice_leadership_01", "text": "Led well.", "evidence_refs": ["e_000001"], "confidence": 0.85}
                                 ],
                                 "risks": [],
                                 "actions": [],
                             },
                             # Other dimensions completely empty
-                            {"dimension": "collaboration", "strengths": [], "risks": [], "actions": []},
-                            {"dimension": "logic", "strengths": [], "risks": [], "actions": []},
+                            {"dimension": "collaboration", "label_zh": "协作能力", "score": 5.0, "strengths": [], "risks": [], "actions": []},
+                            {"dimension": "logic", "label_zh": "逻辑思维", "score": 5.0, "strengths": [], "risks": [], "actions": []},
                         ],
                         "summary": {"strengths": ["Good leader"], "risks": [], "actions": []},
                     }
@@ -558,12 +700,13 @@ def test_system_prompt_includes_supporting_utterances_instruction() -> None:
     assert "supporting_utterances" in prompt
 
 
-def test_system_prompt_requires_minimum_summary_sections() -> None:
-    """System prompt should require minimum 2 summary sections."""
+def test_system_prompt_requires_minimum_key_findings() -> None:
+    """System prompt should require minimum key_findings."""
     synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
     req = _build_test_request()
     prompt = synthesizer._build_system_prompt(req)
-    assert "2" in prompt  # Should mention "at least 2" or "minimum 2"
+    assert "key_findings" in prompt
+    assert "narrative" in prompt
 
 
 def test_transcript_truncation_increased() -> None:
@@ -582,10 +725,12 @@ def test_supporting_utterances_parsed_from_llm_output() -> None:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
             return {
                 "overall": {
-                    "summary_sections": [
-                        {"topic": "Summary", "bullets": ["Good [e_000001]"], "evidence_ids": ["e_000001"]}
+                    "narrative": "Good interview.",
+                    "narrative_evidence_refs": ["e_000001"],
+                    "key_findings": [
+                        {"type": "strength", "text": "Strong team", "evidence_refs": ["e_000001"]}
                     ],
-                    "team_dynamics": {"highlights": ["Strong team"], "risks": ["Low energy"]},
+                    "suggested_dimensions": [],
                 },
                 "per_person": [
                     {
@@ -594,10 +739,13 @@ def test_supporting_utterances_parsed_from_llm_output() -> None:
                         "dimensions": [
                             {
                                 "dimension": "leadership",
+                                "label_zh": "领导力",
+                                "score": 7.5,
+                                "score_rationale": "Led discussion well.",
                                 "strengths": [
                                     {
                                         "claim_id": "c_Alice_leadership_01",
-                                        "text": "Led the discussion well [e_000001].",
+                                        "text": "Led the discussion well.",
                                         "evidence_refs": ["e_000001"],
                                         "confidence": 0.85,
                                         "supporting_utterances": ["u1", "u2"],
@@ -607,7 +755,7 @@ def test_supporting_utterances_parsed_from_llm_output() -> None:
                                 "actions": [],
                             },
                             *[
-                                {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                                {"dimension": dim, "label_zh": "", "score": 5.0, "strengths": [], "risks": [], "actions": []}
                                 for dim in ["collaboration", "logic", "structure", "initiative"]
                             ],
                         ],
@@ -635,8 +783,10 @@ def test_claim_without_valid_refs_gets_empty_list() -> None:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
             return {
                 "overall": {
-                    "summary_sections": [],
-                    "team_dynamics": {"highlights": [], "risks": []},
+                    "narrative": "Overview.",
+                    "narrative_evidence_refs": [],
+                    "key_findings": [{"type": "observation", "text": "General", "evidence_refs": []}],
+                    "suggested_dimensions": [],
                 },
                 "per_person": [
                     {
@@ -645,6 +795,8 @@ def test_claim_without_valid_refs_gets_empty_list() -> None:
                         "dimensions": [
                             {
                                 "dimension": "leadership",
+                                "label_zh": "领导力",
+                                "score": 6.0,
                                 "strengths": [
                                     {
                                         "claim_id": "c_no_refs_01",
@@ -663,7 +815,7 @@ def test_claim_without_valid_refs_gets_empty_list() -> None:
                                 "actions": [],
                             },
                             *[
-                                {"dimension": dim, "strengths": [], "risks": [], "actions": []}
+                                {"dimension": dim, "label_zh": "", "score": 5.0, "strengths": [], "risks": [], "actions": []}
                                 for dim in ["collaboration", "logic", "structure", "initiative"]
                             ],
                         ],
@@ -684,3 +836,404 @@ def test_claim_without_valid_refs_gets_empty_list() -> None:
         assert claim.evidence_refs == [], (
             f"Claim {claim.claim_id} should have empty refs but got {claim.evidence_refs}"
         )
+
+
+# ── New v2 tests: scores, narrative, key_findings, suggested_dimensions ───
+
+
+def test_v2_scores_in_dimensions() -> None:
+    """Each dimension should have a score between 0-10."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    for dim in alice.dimensions:
+        assert 0.0 <= dim.score <= 10.0, f"Score {dim.score} out of range for {dim.dimension}"
+        assert isinstance(dim.score, float), f"Score should be float for {dim.dimension}"
+
+    # Check specific scores from mock
+    leadership = next(d for d in alice.dimensions if d.dimension == "leadership")
+    assert leadership.score == 7.5
+    assert leadership.score_rationale != ""
+
+
+def test_v2_score_rationale_present() -> None:
+    """Each dimension with score should have a score_rationale."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    for dim in alice.dimensions:
+        if dim.score != 5.0:  # Non-default score should have rationale
+            assert dim.score_rationale, f"Missing score_rationale for {dim.dimension}"
+
+
+def test_v2_overall_narrative() -> None:
+    """Overall should have narrative and key_findings."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    assert result.overall.narrative != ""
+    assert "Alice" in result.overall.narrative
+    assert len(result.overall.narrative_evidence_refs) > 0
+
+
+def test_v2_key_findings() -> None:
+    """Key findings should have type, text, and evidence_refs."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    assert len(result.overall.key_findings) >= 3
+    types_found = {kf.type for kf in result.overall.key_findings}
+    assert "strength" in types_found
+    assert "risk" in types_found
+
+    for kf in result.overall.key_findings:
+        assert kf.type in ("strength", "risk", "observation")
+        assert kf.text != ""
+
+
+def test_v2_suggested_dimensions() -> None:
+    """Suggested dimensions should be parsed from LLM output."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    assert len(result.overall.suggested_dimensions) >= 1
+    sd = result.overall.suggested_dimensions[0]
+    assert sd.key == "system_design"
+    assert sd.label_zh == "系统设计"
+    assert sd.action in ("add", "replace", "mark_not_applicable")
+
+
+def test_v2_claim_text_no_evidence_references() -> None:
+    """Claim text should be pure natural language with no [e_XXXXX] references."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    pattern = re.compile(r"\[e_\w+\]")
+    for person in result.per_person:
+        for dim in person.dimensions:
+            for claim in [*dim.strengths, *dim.risks, *dim.actions]:
+                assert not pattern.search(claim.text), (
+                    f"Found [e_XXXXX] in claim text: {claim.text}"
+                )
+
+
+def test_v2_not_applicable_dimension() -> None:
+    """A dimension marked not_applicable should have score=5 and not_applicable=True."""
+
+    class MockLLMWithNA:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "narrative": "Overview.",
+                    "narrative_evidence_refs": [],
+                    "key_findings": [{"type": "observation", "text": "General", "evidence_refs": []}],
+                    "suggested_dimensions": [],
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {
+                                "dimension": "leadership",
+                                "label_zh": "领导力",
+                                "score": 5.0,
+                                "score_rationale": "Not enough evidence to assess leadership.",
+                                "evidence_insufficient": True,
+                                "not_applicable": True,
+                                "strengths": [],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            *[
+                                {"dimension": dim, "label_zh": "", "score": 6.0, "strengths": [], "risks": [], "actions": []}
+                                for dim in ["collaboration", "logic", "structure", "initiative"]
+                            ],
+                        ],
+                        "summary": {"strengths": [], "risks": [], "actions": []},
+                    }
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMWithNA())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    leadership = next(d for d in alice.dimensions if d.dimension == "leadership")
+    assert leadership.not_applicable is True
+    assert leadership.evidence_insufficient is True
+    assert leadership.score == 5.0
+
+
+def test_v2_custom_dimension_presets() -> None:
+    """When session_context has dimension_presets, use those instead of defaults."""
+
+    custom_dims = [
+        {"key": "technical", "label_zh": "技术能力", "description": "技术深度和广度"},
+        {"key": "communication", "label_zh": "沟通能力", "description": "表达清晰度和沟通效果"},
+        {"key": "teamwork", "label_zh": "团队协作", "description": "团队配合和协作精神"},
+    ]
+
+    class MockLLMCustomDims:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "narrative": "Custom dims overview.",
+                    "narrative_evidence_refs": [],
+                    "key_findings": [{"type": "observation", "text": "General", "evidence_refs": []}],
+                    "suggested_dimensions": [],
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {
+                                "dimension": "technical",
+                                "label_zh": "技术能力",
+                                "score": 8.0,
+                                "score_rationale": "Strong technical depth.",
+                                "strengths": [
+                                    {"claim_id": "c_Alice_technical_01", "text": "Good tech skills.", "evidence_refs": ["e_000001"], "confidence": 0.85}
+                                ],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            {
+                                "dimension": "communication",
+                                "label_zh": "沟通能力",
+                                "score": 7.0,
+                                "score_rationale": "Clear communication.",
+                                "strengths": [],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            {
+                                "dimension": "teamwork",
+                                "label_zh": "团队协作",
+                                "score": 6.5,
+                                "score_rationale": "Decent teamwork.",
+                                "strengths": [],
+                                "risks": [],
+                                "actions": [],
+                            },
+                        ],
+                        "summary": {"strengths": ["Tech expert"], "risks": [], "actions": []},
+                    }
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMCustomDims())
+    req = _build_test_request()
+    req.session_context = SessionContext(
+        mode="1v1",
+        interviewer_name="Interviewer",
+        dimension_presets=[
+            DimensionPreset(key="technical", label_zh="技术能力", description="技术深度和广度"),
+            DimensionPreset(key="communication", label_zh="沟通能力", description="表达清晰度和沟通效果"),
+            DimensionPreset(key="teamwork", label_zh="团队协作", description="团队配合和协作精神"),
+        ],
+    )
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    # Should have exactly 3 custom dimensions
+    assert len(alice.dimensions) == 3
+    dim_names = {d.dimension for d in alice.dimensions}
+    assert dim_names == {"technical", "communication", "teamwork"}
+
+    # Default 5 dimensions should NOT be present
+    assert "leadership" not in dim_names
+    assert "initiative" not in dim_names
+
+    # Check label_zh
+    tech = next(d for d in alice.dimensions if d.dimension == "technical")
+    assert tech.label_zh == "技术能力"
+    assert tech.score == 8.0
+
+
+def test_v2_legacy_format_fallback() -> None:
+    """Legacy LLM format (summary_sections, no narrative) should be auto-converted."""
+    synthesizer = ReportSynthesizer(llm=MockLLMLegacyFormat())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    # Narrative should be populated from summary_sections fallback
+    assert result.overall.narrative != ""
+    # Legacy fields should still be present
+    assert len(result.overall.summary_sections) >= 1
+    # key_findings should be populated from team_dynamics fallback
+    assert len(result.overall.key_findings) >= 1
+
+
+def test_v2_evidence_pack_has_source_tier() -> None:
+    """Evidence pack in user prompt should include source_tier."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    truncated, _ = synthesizer._truncate_transcript(req.transcript)
+    prompt = synthesizer._build_user_prompt(req, truncated)
+    data = json.loads(prompt)
+
+    for ev in data["evidence_pack"]:
+        assert "source_tier" in ev, f"Missing source_tier in evidence {ev['evidence_id']}"
+        assert ev["source_tier"] in (1, 2, 3), f"Invalid source_tier: {ev['source_tier']}"
+
+
+def test_v2_system_prompt_contains_scoring_rubric() -> None:
+    """System prompt should contain the 0-10 scoring rubric."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "0-2" in prompt
+    assert "3-4" in prompt
+    assert "5-6" in prompt
+    assert "7-8" in prompt
+    assert "9-10" in prompt
+    assert "严重不足" in prompt
+    assert "优秀" in prompt
+
+
+def test_v2_system_prompt_contains_interview_context() -> None:
+    """System prompt should contain interview context anchoring."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    req.session_context = SessionContext(
+        mode="1v1",
+        interviewer_name="Prof. Smith",
+        position_title="Senior Engineer",
+        company_name="TechCorp",
+        interview_type="Technical",
+    )
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "Senior Engineer" in prompt
+    assert "TechCorp" in prompt
+    assert "Technical" in prompt
+    assert "Prof. Smith" in prompt
+    assert "面试类型" in prompt
+
+
+def test_v2_user_prompt_includes_evaluation_dimensions() -> None:
+    """User prompt should include evaluation_dimensions."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    truncated, _ = synthesizer._truncate_transcript(req.transcript)
+    prompt = synthesizer._build_user_prompt(req, truncated)
+    data = json.loads(prompt)
+
+    assert "evaluation_dimensions" in data
+    dims = data["evaluation_dimensions"]
+    assert len(dims) == 5  # Default 5 dimensions
+    assert dims[0]["key"] == "leadership"
+    assert dims[0]["label_zh"] == "领导力"
+
+
+def test_v2_system_prompt_no_embed_references_rule() -> None:
+    """System prompt should have rule about no [e_XXXXX] in claim text."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "claim.text 必须是纯自然语言" in prompt
+    assert "不要在文本中嵌入 [e_XXXXX]" in prompt
+
+
+def test_v2_system_prompt_tier_priority_rule() -> None:
+    """System prompt should have rule about tier_1 evidence priority."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "tier_1" in prompt
+    assert "tier_3" in prompt
+
+
+def test_v2_system_prompt_narrative_rule() -> None:
+    """System prompt should have rule about narrative being a cohesive paragraph."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "overall.narrative" in prompt
+    assert "连贯段落" in prompt
+
+
+def test_v2_system_prompt_not_applicable_rule() -> None:
+    """System prompt should have rule about not_applicable dimensions."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "not_applicable" in prompt
+
+
+def test_v2_system_prompt_suggested_dimensions_rule() -> None:
+    """System prompt should have rule about suggested_dimensions."""
+    synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
+    req = _build_test_request()
+    prompt = synthesizer._build_system_prompt(req)
+
+    assert "suggested_dimensions" in prompt
+
+
+def test_v2_missing_dimensions_get_default_score() -> None:
+    """Dimensions not returned by LLM should get default score=5 and evidence_insufficient=True."""
+
+    class MockLLMPartialDims:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "narrative": "Overview.",
+                    "narrative_evidence_refs": [],
+                    "key_findings": [{"type": "observation", "text": "General", "evidence_refs": []}],
+                    "suggested_dimensions": [],
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {
+                                "dimension": "leadership",
+                                "label_zh": "领导力",
+                                "score": 8.0,
+                                "score_rationale": "Strong leader.",
+                                "strengths": [
+                                    {"claim_id": "c_01", "text": "Good leader.", "evidence_refs": ["e_000001"], "confidence": 0.8}
+                                ],
+                                "risks": [],
+                                "actions": [],
+                            },
+                            # Only 1 of 5 dimensions returned
+                        ],
+                        "summary": {"strengths": [], "risks": [], "actions": []},
+                    }
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMPartialDims())
+    req = _build_test_request()
+    result = synthesizer.synthesize(req)
+
+    alice = result.per_person[0]
+    assert len(alice.dimensions) == 5
+
+    # Leadership should have real score
+    leadership = next(d for d in alice.dimensions if d.dimension == "leadership")
+    assert leadership.score == 8.0
+    assert leadership.evidence_insufficient is False
+
+    # Missing dimensions should have default score=5 and evidence_insufficient=True
+    collab = next(d for d in alice.dimensions if d.dimension == "collaboration")
+    assert collab.score == 5.0
+    assert collab.evidence_insufficient is True
