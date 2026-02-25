@@ -1108,7 +1108,7 @@ class ReportSynthesizer:
                     if p.person_key not in interviewer_keys
                     and (not eligible_key_set or p.person_key in eligible_key_set)
                 ]
-        except Exception:
+        except Exception:  # noqa: BLE001 — fallback report must not crash
             # Even fallback failed — build minimal valid response with empty dimensions
             result = AnalysisReportResponse(
                 session_id=req.session_id,

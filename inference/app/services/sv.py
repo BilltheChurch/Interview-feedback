@@ -74,7 +74,7 @@ class ModelScopeSVBackend:
                         if torch.cuda.is_available() and hasattr(self._pipeline, "model"):
                             self._pipeline.model = self._pipeline.model.to(torch.device("cuda"))
                             logger.info("SV model transferred to CUDA/ROCm GPU")
-                    except Exception:
+                    except RuntimeError:
                         logger.warning("Failed to transfer SV model to CUDA, running on CPU", exc_info=True)
                 elif self._device == "mps":
                     # ModelScope pipelines don't auto-convert inputs to MPS

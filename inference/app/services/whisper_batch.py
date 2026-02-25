@@ -146,7 +146,7 @@ def _transcribe_faster_whisper(
         try:
             fw_device = "cuda"
             compute_type = "float16"
-        except Exception:
+        except Exception:  # noqa: BLE001 — ROCm/CUDA fallback guard
             logger.warning("ROCm: CTranslate2 CUDA mode failed, falling back to CPU")
             fw_device = "cpu"
             compute_type = "int8"
