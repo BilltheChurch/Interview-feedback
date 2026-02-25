@@ -87,17 +87,21 @@ def test_500_response_raises_validation_error() -> None:
 # ── Timeout handling ────────────────────────────────────────────────────────
 
 
-def test_httpx_timeout_propagates() -> None:
-    """httpx.TimeoutException should propagate (not silently swallowed)."""
+def test_httpx_timeout_retries_then_raises_validation_error() -> None:
+    """Timeouts should be retried and ultimately raise ValidationError."""
     llm = _llm(timeout_ms=1000)
 
-    with patch("app.services.dashscope_llm._get_shared_client") as mock_get_client:
+    with patch("app.services.dashscope_llm._get_shared_client") as mock_get_client, \
+         patch("app.services.dashscope_llm.time.sleep"):
         mock_client = MagicMock()
         mock_client.post.side_effect = httpx.TimeoutException("connection timed out")
         mock_get_client.return_value = mock_client
 
-        with pytest.raises(httpx.TimeoutException):
+        with pytest.raises(ValidationError, match="timed out after retries"):
             llm.generate_json(system_prompt="test", user_prompt="test")
+
+        # Should have attempted 3 times (initial + 2 retries)
+        assert mock_client.post.call_count == 3
 
 
 # ── Response parsing ────────────────────────────────────────────────────────
