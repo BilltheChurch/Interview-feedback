@@ -295,7 +295,12 @@ class DimensionClaim(BaseModel):
 
 
 class DimensionFeedback(BaseModel):
-    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    dimension: str = Field(min_length=1, max_length=100)
+    label_zh: str = Field(default="", max_length=100)
+    score: float = Field(default=5.0, ge=0, le=10)
+    score_rationale: str = Field(default="", max_length=1000)
+    evidence_insufficient: bool = Field(default=False)
+    not_applicable: bool = Field(default=False)
     strengths: list[DimensionClaim] = Field(default_factory=list)
     risks: list[DimensionClaim] = Field(default_factory=list)
     actions: list[DimensionClaim] = Field(default_factory=list)
@@ -325,7 +330,33 @@ class TeamDynamics(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
 
+class KeyFinding(BaseModel):
+    type: Literal["strength", "risk", "observation"] = "observation"
+    text: str = Field(default="", max_length=1000)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class SuggestedDimension(BaseModel):
+    key: str = Field(min_length=1, max_length=100)
+    label_zh: str = Field(default="", max_length=100)
+    reason: str = Field(default="", max_length=500)
+    action: Literal["add", "replace", "mark_not_applicable"] = "add"
+    replaces: str | None = None
+
+
+class DimensionPreset(BaseModel):
+    key: str = Field(min_length=1, max_length=100)
+    label_zh: str = Field(default="", max_length=100)
+    description: str = Field(default="", max_length=500)
+
+
 class OverallFeedback(BaseModel):
+    # New v2 fields
+    narrative: str = Field(default="", max_length=3000)
+    narrative_evidence_refs: list[str] = Field(default_factory=list)
+    key_findings: list[KeyFinding] = Field(default_factory=list)
+    suggested_dimensions: list[SuggestedDimension] = Field(default_factory=list)
+    # Legacy fields (kept for backward compatibility)
     summary_sections: list[SummarySection] = Field(default_factory=list)
     team_dynamics: TeamDynamics = Field(default_factory=TeamDynamics)
 
@@ -378,7 +409,7 @@ class RegenerateClaimRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     person_key: str = Field(min_length=1, max_length=200)
     display_name: str | None = None
-    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    dimension: str = Field(min_length=1, max_length=100)
     claim_type: Literal["strengths", "risks", "actions"]
     claim_id: str | None = None
     claim_text: str | None = None
@@ -403,7 +434,7 @@ class RegenerateClaimRequest(BaseModel):
 class RegenerateClaimResponse(BaseModel):
     session_id: str
     person_key: str
-    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    dimension: str = Field(min_length=1, max_length=100)
     claim_type: Literal["strengths", "risks", "actions"]
     claim: DimensionClaim
 
@@ -430,7 +461,9 @@ class SessionContext(BaseModel):
     interviewer_name: str | None = None
     position_title: str | None = None
     company_name: str | None = None
+    interview_type: str | None = None
     stage_descriptions: list[StageDescription] = Field(default_factory=list)
+    dimension_presets: list[DimensionPreset] = Field(default_factory=list)
 
 
 class MemoSpeakerBinding(BaseModel):
@@ -475,7 +508,7 @@ class CheckpointSpeakerNote(BaseModel):
 
 
 class CheckpointDimensionSignal(BaseModel):
-    dimension: Literal["leadership", "collaboration", "logic", "structure", "initiative"]
+    dimension: str = Field(min_length=1, max_length=100)
     speaker_key: str
     signal: Literal["positive", "negative", "neutral"]
     note: str = ""
@@ -506,3 +539,51 @@ class MergeCheckpointsRequest(BaseModel):
     final_memos: list[Memo] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
     locale: str = "zh-CN"
+
+
+# ── Improvement Suggestions Schemas ───────────────────────────────────────
+
+
+class ClaimBeforeAfter(BaseModel):
+    before: str = Field(description="Original expression from transcript")
+    after: str = Field(description="Improved expression in interview language")
+
+
+class ClaimImprovement(BaseModel):
+    claim_id: str = Field(min_length=1, max_length=64)
+    advice: str = Field(description="Improvement advice in Chinese")
+    suggested_wording: str = Field(default="", description="Recommended wording in interview language")
+    before_after: ClaimBeforeAfter | None = None
+
+
+class DimensionImprovement(BaseModel):
+    dimension: str = Field(min_length=1, max_length=100)
+    advice: str = Field(description="Improvement direction in Chinese")
+    framework: str = Field(default="", description="Recommended framework/methodology in Chinese")
+    example_response: str = Field(default="", description="Example response in interview language")
+
+
+class OverallImprovement(BaseModel):
+    summary: str = Field(description="Overall improvement summary in Chinese")
+    key_points: list[str] = Field(default_factory=list, description="3-5 key improvement points")
+
+
+class ImprovementReport(BaseModel):
+    overall: OverallImprovement
+    dimensions: list[DimensionImprovement] = Field(default_factory=list)
+    claims: list[ClaimImprovement] = Field(default_factory=list)
+
+
+class ImprovementRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    report_json: str = Field(description="Serialized AnalysisReportResponse JSON")
+    transcript: list[TranscriptUtterance] = Field(default_factory=list)
+    interview_language: str = Field(default="en", description="Language for example responses")
+    dimension_presets: list[DimensionPreset] = Field(default_factory=list)
+
+
+class ImprovementResponse(BaseModel):
+    session_id: str
+    improvements: ImprovementReport
+    model: str = ""
+    elapsed_ms: int = 0

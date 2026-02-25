@@ -127,6 +127,8 @@ export interface EvidenceItem {
   weak?: boolean;
   weak_reason?: string | null;
   source?: "explicit_anchor" | "semantic_match" | "speaker_fallback" | "memo_text" | "llm_backfill" | "auto_generated";
+  source_tier?: 1 | 2 | 3;              // 1=candidate speech, 2=memo, 3=interviewer evaluative
+  source_tier_label?: string;            // "面试者发言" | "面试官观察" | "辅助佐证"
 }
 
 export interface DimensionClaim {
@@ -138,11 +140,19 @@ export interface DimensionClaim {
 }
 
 export interface DimensionFeedback {
-  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
-  strengths: DimensionClaim[];
-  risks: DimensionClaim[];
-  actions: DimensionClaim[];
+  dimension: string;                     // Free string, no longer a 5-value enum
+  label_zh?: string;                     // Chinese display name, e.g. "逻辑推理"
+  score: number;                         // 0-10, LLM-assigned
+  score_rationale: string;               // 1-2 sentence scoring justification
+  evidence_insufficient?: boolean;       // true if insufficient evidence to evaluate
+  not_applicable?: boolean;              // true if LLM deems dimension irrelevant
+  strengths: DimensionClaim[];           // 0-5 items
+  risks: DimensionClaim[];               // 0-3 items
+  actions: DimensionClaim[];             // 0-3 items
 }
+
+/** @deprecated Use string dimension keys instead */
+export type LegacyDimensionName = "leadership" | "collaboration" | "logic" | "structure" | "initiative";
 
 export interface PersonFeedbackItem {
   person_key: string;
@@ -180,6 +190,28 @@ export interface SpeakerStatItem {
   interrupted_by_others: number;
 }
 
+export interface OverallFeedback {
+  /** New narrative format */
+  narrative?: string;
+  narrative_evidence_refs?: string[];
+  key_findings?: Array<{
+    type: "strength" | "risk" | "observation";
+    text: string;
+    evidence_refs: string[];
+  }>;
+  suggested_dimensions?: SuggestedDimension[];
+  /** Legacy format (backward compat) */
+  summary_sections?: Array<{
+    topic: string;
+    bullets: string[];
+    evidence_ids: string[];
+  }>;
+  team_dynamics?: {
+    highlights: string[];
+    risks: string[];
+  };
+}
+
 export interface ResultV2 {
   session: {
     session_id: string;
@@ -205,9 +237,10 @@ export interface ResultV2 {
   stats: SpeakerStatItem[];
   memos: MemoItem[];
   evidence: EvidenceItem[];
-  overall: unknown;
+  overall: OverallFeedback;
   per_person: PersonFeedbackItem[];
   quality: ReportQualityMeta;
+  improvements?: ImprovementReport;
   trace: {
     finalize_job_id: string;
     model_versions: Record<string, string>;
@@ -288,6 +321,8 @@ export interface SessionContextMeta {
   position_title?: string;
   company_name?: string;
   stage_descriptions: StageDescription[];
+  interview_type?: string;               // "academic" | "technical" | "behavioral" | "group"
+  dimension_presets?: DimensionPresetItem[];
 }
 
 export interface HistoricalSummary {
@@ -393,3 +428,59 @@ export type CaptionSource = 'none' | 'acs-teams';
 
 /** Finalize mode. 'full' = normal pipeline, 'report-only' = skip audio stages. */
 export type FinalizeMode = 'full' | 'report-only';
+
+// ── Dimension Presets ──────────────────────────────────────────────────
+
+export interface DimensionPresetItem {
+  key: string;                           // "logical_reasoning"
+  label_zh: string;                      // "逻辑推理"
+  label_en: string;                      // "Logical Reasoning"
+  description: string;                   // LLM evaluation guidance
+  weight: number;                        // default 1.0
+}
+
+export interface DimensionPresetTemplate {
+  interview_type: string;                // "academic" | "technical" | "behavioral" | "group"
+  label_zh: string;                      // "学术面试"
+  dimensions: DimensionPresetItem[];
+}
+
+export interface SuggestedDimension {
+  key: string;
+  label_zh: string;
+  reason: string;
+  action: "add" | "replace" | "mark_not_applicable";
+  replaces?: string;
+}
+
+// ── Improvement Suggestions ─────────────────────────────────────────────
+
+export interface ClaimBeforeAfter {
+  before: string;
+  after: string;
+}
+
+export interface ClaimImprovement {
+  claim_id: string;
+  advice: string;
+  suggested_wording: string;
+  before_after: ClaimBeforeAfter | null;
+}
+
+export interface DimensionImprovement {
+  dimension: string;
+  advice: string;
+  framework: string;
+  example_response: string;
+}
+
+export interface OverallImprovement {
+  summary: string;
+  key_points: string[];
+}
+
+export interface ImprovementReport {
+  overall: OverallImprovement;
+  dimensions: DimensionImprovement[];
+  claims: ClaimImprovement[];
+}

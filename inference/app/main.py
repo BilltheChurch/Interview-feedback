@@ -44,6 +44,8 @@ from app.schemas import (
     ScoreRequest,
     ScoreResponse,
     SynthesizeReportRequest,
+    ImprovementRequest,
+    ImprovementResponse,
 )
 from app.security import SlidingWindowRateLimiter, extract_client_ip, rate_limit_headers
 
@@ -255,6 +257,11 @@ async def regenerate_claim(req: RegenerateClaimRequest) -> RegenerateClaimRespon
 @app.post("/analysis/synthesize", response_model=AnalysisReportResponse)
 async def synthesize_report(req: SynthesizeReportRequest) -> AnalysisReportResponse:
     return await asyncio.to_thread(runtime.report_synthesizer.synthesize, req)
+
+
+@app.post("/analysis/improvements", response_model=ImprovementResponse)
+async def generate_improvements(req: ImprovementRequest) -> ImprovementResponse:
+    return await asyncio.to_thread(runtime.improvement_generator.generate, req)
 
 
 @app.post("/analysis/checkpoint", response_model=CheckpointResponse)

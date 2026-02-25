@@ -71,7 +71,11 @@ import type {
   SpeakerMapItem,
   SynthesizeRequestPayload,
   Tier2Status,
-  CaptionSource
+  CaptionSource,
+  DimensionPresetItem,
+  OverallFeedback,
+  ImprovementReport,
+  SessionContextMeta
 } from "./types_v2";
 
 type StreamRole = "mixed" | "teacher" | "students";
@@ -165,6 +169,8 @@ interface SessionConfigRequest {
   teams_join_url?: string;
   stages?: string[];
   free_form_notes?: string;
+  interview_type?: string;
+  dimension_presets?: DimensionPresetItem[];
 }
 
 interface CaptureState {
@@ -4897,6 +4903,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
               },
             });
 
+            // Augment sessionContext with dimension presets from config
+            if (sessionContext) {
+              const it = fullConfig.interview_type;
+              if (typeof it === "string" && it) sessionContext.interview_type = it;
+              const dp = fullConfig.dimension_presets;
+              if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
+            }
+
             const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
             const synthPayload = buildSynthesizePayload({
               sessionId,
@@ -5061,6 +5075,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
           });
 
           console.log(`[finalize-v2] report-only completed for session=${sessionId}`);
+
+          // ── Async: generate improvement suggestions (non-blocking) ──
+          this.triggerImprovementGeneration(sessionId, resultV2, resultV2.transcript, resultV2Key).catch(err2 => {
+            console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${(err2 as Error).message}`);
+          });
         } catch (err) {
           const errMsg = (err as Error).message || "unknown error";
           console.error(`[finalize-v2] report-only failed: ${errMsg}`);
@@ -5586,6 +5605,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
           },
         });
 
+
+        // Augment sessionContext with dimension presets from config
+        if (sessionContext) {
+          const it = fullConfig.interview_type;
+          if (typeof it === "string" && it) sessionContext.interview_type = it;
+          const dp = fullConfig.dimension_presets;
+          if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
+        }
         let synthData: Record<string, unknown>;
         const synthStart = Date.now();
 
@@ -5938,6 +5965,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         backend_used: finalizeBackendUsed
       });
 
+      // ── Async: generate improvement suggestions (non-blocking) ──
+      this.triggerImprovementGeneration(sessionId, resultV2, transcript, resultV2Key).catch(err => {
+        console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${(err as Error).message}`);
+      });
+
       // ── Tier 2 background trigger ──
       // After Tier 1 succeeds, check if Tier 2 batch re-processing is enabled.
       // If so, schedule a DO alarm to run the Tier 2 job asynchronously.
@@ -5983,6 +6015,77 @@ export class MeetingSessionDO extends DurableObject<Env> {
     } finally {
       await this.setFinalizeLock(false);
     }
+  }
+
+  // ── Improvement Suggestions (async, non-blocking) ─────────────────────
+
+  private async triggerImprovementGeneration(
+    sessionId: string,
+    resultV2: ResultV2,
+    transcript: Array<{ utterance_id: string; speaker_name?: string | null; text: string; start_ms: number; end_ms: number; duration_ms: number }>,
+    resultV2Key: string
+  ): Promise<void> {
+    const inferenceBase = (this.env.INFERENCE_BASE_URL ?? "").trim() || "http://127.0.0.1:8000";
+    const apiKey = (this.env.INFERENCE_API_KEY ?? "").trim();
+
+    const sessionContext = (await this.ctx.storage.get("session_context")) as SessionContextMeta | undefined;
+    const dimensionPresets = sessionContext?.dimension_presets ?? [];
+
+    const reportJson = JSON.stringify({
+      overall: resultV2.overall,
+      per_person: resultV2.per_person,
+      evidence: resultV2.evidence,
+    });
+
+    const body = JSON.stringify({
+      session_id: sessionId,
+      report_json: reportJson,
+      transcript: transcript.slice(0, 50).map(u => ({
+        utterance_id: u.utterance_id,
+        speaker_name: u.speaker_name ?? "Unknown",
+        text: u.text,
+        start_ms: u.start_ms,
+        end_ms: u.end_ms,
+        duration_ms: u.duration_ms,
+      })),
+      interview_language: "en",
+      dimension_presets: dimensionPresets.map(d => ({
+        key: d.key,
+        label_zh: d.label_zh,
+        description: d.description,
+      })),
+    });
+
+    const resp = await fetch(`${inferenceBase}/analysis/improvements`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
+      },
+      body,
+      signal: AbortSignal.timeout(120_000),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`improvements API returned ${resp.status}`);
+    }
+
+    const data = await resp.json() as { improvements: ImprovementReport };
+
+    // Merge improvements into resultV2 and re-persist
+    resultV2.improvements = data.improvements;
+    await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    // Update feedback cache
+    const cache = await this.loadFeedbackCache(sessionId);
+    if (cache.report) {
+      (cache.report as ResultV2).improvements = data.improvements;
+      await this.storeFeedbackCache(cache);
+    }
+
+    console.log(`[finalize-v2] improvements generated for session=${sessionId}`);
   }
 
   // ── Tier 2 Status Management ───────────────────────────────────────────
@@ -6221,6 +6324,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
           rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
         },
       });
+
+      // Augment sessionContext with dimension presets from config
+      if (sessionContext) {
+        const it = fullConfig.interview_type;
+        if (typeof it === "string" && it) sessionContext.interview_type = it;
+        const dp = fullConfig.dimension_presets;
+        if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
+      }
       const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
       const synthPayload = buildSynthesizePayload({
         sessionId,
@@ -6264,7 +6375,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         } as ResultV2);
         if (validation.valid) {
           finalPerPerson = sanitized;
-          finalOverall = (synthData?.overall ?? tier1Result.overall) as unknown;
+          finalOverall = (synthData?.overall ?? tier1Result.overall) as OverallFeedback;
           const candidateQuality = synthData?.quality && typeof synthData.quality === "object"
             ? (synthData.quality as Partial<ReportQualityMeta>)
             : null;
@@ -6849,6 +6960,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const freeFormNotes = valueAsString(payload.free_form_notes);
         if (freeFormNotes) {
           config.free_form_notes = freeFormNotes;
+        }
+
+        const interviewType = valueAsString(payload.interview_type);
+        if (interviewType) {
+          config.interview_type = interviewType;
+        }
+        if (Array.isArray(payload.dimension_presets)) {
+          config.dimension_presets = payload.dimension_presets;
         }
 
         const roster = parseRosterEntries(payload.participants ?? payload.teams_participants);

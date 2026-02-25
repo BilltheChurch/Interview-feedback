@@ -37,3 +37,36 @@ export function sanitizeUrl(input: string): string {
 export function sanitizeName(input: string): string {
   return sanitizeText(input).replace(/[^\p{L}\p{N}\s.\-']/gu, '').slice(0, 120);
 }
+
+/**
+ * Escape HTML special characters to prevent XSS in generated HTML strings.
+ */
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Sanitize untrusted HTML: strip dangerous tags and attributes.
+ * Used for rendering TipTap notes from localStorage.
+ */
+export function sanitizeHtml(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  // Remove dangerous elements
+  for (const tag of ['script', 'iframe', 'object', 'embed', 'form', 'style']) {
+    doc.querySelectorAll(tag).forEach(el => el.remove());
+  }
+  // Remove dangerous attributes
+  doc.querySelectorAll('*').forEach(el => {
+    for (const attr of Array.from(el.attributes)) {
+      if (attr.name.startsWith('on') || attr.value.trim().toLowerCase().startsWith('javascript:')) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  });
+  return doc.body.innerHTML;
+}
