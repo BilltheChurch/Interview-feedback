@@ -19,8 +19,16 @@ export function FootnoteList({ entries, onFootnoteClick }: FootnoteListProps) {
       {entries.map((e) => (
         <div
           key={e.index}
+          role="button"
+          tabIndex={0}
           className="flex gap-2 text-xs text-secondary cursor-pointer hover:text-ink transition-colors"
           onClick={() => onFootnoteClick?.(e.evidenceId)}
+          onKeyDown={(ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') {
+              ev.preventDefault();
+              onFootnoteClick?.(e.evidenceId);
+            }
+          }}
         >
           <span className="text-accent font-medium shrink-0">{e.index}</span>
           <span className="text-secondary/60">[{e.timestamp}]</span>
