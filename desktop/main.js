@@ -1123,12 +1123,17 @@ app.whenReady().then(() => {
   });
 
   // MF-6: Content Security Policy — restrict resource loading in the renderer
+  // In development, 'unsafe-eval' is needed for Vite HMR / source maps.
+  // In production (packaged app), 'unsafe-eval' is removed for stricter security.
+  const scriptSrc = app.isPackaged
+    ? "script-src 'self'"
+    : "script-src 'self' 'unsafe-eval'";
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:;"
+          `default-src 'self'; ${scriptSrc}; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:;`
         ]
       }
     });
