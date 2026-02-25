@@ -1772,7 +1772,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const run = this.mutationQueue.then(fn);
     this.mutationQueue = run.then(
       () => undefined,
-      () => undefined
+      (err) => {
+        console.error("enqueueMutation: queued operation failed:", err);
+        return undefined;
+      }
     );
     return run;
   }
