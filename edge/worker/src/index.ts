@@ -655,6 +655,15 @@ const HISTORY_PREFIX = "history/";
 const HISTORY_MAX_LIMIT = 50;
 const HISTORY_REVERSE_EPOCH_MAX = 9_999_999_999_999;
 
+// ── Reliability & timeout constants ──────────────────────────────────
+const DASHSCOPE_TIMEOUT_CAP_MS = 15_000;
+const DEFAULT_ASR_TIMEOUT_MS = 45_000;
+const DRAIN_TIMEOUT_CAP_MS = 30_000;
+const WS_CLOSE_REASON_MAX_LEN = 120;
+const R2_LIST_LIMIT = 100;
+const MAX_BACKOFF_MS = 60_000;
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 /**
  * Report sources considered "ready" for feedback delivery.
  * llm_enhanced       — legacy polish pipeline (inference /analysis/report)
@@ -1748,7 +1757,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const listing = await this.env.RESULT_BUCKET.list({
         prefix: chunksPrefix,
         cursor,
-        limit: 100
+        limit: R2_LIST_LIMIT
       });
       if (listing.objects.length > 0) {
         await Promise.all(
@@ -3111,7 +3120,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         // ignore finish-task errors during close
       }
       try {
-        ws.close(1000, reason.slice(0, 120));
+        ws.close(1000, reason.slice(0, WS_CLOSE_REASON_MAX_LEN));
       } catch {
         // ignore close errors
       }
@@ -3186,7 +3195,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const timeoutMs = parseTimeoutMs(this.env.ASR_TIMEOUT_MS ?? "45000");
 
       const fetchAbort = new AbortController();
-      const fetchTimer = setTimeout(() => fetchAbort.abort(), Math.min(timeoutMs, 15_000));
+      const fetchTimer = setTimeout(() => fetchAbort.abort(), Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
       const response = await fetch(handshakeUrl, {
         method: "GET",
         headers: {
@@ -3269,7 +3278,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       const startedTimeout = setTimeout(() => {
         runtime.readyReject?.(new Error("dashscope task-started timeout"));
-      }, Math.min(timeoutMs, 15000));
+      }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
 
       await runtime.readyPromise;
       clearTimeout(startedTimeout);
@@ -3787,7 +3796,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
     const readyTimer = setTimeout(() => {
       rejectAll(new Error("dashscope task-started timeout"));
-    }, Math.min(timeoutMs, 15000));
+    }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
     await readyPromise;
     clearTimeout(readyTimer);
 
@@ -4263,7 +4272,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     } catch (error) {
       asrState.consecutive_failures += 1;
       asrState.last_error = (error as Error).message;
-      const backoffMs = Math.min(60_000, 1000 * 2 ** Math.min(asrState.consecutive_failures, 6));
+      const backoffMs = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(asrState.consecutive_failures, 6));
       asrState.next_retry_after_ms = Date.now() + backoffMs;
       asrByStream[streamRole] = asrState;
       await this.storeAsrByStream(asrByStream);
@@ -5115,7 +5124,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // outages from blocking the entire finalization pipeline.
       await this.updateFinalizeV2Status(jobId, { stage: "drain", progress: 18 });
       await this.ensureFinalizeJobActive(jobId);
-      const drainTimeoutMs = Math.min(timeoutMs, 30_000); // cap drain at 30s
+      const drainTimeoutMs = Math.min(timeoutMs, DRAIN_TIMEOUT_CAP_MS); // cap drain at 30s
       const drainWithTimeout = async (streamRole: StreamRole): Promise<void> => {
         await Promise.race([
           this.drainRealtimeQueue(sessionId, streamRole),
@@ -6808,7 +6817,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           }
 
           if (type === "close") {
-            const reason = String(message.reason ?? "client-close").slice(0, 120);
+            const reason = String(message.reason ?? "client-close").slice(0, WS_CLOSE_REASON_MAX_LEN);
             if (this.asrRealtimeEnabled()) {
               await this.closeRealtimeAsrSession(connectionRole, `client-close:${reason}`, false);
               await this.refreshAsrStreamMetrics(sessionId, connectionRole);
