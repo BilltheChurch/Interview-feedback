@@ -210,3 +210,97 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* ── Print / PDF export styles ── */
+@media print {
+  /* Reset layout constraints so all content flows naturally */
+  * {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  body {
+    background: white !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Hide interactive UI elements not relevant in print */
+  nav,
+  button,
+  .drag-region,
+  [data-no-print] {
+    display: none !important;
+  }
+
+  /* Keep cards, claims, and content blocks from being split across pages */
+  section[data-section] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Person sections start on a new page */
+  section[data-section]:has(> [data-section-type="person"]) {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  /* Individual cards — never split */
+  [class*="rounded-[--radius-card]"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Claim cards (border-l-4 items) — never split */
+  [class*="border-l-4"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Metrics grid, comparison table, quality card — never split */
+  .grid,
+  table,
+  [class*="grid-cols"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Section headers stay with their content */
+  h1, h2, h3, h4, h5 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Recommendation badge, question breakdown items — never split */
+  [class*="border-emerald"],
+  [class*="border-amber"],
+  [class*="border-red"],
+  [class*="border-border"][class*="rounded"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Improvement suggestion blocks — never split */
+  [class*="border-l-2"][class*="border-blue"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Radar chart container — never split */
+  svg {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Summary grid (strengths/risks/actions) — never split */
+  [class*="grid-cols-1"][class*="sm:grid-cols-3"] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Add some breathing room between sections */
+  section[data-section] {
+    margin-bottom: 8pt;
+  }
+}

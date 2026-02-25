@@ -4,9 +4,11 @@ import logging
 import time
 
 from app.schemas import (
+    ActionPlanItem,
     ClaimBeforeAfter,
     ClaimImprovement,
     DimensionImprovement,
+    FollowUpQuestion,
     ImprovementReport,
     ImprovementRequest,
     ImprovementResponse,
@@ -54,6 +56,21 @@ SYSTEM_PROMPT = """你是一位资深面试辅导专家。根据已完成的面�
         "before": "转录原文",
         "after": "改进后表达（面试语言）"
       }}
+    }}
+  ],
+  "follow_up_questions": [
+    {{
+      "question": "推荐追问的英文问题",
+      "purpose": "该问题想验证什么（中文）",
+      "related_claim_id": "关联的risk/action claim id"
+    }}
+  ],
+  "action_plan": [
+    {{
+      "action": "具体行动项（中文）",
+      "related_claim_id": "关联的risk/action claim id",
+      "practice_method": "练习方式（中文）",
+      "expected_outcome": "预期效果（中文）"
     }}
   ]
 }}"""
@@ -141,7 +158,40 @@ class ImprovementGenerator:
                     before_after=before_after,
                 ))
 
-            return ImprovementReport(overall=overall, dimensions=dimensions, claims=claims)
+            follow_up_questions = []
+            for fq in data.get("follow_up_questions", []):
+                if not isinstance(fq, dict):
+                    continue
+                question = str(fq.get("question", "")).strip()
+                if not question:
+                    continue
+                follow_up_questions.append(FollowUpQuestion(
+                    question=question,
+                    purpose=str(fq.get("purpose", "")).strip(),
+                    related_claim_id=fq.get("related_claim_id"),
+                ))
+
+            action_plan = []
+            for ap in data.get("action_plan", []):
+                if not isinstance(ap, dict):
+                    continue
+                action = str(ap.get("action", "")).strip()
+                if not action:
+                    continue
+                action_plan.append(ActionPlanItem(
+                    action=action,
+                    related_claim_id=ap.get("related_claim_id"),
+                    practice_method=str(ap.get("practice_method", "")).strip(),
+                    expected_outcome=str(ap.get("expected_outcome", "")).strip(),
+                ))
+
+            return ImprovementReport(
+                overall=overall,
+                dimensions=dimensions,
+                claims=claims,
+                follow_up_questions=follow_up_questions,
+                action_plan=action_plan,
+            )
 
         except (KeyError, TypeError) as exc:
             logger.warning("Failed to parse improvement response: %s", exc)
@@ -149,4 +199,6 @@ class ImprovementGenerator:
                 overall=OverallImprovement(summary="改进建议生成失败，请重试。", key_points=[]),
                 dimensions=[],
                 claims=[],
+                follow_up_questions=[],
+                action_plan=[],
             )

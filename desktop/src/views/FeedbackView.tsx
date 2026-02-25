@@ -1988,6 +1988,27 @@ function FeedbackHeader({
           <MessageSquare className="w-3.5 h-3.5" />
           {exporting === 'slack' ? 'Exporting\u2026' : 'Share to Slack'}
         </Button>
+        <Button variant="secondary" size="sm" onClick={async () => {
+          try {
+            const html = buildPrintHtml(report, sessionNotes, sessionMemos);
+            const result = await window.desktopAPI.exportPDF({
+              sessionName: report.session_name,
+              html,
+            });
+            if (result.success) {
+              // success - no additional action needed
+            }
+          } catch (err) {
+            console.warn('PDF export failed:', err);
+          }
+        }} className="transition-all duration-200">
+          <FileText className="w-3.5 h-3.5" />
+          Export PDF
+        </Button>
+        <Button variant="secondary" size="sm" onClick={handleExportSlack} className="transition-all duration-200">
+          <MessageSquare className="w-3.5 h-3.5" />
+          Share to Slack
+        </Button>
         <div className="w-px h-5 bg-border mx-1" />
         {onTranscriptToggle && (
           <Button variant="secondary" size="sm" onClick={onTranscriptToggle} className="transition-all duration-200">

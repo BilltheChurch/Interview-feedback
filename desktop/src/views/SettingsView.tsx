@@ -11,6 +11,7 @@ import {
   Loader2,
   UserCircle,
   Cpu,
+  MessageSquare,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -453,6 +454,36 @@ function ProviderSettings() {
   );
 }
 
+/* --- SlackIntegration ---------------------------------- */
+
+function SlackIntegration() {
+  const [slackWebhookUrl, setSlackWebhookUrl] = useState(() => localStorage.getItem('ifb_slack_webhook') || '');
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <MessageSquare className="w-5 h-5 text-accent" />
+        <h2 className="text-base font-semibold text-ink">Slack Integration</h2>
+      </div>
+
+      <div className="space-y-2">
+        <label className="text-xs text-ink-secondary">Incoming Webhook URL</label>
+        <input
+          type="url"
+          placeholder="https://hooks.slack.com/services/..."
+          value={slackWebhookUrl}
+          onChange={(e) => setSlackWebhookUrl(e.target.value)}
+          onBlur={() => localStorage.setItem('ifb_slack_webhook', slackWebhookUrl)}
+          className="mt-1 w-full px-3 py-1.5 text-sm border border-border rounded-[--radius-button] bg-white"
+        />
+        <p className="text-xs text-ink-tertiary mt-1">
+          Create a Slack app with Incoming Webhooks enabled and paste the URL here.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
 /* --- SettingsView (main export) ------------------------ */
 
 export function SettingsView() {
@@ -469,6 +500,7 @@ export function SettingsView() {
           <AccountSection />
           <AudioSetup />
           <ProviderSettings />
+          <SlackIntegration />
           <TemplateManager />
           <Preferences />
         </div>

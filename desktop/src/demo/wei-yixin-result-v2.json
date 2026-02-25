@@ -1,0 +1,994 @@
+{
+  "session": {
+    "session_id": "sess_1771912890055",
+    "finalized_at": "2026-02-24T16:15:00.000Z",
+    "tentative": false,
+    "confidence_level": "high",
+    "unresolved_cluster_count": 0,
+    "diarization_backend": "edge"
+  },
+  "transcript": [
+    {
+      "utterance_id": "u001",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Welcome Yixin. Let's start — tell me about yourself and your product management experience.",
+      "start_ms": 0,
+      "end_ms": 5000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u002",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Thanks for having me. So I've been a PM for about 4 years. Most recently at a B2B SaaS company, analytics platform. We grew from like 500 to 5000 DAU. I led a team of 8 engineers. Yeah, it was a good experience.",
+      "start_ms": 5500,
+      "end_ms": 18000,
+      "duration_ms": 12500,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u003",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Good. Can you tell me specifically what you did to drive that growth from 500 to 5000 users?",
+      "start_ms": 19000,
+      "end_ms": 24000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u004",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Um, so we did a lot of things. We improved the onboarding flow, added some key integrations that users were asking for, and also did some marketing campaigns. I think the biggest thing was probably the integrations — like Slack and Salesforce — because enterprise customers really needed those.",
+      "start_ms": 25000,
+      "end_ms": 42000,
+      "duration_ms": 17000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u005",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "What was your specific role in that? How did you decide which integrations to prioritize?",
+      "start_ms": 43000,
+      "end_ms": 48000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u006",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Right, so I used a framework. I categorize features into must-haves, performance features, and delighters using the Kano model. Then I score each on impact versus effort. For integrations specifically, Slack was the clear winner because 80% of our enterprise pipeline mentioned it in sales calls.",
+      "start_ms": 49000,
+      "end_ms": 68000,
+      "duration_ms": 19000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u007",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "OK. Let me shift to a scenario question. You're a PM at a social media company. Your weekly active users dropped 15% over the past month. Walk me through how you'd investigate.",
+      "start_ms": 70000,
+      "end_ms": 82000,
+      "duration_ms": 12000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u008",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "OK so... 15% drop. That's significant. Um, first I'd want to check if it's across all users or just specific segments. Like, is it new users or existing users? And also maybe look at geographic data to see if it's a regional thing.",
+      "start_ms": 83000,
+      "end_ms": 98000,
+      "duration_ms": 15000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u009",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Let's say the data shows it's primarily in existing users, and it's global — not regional.",
+      "start_ms": 99000,
+      "end_ms": 104000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u010",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Hmm OK. So if it's existing users globally... I'd probably look at recent product changes. Like did we ship anything in the last month that could have affected the experience? Maybe a redesign or removing a feature. I'd also check, um, competitors — did anyone launch something that's pulling users away?",
+      "start_ms": 105000,
+      "end_ms": 122000,
+      "duration_ms": 17000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u011",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Good direction. But how would you actually structure this investigation? What's your systematic approach?",
+      "start_ms": 123000,
+      "end_ms": 128000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u012",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Yeah, I guess I'd look at a few things. Session frequency, time spent per session, which features they're using less. And then try to correlate that with any product changes or external events. Like maybe there's a changelog I can cross-reference with the drop timeline.",
+      "start_ms": 129000,
+      "end_ms": 148000,
+      "duration_ms": 19000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u013",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "What metric would you prioritize looking at first, and why?",
+      "start_ms": 149000,
+      "end_ms": 153000,
+      "duration_ms": 4000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u014",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Hmm, probably session frequency? Because if people are coming back less often, that tells me it's an engagement issue rather than like a loading speed or crash problem. But actually, maybe I should look at retention curves first — like day-7 and day-30 retention — to see if it's a sudden cliff or gradual decline.",
+      "start_ms": 154000,
+      "end_ms": 175000,
+      "duration_ms": 21000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u015",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "You changed your answer there. That's fine. Let's move on. Tell me about a time you had a significant disagreement with your engineering team about priorities.",
+      "start_ms": 176000,
+      "end_ms": 184000,
+      "duration_ms": 8000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u016",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Oh yeah, that happens a lot. So there was this time when engineering wanted to spend a whole sprint on refactoring the backend, and I had this important feature that sales was pushing for. It was tough because I understood the tech debt argument but the sales team was saying we'd lose deals.",
+      "start_ms": 185000,
+      "end_ms": 205000,
+      "duration_ms": 20000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u017",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "How did you resolve it?",
+      "start_ms": 206000,
+      "end_ms": 208000,
+      "duration_ms": 2000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u018",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "I believe in data-driven discussions. I bring user research data, usage metrics, and competitive analysis to the table. If engineering has technical concerns about implementation complexity, I work with them to find a phased approach. Sometimes the best solution is a simpler MVP that validates the assumption first.",
+      "start_ms": 209000,
+      "end_ms": 230000,
+      "duration_ms": 21000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u019",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "That sounds quite general. What specifically happened in that situation you mentioned? What was the outcome?",
+      "start_ms": 231000,
+      "end_ms": 237000,
+      "duration_ms": 6000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u020",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Right, sorry. So in that specific case, we ended up splitting the sprint — two weeks for the feature and one week for the most critical refactoring. The feature shipped on time and sales closed three deals with it. The refactoring... honestly we didn't get to finish it until two sprints later, which the engineers weren't super happy about.",
+      "start_ms": 238000,
+      "end_ms": 262000,
+      "duration_ms": 24000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u021",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Interesting. Looking back, would you do anything differently?",
+      "start_ms": 263000,
+      "end_ms": 267000,
+      "duration_ms": 4000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u022",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Hmm, I think I would have communicated the timeline for the refactoring better upfront. Like, made it an explicit commitment rather than just saying 'we'll get to it.' The engineers felt like their priorities kept getting deprioritized, and that damaged trust a bit.",
+      "start_ms": 268000,
+      "end_ms": 288000,
+      "duration_ms": 20000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u023",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Have you ever had to influence a senior stakeholder — like a VP or C-level — to change direction on something?",
+      "start_ms": 289000,
+      "end_ms": 295000,
+      "duration_ms": 6000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u024",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Um, not directly a C-level. But I've worked with our VP of Sales on roadmap priorities. He wanted us to build custom features for a single large client, and I pushed back by showing that the feature wouldn't benefit our broader user base. I showed the usage data and... yeah, he eventually agreed to a more generalizable solution.",
+      "start_ms": 296000,
+      "end_ms": 320000,
+      "duration_ms": 24000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u025",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "How did you structure that conversation? What data did you use to convince him?",
+      "start_ms": 321000,
+      "end_ms": 326000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u026",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "I showed him that the custom feature would only serve that one client, but if we built it as a configurable module, it could serve maybe 30% of our enterprise segment. I also estimated the engineering cost difference — it was only like 20% more effort for 10x the reach. So the ROI argument was pretty clear.",
+      "start_ms": 327000,
+      "end_ms": 348000,
+      "duration_ms": 21000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u027",
+      "stream_role": "teacher",
+      "speaker_name": "Interviewer",
+      "text": "Last question — do you have any questions for me about the role or the team?",
+      "start_ms": 349000,
+      "end_ms": 354000,
+      "duration_ms": 5000,
+      "decision": "auto"
+    },
+    {
+      "utterance_id": "u028",
+      "stream_role": "students",
+      "speaker_name": "Yixin Wei",
+      "cluster_id": "c_yixin",
+      "text": "Yeah, just one — how is the PM team structured here? Like, how much autonomy do PMs have?",
+      "start_ms": 355000,
+      "end_ms": 362000,
+      "duration_ms": 7000,
+      "decision": "auto"
+    }
+  ],
+  "speaker_logs": {
+    "source": "edge",
+    "turns": [],
+    "clusters": [],
+    "speaker_map": [
+      {
+        "cluster_id": "c_yixin",
+        "display_name": "Yixin Wei",
+        "source": "manual"
+      }
+    ],
+    "updated_at": "2026-02-24T16:15:00.000Z"
+  },
+  "stats": [
+    {
+      "speaker_key": "yixin_wei",
+      "speaker_name": "Yixin Wei",
+      "talk_time_ms": 221500,
+      "talk_time_pct": 61.1,
+      "turns": 14,
+      "silence_ms": 8000,
+      "interruptions": 0,
+      "interrupted_by_others": 0
+    },
+    {
+      "speaker_key": "interviewer",
+      "speaker_name": "Interviewer",
+      "talk_time_ms": 77000,
+      "talk_time_pct": 21.3,
+      "turns": 14,
+      "silence_ms": 5000,
+      "interruptions": 0,
+      "interrupted_by_others": 0
+    }
+  ],
+  "memos": [],
+  "evidence": [
+    {
+      "evidence_id": "e_wy_intro",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        0,
+        42000
+      ],
+      "utterance_ids": [
+        "u001",
+        "u002",
+        "u003",
+        "u004"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "Um, so we did a lot of things. We improved the onboarding flow, added some key integrations that users were asking for, and also did some marketing campaigns. I think the biggest thing was probably the integrations — like Slack and Salesforce — because enterprise customers really needed those.",
+      "confidence": 0.85
+    },
+    {
+      "evidence_id": "e_wy_framework",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        43000,
+        68000
+      ],
+      "utterance_ids": [
+        "u005",
+        "u006"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "Right, so I used a framework. I categorize features into must-haves, performance features, and delighters using the Kano model. Then I score each on impact versus effort. For integrations specifically, Slack was the clear winner because 80% of our enterprise pipeline mentioned it in sales calls.",
+      "confidence": 0.95
+    },
+    {
+      "evidence_id": "e_wy_drop_initial",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        70000,
+        122000
+      ],
+      "utterance_ids": [
+        "u007",
+        "u008",
+        "u009",
+        "u010"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "OK so... 15% drop. That's significant. Um, first I'd want to check if it's across all users or just specific segments. Like, is it new users or existing users? And also maybe look at geographic data to see if it's a regional thing.",
+      "confidence": 0.8
+    },
+    {
+      "evidence_id": "e_wy_drop_metrics",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        123000,
+        175000
+      ],
+      "utterance_ids": [
+        "u011",
+        "u012",
+        "u013",
+        "u014"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "Hmm, probably session frequency? Because if people are coming back less often, that tells me it's an engagement issue rather than like a loading speed or crash problem. But actually, maybe I should look at retention curves first — like day-7 and day-30 retention — to see if it's a sudden cliff or gradual decline.",
+      "confidence": 0.85
+    },
+    {
+      "evidence_id": "e_wy_conflict",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        176000,
+        262000
+      ],
+      "utterance_ids": [
+        "u015",
+        "u016",
+        "u017",
+        "u018",
+        "u019",
+        "u020"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "So in that specific case, we ended up splitting the sprint — two weeks for the feature and one week for the most critical refactoring. The feature shipped on time and sales closed three deals with it. The refactoring... honestly we didn't get to finish it until two sprints later, which the engineers weren't super happy about.",
+      "confidence": 0.9
+    },
+    {
+      "evidence_id": "e_wy_reflection",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        263000,
+        288000
+      ],
+      "utterance_ids": [
+        "u021",
+        "u022"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "I think I would have communicated the timeline for the refactoring better upfront. Like, made it an explicit commitment rather than just saying 'we'll get to it.' The engineers felt like their priorities kept getting deprioritized, and that damaged trust a bit.",
+      "confidence": 0.9
+    },
+    {
+      "evidence_id": "e_wy_vp_influence",
+      "type": "transcript_quote",
+      "time_range_ms": [
+        289000,
+        348000
+      ],
+      "utterance_ids": [
+        "u023",
+        "u024",
+        "u025",
+        "u026"
+      ],
+      "speaker": {
+        "display_name": "Yixin Wei"
+      },
+      "quote": "I showed him that the custom feature would only serve that one client, but if we built it as a configurable module, it could serve maybe 30% of our enterprise segment. I also estimated the engineering cost difference — it was only like 20% more effort for 10x the reach. So the ROI argument was pretty clear.",
+      "confidence": 0.95
+    }
+  ],
+  "overall": {
+    "narrative": "Yixin Wei 展现出扎实的产品管理能力，尤其在优先级判断与数据驱动决策方面表现突出。他能清晰地运用 Kano 模型和 ROI 分析来支撑产品方向，同时在跨团队协作中展现出良好的沟通意识与妥协智慧。尽管在部分情境下表达略显犹豫，但整体逻辑严谨、结构完整，具备胜任高级 PM 岗位的潜力。",
+    "narrative_evidence_refs": [],
+    "key_findings": [
+      {
+        "type": "strength",
+        "text": "Yixin 能够基于用户数据和业务影响系统性地制定优先级，例如通过销售线索中高频提及的 Slack 集成来验证需求价值，体现了成熟的产品思维。",
+        "evidence_refs": [
+          "e_wy_framework",
+          "e_wy_drop_metrics",
+          "e_wy_vp_influence"
+        ]
+      },
+      {
+        "type": "strength",
+        "text": "在处理与工程团队的分歧时，他提出分阶段交付的务实方案，并以数据说服对方，展现了出色的影响力与协作能力。",
+        "evidence_refs": [
+          "e_wy_conflict",
+          "e_wy_vp_influence"
+        ]
+      },
+      {
+        "type": "risk",
+        "text": "在面对复杂问题时，其回答存在轻微的反复与不确定性，如在分析用户流失时先推荐 session frequency 后又转向 retention curves，反映出对核心指标选择的思考尚不够果断。",
+        "evidence_refs": [
+          "e_wy_drop_metrics"
+        ]
+      }
+    ],
+    "suggested_dimensions": [],
+    "summary_sections": [],
+    "team_dynamics": {
+      "highlights": [],
+      "risks": []
+    },
+    "recommendation": {
+      "decision": "recommend",
+      "confidence": 0.82,
+      "rationale": "Yixin 展现出扎实的产品管理能力和数据驱动思维，结构化表达与跨团队协作经验突出，具备胜任高级 PM 岗位的潜力。建议关注其在高压下的快速决断力。",
+      "context_type": "hiring"
+    },
+    "question_analysis": [
+      {
+        "question_text": "Tell me about yourself and your product management experience.",
+        "answer_utterance_ids": ["u002"],
+        "answer_quality": "B",
+        "comment": "概述了经历和成绩，但缺少具体的量化影响和个人角色细节，存在少量填充词。",
+        "related_dimensions": ["structure", "initiative"],
+        "scoring_rationale": "候选人给出了基本的职业背景介绍，提到了团队规模和增长数据（500→5000 DAU），展现了一定的量化意识。但回答缺乏「个人角色定位」的清晰表述，没有区分自己的独特贡献与团队成果，且使用了 'like'、'yeah' 等填充词，影响了专业度。综合评为 B。",
+        "answer_highlights": [
+          "主动提及了具体的增长数据（500 → 5000 DAU），体现了量化思维",
+          "提到了团队规模（8 engineers），展示了管理幅度"
+        ],
+        "answer_weaknesses": [
+          "未明确自己在增长中的独特贡献，容易被理解为团队集体成果",
+          "使用了 'like'、'yeah' 等填充词，降低了专业表达的精炼度",
+          "缺少对产品类型和目标用户的精准描述，背景信息不够完整"
+        ],
+        "suggested_better_answer": "建议采用「角色—挑战—成果」三段结构：先定位自己的核心角色（'作为唯一的 PM，我负责端到端的产品策略'），再描述面临的关键挑战（'核心挑战是在 PLG 模型下实现企业客户的转化'），最后用具体指标总结成果（'通过 X 策略，DAU 从 500 增长到 5000，企业客户转化率提升 Y%'）。"
+      },
+      {
+        "question_text": "Can you tell me specifically what you did to drive that growth from 500 to 5000 users?",
+        "answer_utterance_ids": ["u004"],
+        "answer_quality": "B",
+        "comment": "提到了具体举措（onboarding、集成、营销），但未建立分析框架，逻辑层次略显松散。",
+        "related_dimensions": ["data_driven", "structure"],
+        "scoring_rationale": "候选人列举了三个具体举措（onboarding 优化、集成开发、营销活动），并能识别出集成是最大的增长驱动力。但回答以列举式展开，缺乏优先级排序的逻辑框架，也未提供每个举措对增长的具体贡献比例。以 'Um, so we did a lot of things' 开头暴露了思路整理不足。",
+        "answer_highlights": [
+          "能够识别关键驱动力（'the biggest thing was probably the integrations'），体现了产品直觉",
+          "提及了企业客户的真实需求（'enterprise customers really needed those'），展示了客户洞察"
+        ],
+        "answer_weaknesses": [
+          "以 'Um, so we did a lot of things' 开头，缺乏结构化的回答框架",
+          "三个举措之间缺乏逻辑关联和优先级排序，显得像是随机列举",
+          "未提供各举措对增长的量化贡献（如 'integrations 贡献了 60% 的新增用户'）"
+        ],
+        "suggested_better_answer": "建议用「假设—验证—结果」框架重构：先说明增长假设（'我们识别了三个增长杠杆，通过数据分析确定了优先级'），然后按影响力从大到小展开每个举措，每个都附带量化结果（'Slack 集成上线后，企业 pipeline 转化率从 12% 提升到 28%'），最后总结学到的方法论。"
+      },
+      {
+        "question_text": "How would you prioritize between Slack integration and the onboarding redesign?",
+        "answer_utterance_ids": ["u006"],
+        "answer_quality": "A",
+        "comment": "清晰运用 Kano 模型和 ROI 分析进行框架化比较，结论有数据支撑，逻辑完整。",
+        "related_dimensions": ["data_driven", "leadership"],
+        "scoring_rationale": "这是候选人表现最出色的回答。主动引入 Kano 模型作为分析框架，将功能分类为 must-haves / performance / delighters，然后用 impact vs effort 进行量化评估。最关键的是引用了真实数据（'80% of our enterprise pipeline mentioned it in sales calls'）来支撑结论。框架运用自然且有说服力，展现了高水平的产品思维。",
+        "answer_highlights": [
+          "自然引入 Kano 模型进行功能分类，展示了成熟的优先级排序方法论",
+          "使用 Impact vs Effort 矩阵作为辅助决策工具，体现了系统化思维",
+          "引用了具体的销售数据（80% pipeline 提及 Slack），用数据驱动决策而非直觉"
+        ],
+        "answer_weaknesses": [
+          "未讨论两个选项之间的依赖关系或时序考量（是否可以并行推进）"
+        ],
+        "suggested_better_answer": "回答已经很优秀。如果要进一步提升，可以补充 tradeoff 分析：讨论如果选择延后 onboarding redesign 可能带来的风险（如新用户流失），以及如何通过快速迭代（如 A/B test 最小改动）来并行降低风险。"
+      },
+      {
+        "question_text": "Tell me about a time you had to influence a VP or senior stakeholder.",
+        "answer_utterance_ids": ["u010"],
+        "answer_quality": "B",
+        "comment": "提供了完整 STAR 案例但影响力层级偏低（功能级别），未体现组织层面战略影响。",
+        "related_dimensions": ["leadership", "initiative"],
+        "scoring_rationale": "候选人使用了 STAR 框架讲述了一个完整的影响力案例，逻辑清晰。但案例中的影响力层级偏低 — 主要是功能级别的说服（推动某个功能上线），而非战略级别的影响（改变产品方向或资源分配）。对于 Senior PM 的面试来说，面试官期望看到更高层级的影响力案例。",
+        "answer_highlights": [
+          "使用了完整的 STAR 框架（Situation-Task-Action-Result），叙述结构清晰",
+          "能够描述具体的说服策略和行动步骤"
+        ],
+        "answer_weaknesses": [
+          "案例的影响力层级偏低（功能级别），未体现跨部门或战略级别的影响",
+          "缺少对 stakeholder 核心诉求的洞察分析（为什么 VP 最初不同意？）",
+          "结果描述停留在 'VP 最终同意了' 层面，未量化业务影响"
+        ],
+        "suggested_better_answer": "建议选择一个更高层级的案例，如改变产品路线图的优先级、推动组织流程变革、或在资源竞争中为团队争取到关键资源。回答应该包含：VP 的核心顾虑是什么、你如何通过数据和用户洞察来构建说服逻辑、最终的业务影响（如收入提升 X% 或用户满意度提高 Y 点）。"
+      },
+      {
+        "question_text": "If weekly active users dropped 15%, how would you investigate?",
+        "answer_utterance_ids": ["u014", "u016"],
+        "answer_quality": "C",
+        "comment": "分析路径多次自我修正（先 session frequency 后 retention curves），反映核心指标选择不够果断。",
+        "related_dimensions": ["data_driven", "structure"],
+        "scoring_rationale": "候选人展现了对分析方法的基本了解，能够提到 session frequency、retention curves 等指标。但分析过程中多次自我修正，从一个指标跳到另一个指标，暴露了在压力下缺乏清晰的分析框架。对于这类 case study 问题，面试官期望看到有条理的分层分析方法，而不是发散式探索。",
+        "answer_highlights": [
+          "提到了多个相关分析维度（session frequency、retention curves），知识面较广"
+        ],
+        "answer_weaknesses": [
+          "分析路径不连贯，多次自我修正（'wait, actually let me think about...'），缺乏结构化思维",
+          "未建立「从宏观到微观」的分析框架，直接跳入具体指标",
+          "缺少对外部因素（竞品、市场变化、季节性）的系统性排查"
+        ],
+        "suggested_better_answer": "建议使用「分层诊断」框架：第一层确认数据准确性（是否是采集问题、是否有 external events），第二层区分是获取问题还是留存问题（新用户减少 vs 老用户流失），第三层按用户分群深入分析（按平台、地区、功能使用深度切分），第四层定位根因并提出假设，最后设计验证方案。每一层都应该说明预期的数据来源和判断标准。"
+      }
+    ],
+    "interview_quality": {
+      "coverage_ratio": 0.8,
+      "follow_up_depth": 6,
+      "structure_score": 8.2,
+      "suggestions": "面试覆盖了关键维度，追问深度较好。建议增加对候选人主动性和独立思考能力的压力测试问题。"
+    }
+  },
+  "per_person": [
+    {
+      "person_key": "yixin_wei",
+      "display_name": "Yixin Wei",
+      "dimensions": [
+        {
+          "dimension": "leadership",
+          "label_zh": "领导力",
+          "score": 8,
+          "score_rationale": "Yixin 在多个场景中主动引导讨论，如在争议中推动分阶段开发方案，并以数据影响 VP 决策，展现较强的影响力和方向把控能力。",
+          "evidence_insufficient": false,
+          "not_applicable": false,
+          "strengths": [
+            {
+              "claim_id": "c_yixin_wei_leadership_01",
+              "text": "Yixin 能够在与工程团队的冲突中主动协调，提出兼顾短期目标与长期技术健康的折中方案，体现其在压力下统筹全局的领导力。",
+              "evidence_refs": [
+                "e_wy_conflict"
+              ],
+              "confidence": 0.85,
+              "supporting_utterances": [
+                "u016",
+                "u018",
+                "u020"
+              ]
+            },
+            {
+              "claim_id": "c_yixin_wei_leadership_02",
+              "text": "他在与 VP 销售的沟通中，通过展示功能可扩展性与成本效益差异，成功推动更广泛适用的解决方案，展现了向上影响的能力。",
+              "evidence_refs": [
+                "e_wy_vp_influence"
+              ],
+              "confidence": 0.8,
+              "supporting_utterances": [
+                "u024",
+                "u026"
+              ]
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_yixin_wei_leadership_03",
+              "text": "在面对高层决策时，其影响力仍局限于具体案例，缺乏对组织层面战略推动力的体现，尚未展现出更高阶的领导视野。",
+              "evidence_refs": [
+                "e_wy_vp_influence"
+              ],
+              "confidence": 0.7,
+              "supporting_utterances": [
+                "u024",
+                "u026"
+              ]
+            }
+          ],
+          "actions": []
+        },
+        {
+          "dimension": "collaboration",
+          "label_zh": "协作能力",
+          "score": 8.5,
+          "score_rationale": "Yixin 在跨职能协作中表现出高度的共情与建设性沟通能力，能有效平衡各方诉求并达成共识。",
+          "evidence_insufficient": false,
+          "not_applicable": false,
+          "strengths": [
+            {
+              "claim_id": "c_yixin_wei_collaboration_01",
+              "text": "在与工程团队的分歧中，他不仅坚持产品目标，还主动寻求技术可行的替代路径，体现出对工程师立场的理解与尊重。",
+              "evidence_refs": [
+                "e_wy_conflict"
+              ],
+              "confidence": 0.8,
+              "supporting_utterances": [
+                "u016",
+                "u018",
+                "u020"
+              ]
+            },
+            {
+              "claim_id": "c_yixin_wei_collaboration_02",
+              "text": "他能够将抽象的业务需求转化为可量化的技术对比（如 20% 成本增量换取 10 倍覆盖），促进跨团队高效对话。",
+              "evidence_refs": [
+                "e_wy_vp_influence"
+              ],
+              "confidence": 0.85,
+              "supporting_utterances": [
+                "u024",
+                "u026"
+              ]
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_yixin_wei_collaboration_03",
+              "text": "在回顾冲突事件时，他承认因未明确承诺后续重构时间而损害了工程师信任，说明其在长期关系维护上仍有提升空间。",
+              "evidence_refs": [
+                "e_wy_conflict",
+                "e_wy_reflection"
+              ],
+              "confidence": 0.75,
+              "supporting_utterances": [
+                "u020",
+                "u022"
+              ]
+            }
+          ],
+          "actions": []
+        },
+        {
+          "dimension": "logic",
+          "label_zh": "逻辑思维",
+          "score": 9,
+          "score_rationale": "Yixin 的分析过程具有清晰的因果链条，善于从现象追溯根本原因，并建立可验证的假设。",
+          "evidence_insufficient": false,
+          "not_applicable": false,
+          "strengths": [
+            {
+              "claim_id": "c_yixin_wei_logic_01",
+              "text": "在用户流失分析中，他系统性地提出从用户分群、产品变更、外部竞争等多维度切入，构建了完整的排查框架。",
+              "evidence_refs": [
+                "e_wy_drop_initial",
+                "e_wy_drop_metrics"
+              ],
+              "confidence": 0.9,
+              "supporting_utterances": [
+                "u008",
+                "u010",
+                "u012"
+              ]
+            },
+            {
+              "claim_id": "c_yixin_wei_logic_02",
+              "text": "他能准确识别关键指标之间的关联性，如将 session frequency 与 retention 曲线结合使用，避免单一指标误导判断。",
+              "evidence_refs": [
+                "e_wy_drop_metrics"
+              ],
+              "confidence": 0.85,
+              "supporting_utterances": [
+                "u012",
+                "u014"
+              ]
+            }
+          ],
+          "risks": [],
+          "actions": []
+        },
+        {
+          "dimension": "structure",
+          "label_zh": "结构化表达",
+          "score": 8.5,
+          "score_rationale": "Yixin 的回答普遍条理清晰，能使用框架（如 Kano 模型）组织信息，但在个别回答中略显跳跃。",
+          "evidence_insufficient": false,
+          "not_applicable": false,
+          "strengths": [
+            {
+              "claim_id": "c_yixin_wei_structure_01",
+              "text": "在解释增长策略时，他采用’问题-行动-结果’结构，清晰呈现了从用户反馈到集成落地的完整闭环。",
+              "evidence_refs": [
+                "e_wy_intro",
+                "e_wy_framework"
+              ],
+              "confidence": 0.85,
+              "supporting_utterances": [
+                "u004",
+                "u006"
+              ]
+            },
+            {
+              "claim_id": "c_yixin_wei_structure_02",
+              "text": "在应对用户流失问题时，他按’分层诊断→关键指标→验证方法’的顺序展开，逻辑层次分明。",
+              "evidence_refs": [
+                "e_wy_drop_initial",
+                "e_wy_drop_metrics"
+              ],
+              "confidence": 0.8,
+              "supporting_utterances": [
+                "u008",
+                "u010",
+                "u012"
+              ]
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_yixin_wei_structure_03",
+              "text": "在回答’如何调查用户流失’时，其思路虽全面但略显松散，未能一开始就明确优先级，导致中间出现自我修正。",
+              "evidence_refs": [
+                "e_wy_drop_initial",
+                "e_wy_drop_metrics"
+              ],
+              "confidence": 0.7,
+              "supporting_utterances": [
+                "u008",
+                "u014"
+              ]
+            }
+          ],
+          "actions": []
+        },
+        {
+          "dimension": "initiative",
+          "label_zh": "主动性",
+          "score": 8,
+          "score_rationale": "Yixin 主动提出解决方案并推动进展，在关键时刻展现进取心，但部分回应仍偏被动。",
+          "evidence_insufficient": false,
+          "not_applicable": false,
+          "strengths": [
+            {
+              "claim_id": "c_yixin_wei_initiative_01",
+              "text": "在用户流失场景中，他主动提出多维度排查路径，而非等待追问，体现出强烈的探索意愿。",
+              "evidence_refs": [
+                "e_wy_drop_initial"
+              ],
+              "confidence": 0.8,
+              "supporting_utterances": [
+                "u008",
+                "u010"
+              ]
+            },
+            {
+              "claim_id": "c_yixin_wei_initiative_02",
+              "text": "在与工程团队争执后，他主动反思并提出改进沟通方式，展现了持续优化的主动性。",
+              "evidence_refs": [
+                "e_wy_reflection"
+              ],
+              "confidence": 0.75,
+              "supporting_utterances": [
+                "u022"
+              ]
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_yixin_wei_initiative_03",
+              "text": "在部分问题中，如用户流失分析，其初始回答较为泛化，依赖面试官引导才进入深度，显示主动推进的意识有待加强。",
+              "evidence_refs": [
+                "e_wy_drop_initial",
+                "e_wy_conflict"
+              ],
+              "confidence": 0.65,
+              "supporting_utterances": [
+                "u008",
+                "u018"
+              ]
+            }
+          ],
+          "actions": []
+        }
+      ],
+      "summary": {
+        "strengths": [
+          "具备成熟的数据驱动决策能力，能有效运用 Kano 模型与 ROI 分析进行优先级判断。",
+          "在跨职能协作中展现良好共情与影响力，能通过量化对比推动共识达成。",
+          "逻辑清晰，结构完整，善于构建系统性分析框架，尤其在用户流失诊断中表现突出。"
+        ],
+        "risks": [
+          "在关键问题上偶有犹豫或自我修正，反映其在高压下快速决断力仍有提升空间。",
+          "在与高层沟通中影响力集中于具体案例，尚未体现战略层面的引领作用。",
+          "部分回答依赖引导，主动性在高难度问题中表现不一致。"
+        ],
+        "actions": [
+          "建议在后续面试中强化对核心指标选择的自信表达，减少中途调整。",
+          "可进一步准备更具战略高度的影响力案例，以匹配高级 PM 角色要求。",
+          "练习在无提示情况下主动输出完整分析框架，提升独立推进能力。"
+        ]
+      }
+    }
+  ],
+  "quality": {
+    "generated_at": "2026-02-25T00:00:00.000Z",
+    "build_ms": 8000,
+    "validation_ms": 200,
+    "claim_count": 12,
+    "invalid_claim_count": 0,
+    "needs_evidence_count": 0,
+    "report_source": "llm_synthesized",
+    "report_model": "qwen-flash"
+  },
+  "improvements": {
+    "overall": {
+      "summary": "Yixin 在数据驱动决策、跨团队协作和逻辑分析方面表现突出，但在高压情境下的快速决断力、战略影响力以及独立推进复杂问题的能力仍有提升空间。建议强化核心指标选择的自信表达，主动输出完整分析框架，并准备更具战略高度的影响力案例。",
+      "key_points": [
+        "在关键问题上减少自我修正，增强对核心判断的坚定表达",
+        "主动构建完整分析框架，避免依赖面试官引导",
+        "准备更高阶的向上影响案例，体现战略视野"
+      ]
+    },
+    "dimensions": [
+      {
+        "dimension": "leadership",
+        "advice": "在与高层沟通中，应从‘解决具体问题’转向‘推动组织层面变革’，展现更前瞻的战略影响力。当前案例仍聚焦于单个功能或项目，缺乏对产品方向或组织机制的系统性塑造。",
+        "framework": "PREP 框架（Point-Reason-Example-Point）：先明确主张（Point），再用理由支撑（Reason），举具体案例（Example），最后回归主张强化印象（Point）。适用于向上汇报时建立权威感。",
+        "example_response": "I proposed a shift from feature-first to data-first product development across the org. By introducing a standardized impact-effort scoring model and requiring all roadmap items to include user validation metrics, we reduced wasted engineering effort by 30% over six months — this wasn’t just about one feature, but about changing how we think about prioritization."
+      },
+      {
+        "dimension": "structure",
+        "advice": "在回答开放性问题时，应提前设定清晰的分析框架，避免中途调整思路导致表达松散。可使用‘分层诊断法’确保逻辑闭环。",
+        "framework": "MECE 原则（Mutually Exclusive, Collectively Exhaustive）：将问题拆解为互斥且全面的子维度，如用户流失可按‘行为-体验-外部’三类切入，确保不遗漏关键点。",
+        "example_response": "To investigate a 15% drop in WAU, I’d use a three-layer framework: first, segment users by cohort and behavior; second, analyze product experience changes and engagement signals like session frequency and retention curves; third, assess external factors such as competitor launches or market shifts. This ensures we cover all angles without overlap."
+      },
+      {
+        "dimension": "initiative",
+        "advice": "在面对高难度问题时，应主动输出完整分析路径，而非等待追问。可通过预设‘假设-验证’流程来展现独立推进能力。",
+        "framework": "STAR-R（Situation-Task-Action-Result-Reflection）升级版：在行动阶段加入‘预判下一步’环节，例如在提出调查方向后立即说明‘接下来我会优先验证哪条假设’，体现主动性。",
+        "example_response": "After identifying that the drop is global and affects existing users, my next step would be to isolate the most likely root causes. I’d prioritize checking recent product changes against the timeline — especially any UX redesigns or feature removals — because those often have immediate behavioral impacts. Then I’d validate with retention curves and usage heatmaps before expanding to external factors."
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c_yixin_wei_leadership_03",
+        "advice": "当前影响力案例集中于具体功能决策，未体现对组织战略或机制的塑造。建议补充一个推动产品方法论变革的案例，如建立标准化优先级评估体系。",
+        "suggested_wording": "I led the adoption of a company-wide product prioritization framework based on Kano and ROI analysis. We required every roadmap item to include impact estimates and user validation plans. Within two quarters, we saw a 40% reduction in scope creep and increased alignment between PMs and execs.",
+        "before_after": {
+          "before": "I showed him that the custom feature would only serve that one client, but if we built it as a configurable module, it could serve maybe 30% of our enterprise segment. I also estimated the engineering cost difference — it was only like 20% more effort for 10x the reach. So the ROI argument was pretty clear.",
+          "after": "I pushed back by proposing a strategic shift: instead of building a one-off custom feature, we should design a reusable, configurable module. I presented data showing that 30% of our enterprise customers had similar needs. The incremental effort was only 20% higher, but the reach was 10x greater — so the ROI wasn't just financial, it was about long-term scalability. That convinced the VP to adopt a platform-first mindset."
+        }
+      },
+      {
+        "claim_id": "c_yixin_wei_collaboration_03",
+        "advice": "在回顾冲突事件时，承认因未明确承诺重构时间而损害信任，说明其在长期关系维护上存在短板。建议未来在妥协方案中加入明确的时间承诺或阶段性交付节点。",
+        "suggested_wording": "In hindsight, I should have committed to a specific timeline for the refactoring — not just 'we’ll get to it.' For example, I could have said: 'We’ll complete the critical refactoring within the next two sprints, and I’ll block time in the roadmap to ensure it’s not deprioritized again.'",
+        "before_after": {
+          "before": "I think I would have communicated the timeline for the refactoring better upfront. Like, made it an explicit commitment rather than just saying 'we'll get to it.' The engineers felt like their priorities kept getting deprioritized, and that damaged trust a bit.",
+          "after": "Looking back, I realize I should’ve made a concrete commitment — not just 'we’ll get to it' — but something like: 'The refactoring will be completed within the next two sprints, and I’ll reserve dedicated capacity in the roadmap to prevent future delays.' That would have shown respect for their concerns and rebuilt trust."
+        }
+      },
+      {
+        "claim_id": "c_yixin_wei_structure_03",
+        "advice": "在回答用户流失问题时，思路虽全面但略显跳跃，且中途改变优先级判断，反映结构化思维有待加强。建议在开头即明确分析框架，避免反复修正。",
+        "suggested_wording": "My systematic approach starts with segmentation: I’d first determine whether the drop is affecting new vs. existing users, and whether it’s regional or global. Then I’d move to root cause analysis using a three-tier model: product changes, user behavior signals, and external competition.",
+        "before_after": {
+          "before": "OK so... 15% drop. That's significant. Um, first I'd want to check if it's across all users or just specific segments. Like, is it new users or existing users? And also maybe look at geographic data to see if it's a regional thing.",
+          "after": "First, I’d clarify the scope: is this a global drop across all users, or concentrated in certain segments? If it’s global and affecting existing users, then I’d focus on three areas: recent product changes, key engagement metrics like session frequency and retention curves, and any competitive threats launched around the same time."
+        }
+      }
+    ],
+    "follow_up_questions": [
+      {
+        "question": "Can you walk me through a specific instance where you had to kill a feature that was already in development? What was your decision framework?",
+        "purpose": "验证候选人在沉没成本面前的果断决策能力，弥补当前案例中偏向渐进式推进的不足",
+        "related_claim_id": "c_yixin_wei_leadership_03"
+      },
+      {
+        "question": "If you had to present a product strategy pivot to the CEO with only 48 hours of data, how would you structure your argument?",
+        "purpose": "测试高压限时场景下的战略思维和表达能力，进一步验证结构化思维的深度",
+        "related_claim_id": "c_yixin_wei_structure_03"
+      },
+      {
+        "question": "Tell me about a time when your data analysis led you to a conclusion that contradicted stakeholder intuition. How did you handle it?",
+        "purpose": "评估数据驱动决策与人际影响力的平衡能力",
+        "related_claim_id": "c_yixin_wei_data_driven_01"
+      }
+    ],
+    "action_plan": [
+      {
+        "action": "每周进行一次 Mock Interview 练习，重点强化开头即设定分析框架的习惯",
+        "related_claim_id": "c_yixin_wei_structure_03",
+        "practice_method": "使用 MECE 原则，在回答前先花 10 秒口述框架大纲，录音后自我回顾",
+        "expected_outcome": "4 周后能在 15 秒内清晰设定问题分析框架，减少中途修正"
+      },
+      {
+        "action": "准备 3 个组织级影响力案例，替换当前偏功能级别的案例",
+        "related_claim_id": "c_yixin_wei_leadership_03",
+        "practice_method": "用 STAR-R 框架（含 Reflection 环节）重写案例，确保每个案例体现跨团队或组织层面的影响",
+        "expected_outcome": "面试中能流畅讲述至少 2 个战略级影响力案例"
+      },
+      {
+        "action": "针对核心指标选择建立「第一直觉-验证-坚持」的思维模式",
+        "related_claim_id": "c_yixin_wei_data_driven_02",
+        "practice_method": "每天用 5 分钟分析一个产品指标变动场景，练习快速锁定核心指标并给出理由",
+        "expected_outcome": "面试中对指标选择更加果断，减少犹豫和自我修正"
+      }
+    ]
+  },
+  "trace": {
+    "finalize_job_id": "mock_wei_yixin_v2",
+    "model_versions": {
+      "synthesize": "qwen-flash"
+    },
+    "thresholds": {},
+    "unknown_ratio": 0,
+    "generated_at": "2026-02-25T00:00:00.000Z"
+  }
+}

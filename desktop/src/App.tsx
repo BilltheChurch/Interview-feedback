@@ -12,6 +12,7 @@ import { HistoryView } from './views/HistoryView';
 import { SettingsView } from './views/SettingsView';
 import { LoginView } from './views/LoginView';
 import { useDeepLink } from './hooks/useDeepLink';
+import { injectDemoSession } from './demo/injectDemoSession';
 
 function AppRoutes() {
   useDeepLink();
@@ -44,6 +45,9 @@ function AppRoutes() {
 export function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  // Inject demo session into localStorage on first load
+  useEffect(() => { injectDemoSession(); }, []);
 
   useEffect(() => {
     (async () => {

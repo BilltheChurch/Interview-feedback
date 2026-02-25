@@ -996,6 +996,50 @@ function registerIpcHandlers() {
     return { ok: true };
   });
 
+  // ── Export PDF IPC ──────────────────────────
+  // Uses a hidden offscreen BrowserWindow to render print-optimized HTML,
+  // so the main UI is never disturbed and PDF pagination is clean.
+  ipcMain.handle('export:printToPDF', async (_event, options) => {
+    if (!mainWindow) throw new Error('No main window');
+
+    const htmlContent = options?.html || '';
+    const defaultName = (options?.sessionName || 'feedback-report').replace(/[/\\?%*:|"<>]/g, '_');
+
+    // Ask where to save first, so user isn't waiting during render
+    const { filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export PDF',
+      defaultPath: `${defaultName}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (!filePath) return { success: false };
+
+    // Create hidden offscreen window for clean PDF rendering
+    const pdfWindow = new BrowserWindow({
+      width: 800,
+      height: 600,
+      show: false,
+      webPreferences: { offscreen: true },
+    });
+
+    try {
+      await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
+      // Wait for fonts and layout to settle
+      await new Promise(r => setTimeout(r, 500));
+
+      const pdfData = await pdfWindow.webContents.printToPDF({
+        pageSize: 'A4',
+        printBackground: true,
+        preferCSSPageSize: false,
+        margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+      });
+
+      fs.writeFileSync(filePath, pdfData);
+      return { success: true, path: filePath };
+    } finally {
+      pdfWindow.destroy();
+    }
+  });
+
   // ── ACS Caption IPC ──────────────────────────
   ipcMain.handle('acs:getEnabled', () => {
     return !!process.env.ACS_CONNECTION_STRING && process.env.ACS_ENABLED === 'true';

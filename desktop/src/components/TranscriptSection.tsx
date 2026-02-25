@@ -20,6 +20,8 @@ type Props = {
   onEvidenceBadgeClick?: (evidenceId: string) => void;
   scrollToUtteranceId?: string | null;
   highlightedUtteranceIds?: Set<string>;
+  /** When true, the list fills its parent container height instead of using a fixed 500px height. */
+  fillHeight?: boolean;
 };
 
 const SPEAKER_COLORS = [
@@ -57,7 +59,7 @@ type UtteranceGroup = {
   evidenceIds: string[];
 };
 
-export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClick, scrollToUtteranceId, highlightedUtteranceIds }: Props) {
+export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClick, scrollToUtteranceId, highlightedUtteranceIds, fillHeight }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const parentRef = useRef<HTMLDivElement>(null);
@@ -150,7 +152,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
   }, [searchQuery]);
 
   return (
-    <div className="space-y-3">
+    <div className={fillHeight ? "flex flex-col h-full gap-3" : "space-y-3"}>
       {/* Filter bar */}
       <div className="flex items-center gap-2 flex-wrap">
         <button
@@ -198,7 +200,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
       {/* Virtualized list */}
       <div
         ref={parentRef}
-        className="h-[500px] overflow-y-auto rounded-[--radius-card] border border-border bg-white"
+        className={`${fillHeight ? 'flex-1 min-h-0' : 'h-[500px]'} overflow-y-auto rounded-[--radius-card] border border-border bg-white`}
       >
         <div
           style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}

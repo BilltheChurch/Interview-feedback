@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source'),
   getWorkerApiKey: () => ipcRenderer.invoke('auth:getWorkerApiKey'),
   copyToClipboard: (text) => ipcRenderer.invoke('clipboard:write', { text }),
+  exportPDF: (options) => ipcRenderer.invoke('export:printToPDF', options),
   acsGetEnabled: () => ipcRenderer.invoke('acs:getEnabled'),
   acsGetToken: () => ipcRenderer.invoke('acs:getToken'),
   onDeepLinkStart: (listener) => {

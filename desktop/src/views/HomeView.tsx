@@ -245,6 +245,40 @@ function PendingFeedbackCard({
   );
 }
 
+/* --- Date grouping helpers ---------------- */
+
+type MeetingWithTime = { startTime: string };
+
+function getMeetingDateGroup(isoTime: string): string {
+  const date = new Date(isoTime);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const dayAfter = new Date(today);
+  dayAfter.setDate(dayAfter.getDate() + 2);
+
+  if (date >= today && date < tomorrow) return 'Today';
+  if (date >= tomorrow && date < dayAfter) return 'Tomorrow';
+  return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function groupMeetingsByDate<T extends MeetingWithTime>(meetings: T[]): { label: string; meetings: T[] }[] {
+  const groups = new Map<string, T[]>();
+  const order: string[] = [];
+
+  for (const m of meetings) {
+    const label = getMeetingDateGroup(m.startTime);
+    if (!groups.has(label)) {
+      groups.set(label, []);
+      order.push(label);
+    }
+    groups.get(label)!.push(m);
+  }
+
+  return order.map(label => ({ label, meetings: groups.get(label)! }));
+}
+
 /* --- UpcomingMeetings --------------------- */
 
 function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject: string; joinUrl?: string; startTime?: string; endTime?: string }) => void }) {
@@ -358,32 +392,41 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
           <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
       </div>
-      <ul className="space-y-2 flex-1 min-h-0 overflow-y-auto">
-        {meetings.map((m) => (
-          <li
-            key={m.id}
-            className="flex items-center justify-between border border-border rounded-[--radius-button] px-3 py-2"
-          >
-            <div className="min-w-0 mr-2">
-              <p className="text-sm text-ink truncate">{m.subject}</p>
-              <p className="text-xs text-ink-tertiary">
-                {new Date(m.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                {' — '}
-                {new Date(m.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                {m.organizer ? ` · ${m.organizer}` : ''}
-              </p>
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="shrink-0"
-              onClick={() => onQuickStart({ subject: m.subject, joinUrl: m.joinUrl, startTime: m.startTime, endTime: m.endTime })}
-            >
-              Quick Start
-            </Button>
-          </li>
+      <div className="space-y-4 flex-1 min-h-0 overflow-y-auto">
+        {groupMeetingsByDate(meetings).map((group) => (
+          <div key={group.label}>
+            <h4 className="text-xs font-medium text-ink-tertiary uppercase tracking-wide mb-1.5 px-1">
+              {group.label}
+            </h4>
+            <ul className="space-y-2">
+              {group.meetings.map((m) => (
+                <li
+                  key={m.id}
+                  className="flex items-center justify-between border border-border rounded-[--radius-button] px-3 py-2"
+                >
+                  <div className="min-w-0 mr-2">
+                    <p className="text-sm text-ink truncate">{m.subject}</p>
+                    <p className="text-xs text-ink-tertiary">
+                      {new Date(m.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {' — '}
+                      {new Date(m.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {m.organizer ? ` · ${m.organizer}` : ''}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => onQuickStart({ subject: m.subject, joinUrl: m.joinUrl, startTime: m.startTime, endTime: m.endTime })}
+                  >
+                    Quick Start
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </div>
         ))}
-      </ul>
+      </div>
     </Card>
   );
 }

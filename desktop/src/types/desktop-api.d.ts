@@ -92,6 +92,9 @@ interface DesktopAPI {
   secureRetrieve?(payload: { key: string }): Promise<string | null>;
   secureDelete?(payload: { key: string }): Promise<void>;
 
+  // Export PDF (hidden-window approach: renderer passes print-optimized HTML)
+  exportPDF(options?: { sessionName?: string; html?: string }): Promise<{ success: boolean; path?: string }>;
+
   // ACS Caption
   acsGetEnabled(): Promise<boolean>;
   acsGetToken(): Promise<{

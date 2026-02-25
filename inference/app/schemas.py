@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -350,12 +350,43 @@ class DimensionPreset(BaseModel):
     description: str = Field(default="", max_length=500)
 
 
+class Recommendation(BaseModel):
+    decision: str  # "recommend" | "tentative" | "not_recommend"
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    rationale: str = ""
+    context_type: str = "hiring"  # or "admission"
+
+
+class QuestionAnalysis(BaseModel):
+    question_text: str
+    answer_utterance_ids: list[str] = Field(default_factory=list)
+    answer_quality: str = ""  # A/B/C/D
+    comment: str = ""
+    related_dimensions: list[str] = Field(default_factory=list)
+    # Enhanced analysis fields
+    scoring_rationale: str = ""
+    answer_highlights: list[str] = Field(default_factory=list)
+    answer_weaknesses: list[str] = Field(default_factory=list)
+    suggested_better_answer: str = ""
+
+
+class InterviewQuality(BaseModel):
+    coverage_ratio: float = Field(default=0.0, ge=0, le=1)
+    follow_up_depth: int = Field(default=0, ge=0)
+    structure_score: float = Field(default=0.0, ge=0, le=10)
+    suggestions: str = ""
+
+
 class OverallFeedback(BaseModel):
     # New v2 fields
     narrative: str = Field(default="", max_length=3000)
     narrative_evidence_refs: list[str] = Field(default_factory=list)
     key_findings: list[KeyFinding] = Field(default_factory=list)
     suggested_dimensions: list[SuggestedDimension] = Field(default_factory=list)
+    # Enrichment fields (v3)
+    recommendation: Optional[Recommendation] = None
+    question_analysis: Optional[list[QuestionAnalysis]] = None
+    interview_quality: Optional[InterviewQuality] = None
     # Legacy fields (kept for backward compatibility)
     summary_sections: list[SummarySection] = Field(default_factory=list)
     team_dynamics: TeamDynamics = Field(default_factory=TeamDynamics)
@@ -568,10 +599,25 @@ class OverallImprovement(BaseModel):
     key_points: list[str] = Field(default_factory=list, description="3-5 key improvement points")
 
 
+class FollowUpQuestion(BaseModel):
+    question: str
+    purpose: str = ""
+    related_claim_id: str | None = None
+
+
+class ActionPlanItem(BaseModel):
+    action: str
+    related_claim_id: str | None = None
+    practice_method: str = ""
+    expected_outcome: str = ""
+
+
 class ImprovementReport(BaseModel):
     overall: OverallImprovement
     dimensions: list[DimensionImprovement] = Field(default_factory=list)
     claims: list[ClaimImprovement] = Field(default_factory=list)
+    follow_up_questions: list[FollowUpQuestion] = Field(default_factory=list)
+    action_plan: list[ActionPlanItem] = Field(default_factory=list)
 
 
 class ImprovementRequest(BaseModel):
