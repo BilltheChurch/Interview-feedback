@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from app.services.device import DeviceType, detect_device
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -53,31 +55,6 @@ class TranscriptResult:
     processing_time_ms: int
     backend: str
     model_size: str
-
-
-# ---------------------------------------------------------------------------
-# Device detection
-# ---------------------------------------------------------------------------
-
-DeviceType = Literal["cuda", "rocm", "mps", "cpu"]
-
-
-def detect_device() -> DeviceType:
-    """Return the best available compute device."""
-    try:
-        import torch  # noqa: F811
-
-        if torch.cuda.is_available():
-            # Check for ROCm (AMD) — torch.cuda works for ROCm too, but
-            # the version string contains "rocm" or hip is available.
-            if hasattr(torch.version, "hip") and torch.version.hip is not None:
-                return "rocm"
-            return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-    except ImportError:
-        pass
-    return "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +146,7 @@ def _transcribe_faster_whisper(
         try:
             fw_device = "cuda"
             compute_type = "float16"
-        except Exception:
+        except Exception:  # noqa: BLE001 — ROCm/CUDA fallback guard
             logger.warning("ROCm: CTranslate2 CUDA mode failed, falling back to CPU")
             fw_device = "cpu"
             compute_type = "int8"

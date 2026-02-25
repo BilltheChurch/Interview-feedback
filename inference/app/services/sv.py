@@ -8,32 +8,15 @@ import threading
 import wave
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
 from app.exceptions import SVBackendError
 from app.services.audio import NormalizedAudio
+from app.services.device import DeviceType as SVDeviceType, detect_device as detect_sv_device
 
 logger = logging.getLogger(__name__)
-
-SVDeviceType = Literal["cuda", "rocm", "mps", "cpu"]
-
-
-def detect_sv_device() -> SVDeviceType:
-    """Return the best available compute device for speaker verification."""
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            if hasattr(torch.version, "hip") and torch.version.hip is not None:
-                return "rocm"
-            return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-    except ImportError:
-        pass
-    return "cpu"
 
 
 @dataclass(slots=True)
@@ -91,7 +74,7 @@ class ModelScopeSVBackend:
                         if torch.cuda.is_available() and hasattr(self._pipeline, "model"):
                             self._pipeline.model = self._pipeline.model.to(torch.device("cuda"))
                             logger.info("SV model transferred to CUDA/ROCm GPU")
-                    except Exception:
+                    except RuntimeError:
                         logger.warning("Failed to transfer SV model to CUDA, running on CPU", exc_info=True)
                 elif self._device == "mps":
                     # ModelScope pipelines don't auto-convert inputs to MPS

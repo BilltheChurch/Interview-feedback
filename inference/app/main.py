@@ -4,9 +4,11 @@ import asyncio
 import concurrent.futures
 import hmac
 import logging
+from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from app.config import get_settings
 from app.routes.asr import router as asr_router
@@ -89,7 +91,7 @@ async def _warmup_whisper() -> None:
 
 
 @app.middleware("http")
-async def request_guard(request: Request, call_next):
+async def request_guard(request: Request, call_next: Callable) -> Response:
     # Skip API key check for health endpoint (Docker health check, load balancers)
     if settings.inference_api_key.get_secret_value() and request.url.path != "/health":
         incoming_key = request.headers.get("x-api-key", "")
@@ -164,7 +166,7 @@ async def handle_sv_backend_error(_: Request, exc: SVBackendError) -> JSONRespon
 
 
 @app.get("/health")
-async def health():
+async def health() -> dict[str, str]:
     """Minimal health check — no auth required."""
     return {"status": "ok", "app_name": settings.app_name}
 

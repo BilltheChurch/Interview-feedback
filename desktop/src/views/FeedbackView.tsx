@@ -224,9 +224,147 @@ type FeedbackReport = {
   improvements?: ImprovementReport;
 };
 
+/* ─── Raw API types (normalization input) ────────────────── */
+
+/** Raw shapes from inference API / localStorage — used only for normalization input. */
+interface RawClaim {
+  claim_id?: string;
+  id?: string;
+  text?: string;
+  category?: string;
+  confidence?: number;
+  evidence_refs?: string[];
+}
+
+interface RawDimension {
+  dimension?: string;
+  label_zh?: string;
+  score?: number | string;
+  score_rationale?: string;
+  evidence_insufficient?: boolean;
+  not_applicable?: boolean;
+  claims?: RawClaim[];
+  strengths?: RawClaim[];
+  risks?: RawClaim[];
+  actions?: RawClaim[];
+}
+
+interface RawSpeaker {
+  speaker_name?: string;
+  speaker_key?: string;
+  display_name?: string;
+  person_id?: string;
+}
+
+interface RawPerson {
+  display_name?: string;
+  person_name?: string;
+  person_key?: string;
+  speaker_id?: string;
+  dimensions?: RawDimension[];
+  summary?: {
+    strengths?: string | string[];
+    risks?: string | string[];
+    actions?: string | string[];
+  };
+}
+
+interface RawEvidenceItem {
+  evidence_id?: string;
+  id?: string;
+  time_range_ms?: number[];
+  timestamp_ms?: number;
+  end_ms?: number;
+  speaker?: string | { display_name?: string; person_id?: string };
+  quote?: string;
+  text?: string;
+  confidence?: number;
+  weak?: boolean;
+  weak_reason?: string;
+  utterance_ids?: string[];
+}
+
+interface RawSummarySection {
+  bullets?: string[];
+  evidence_ids?: string[];
+}
+
+interface RawMemo {
+  stage?: string;
+  text?: string;
+}
+
+interface RawUtterance {
+  utterance_id?: string;
+  speaker_name?: string;
+  text?: string;
+  start_ms?: number;
+  end_ms?: number;
+}
+
+interface RawApiReport {
+  stats?: RawSpeaker[];
+  participants?: (string | RawSpeaker)[];
+  overall?: {
+    team_summary?: string;
+    summary_sections?: RawSummarySection[];
+    narrative?: string;
+    narrative_evidence_refs?: string[];
+    key_findings?: OverallFeedback['keyFindings'];
+    suggested_dimensions?: OverallFeedback['suggestedDimensions'];
+    teacher_memos?: string[];
+    team_dynamics?: TeamDynamic[] | { highlights?: string[]; risks?: string[] };
+    interaction_events?: string[];
+    evidence_refs?: string[];
+    recommendation?: Recommendation;
+    question_analysis?: QuestionAnalysisItem[];
+    interview_quality?: OverallFeedback['interviewQuality'];
+    interview_type?: string;
+    position_title?: string;
+    [key: string]: unknown;
+  };
+  per_person?: RawPerson[];
+  persons?: RawPerson[];
+  evidence?: RawEvidenceItem[];
+  memos?: RawMemo[];
+  transcript?: RawUtterance[];
+  session?: { session_id?: string; caption_source?: string; [key: string]: unknown };
+  session_id?: string;
+  session_name?: string;
+  date?: string;
+  duration_ms?: number;
+  mode?: string;
+  caption_source?: string;
+  interview_type?: string;
+  position_title?: string;
+  recommendation?: Recommendation;
+  question_analysis?: QuestionAnalysisItem[];
+  interview_quality?: OverallFeedback['interviewQuality'];
+  improvements?: ImprovementReport;
+  user_edits?: Array<{ field_path: string; edited_value: unknown; edited_at: string }>;
+  [key: string]: unknown;
+}
+
+interface RegenerateClaimResult {
+  text?: string;
+  evidence_refs?: string[];
+}
+
+interface FinalizeStatusResult {
+  status?: string;
+  stage?: string;
+  progress?: number;
+  errors?: string[];
+}
+
+interface OpenFeedbackResult {
+  report?: RawApiReport;
+  blocking_reason?: string;
+}
+
 /* ─── Legacy Score Helpers ─────────────────────────────── */
 
-function calculateLegacyScore(dim: any): number {
+function calculateLegacyScore(dim: RawDimension): number {
   const total = (dim.strengths?.length ?? 0) + (dim.risks?.length ?? 0) + (dim.actions?.length ?? 0);
   if (total === 0) return 5;
   const strengthRatio = (dim.strengths?.length ?? 0) / total;
@@ -255,19 +393,18 @@ function stripInlineEvidenceRefs(text: string): { cleanText: string; extractedRe
 /* ─── API → Frontend Report Transformer ───────────────── */
 // The backend API (ResultV2) uses a different schema than the frontend FeedbackReport.
 // This function normalizes the API response into the shape the UI expects.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: string; durationMs?: number; mode?: string; participants?: string[] }): FeedbackReport {
+function normalizeApiReport(raw: RawApiReport, sessionMeta?: { name?: string; date?: string; durationMs?: number; mode?: string; participants?: string[] }): FeedbackReport {
   // ── participants: extract display_name from stats or speaker_map ──
   const participants: string[] = (() => {
     // If raw.stats exists, use speaker_name from stats
     if (Array.isArray(raw.stats)) {
       return raw.stats
-        .map((s: any) => s.speaker_name || s.speaker_key || 'Unknown')
+        .map((s: RawSpeaker) => s.speaker_name || s.speaker_key || 'Unknown')
         .filter((n: string) => n !== 'Unknown');
     }
     // If raw.participants is string[], use directly
     if (Array.isArray(raw.participants)) {
-      return raw.participants.map((p: any) =>
+      return raw.participants.map((p: string | RawSpeaker) =>
         typeof p === 'string' ? p : p?.display_name || p?.person_id || 'Unknown'
       );
     }
@@ -279,7 +416,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     if (typeof raw.overall?.team_summary === 'string') return raw.overall.team_summary;
     if (Array.isArray(raw.overall?.summary_sections)) {
       return raw.overall.summary_sections
-        .map((s: any) => (Array.isArray(s.bullets) ? s.bullets.join(' ') : ''))
+        .map((s: RawSummarySection) => (Array.isArray(s.bullets) ? s.bullets.join(' ') : ''))
         .filter(Boolean)
         .join('\n\n');
     }
@@ -295,8 +432,8 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     teamSummaryEvidenceRefs = overall.narrative_evidence_refs ?? [];
   } else if (overall?.summary_sections) {
     // Legacy: flatten bullets into narrative
-    teamSummaryNarrative = (overall.summary_sections as any[])
-      .map((s: any) => s.bullets?.join(' '))
+    teamSummaryNarrative = (overall.summary_sections as RawSummarySection[])
+      .map((s: RawSummarySection) => s.bullets?.join(' '))
       .filter(Boolean)
       .join('\n\n');
   }
@@ -308,7 +445,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
   const teacherMemos: string[] = (() => {
     if (Array.isArray(raw.overall?.teacher_memos)) return raw.overall.teacher_memos;
     if (Array.isArray(raw.memos)) {
-      return raw.memos.map((m: any) => {
+      return raw.memos.map((m: RawMemo) => {
         const prefix = m.stage ? `[${m.stage}] ` : '';
         return `${prefix}${m.text || ''}`;
       });
@@ -343,7 +480,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     if (Array.isArray(raw.overall?.evidence_refs)) return raw.overall.evidence_refs;
     if (Array.isArray(raw.overall?.summary_sections)) {
       return raw.overall.summary_sections
-        .flatMap((s: any) => (Array.isArray(s.evidence_ids) ? s.evidence_ids : []));
+        .flatMap((s: RawSummarySection) => (Array.isArray(s.evidence_ids) ? s.evidence_ids : []));
     }
     return [];
   })();
@@ -353,9 +490,9 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
     const source = Array.isArray(raw.per_person) ? raw.per_person
       : Array.isArray(raw.persons) ? raw.persons
       : [];
-    return source.map((p: any) => {
+    return source.map((p: RawPerson) => {
       // Dimensions: merge strengths/risks/actions into unified claims[]
-      const dimensions: DimensionFeedback[] = (Array.isArray(p.dimensions) ? p.dimensions : []).map((d: any) => {
+      const dimensions: DimensionFeedback[] = (Array.isArray(p.dimensions) ? p.dimensions : []).map((d: RawDimension) => {
         const claims: Claim[] = [];
         // If already has claims[] array (frontend format), use it
         if (Array.isArray(d.claims)) {
@@ -363,7 +500,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
             claims.push({
               id: c.id || c.claim_id || `${d.dimension}_${claims.length}`,
               text: c.text || '',
-              category: c.category || 'strength',
+              category: (c.category as Claim['category']) || 'strength',
               confidence: typeof c.confidence === 'number' ? c.confidence : 0.5,
               evidence_refs: Array.isArray(c.evidence_refs) ? c.evidence_refs : [],
             });
@@ -434,7 +571,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
   })();
 
   // ── evidence: transform evidence[] ──
-  const evidence: EvidenceRef[] = (Array.isArray(raw.evidence) ? raw.evidence : []).map((e: any) => ({
+  const evidence: EvidenceRef[] = (Array.isArray(raw.evidence) ? raw.evidence : []).map((e: RawEvidenceItem) => ({
     id: e.evidence_id || e.id || '',
     timestamp_ms: Array.isArray(e.time_range_ms) ? e.time_range_ms[0] : (e.timestamp_ms || 0),
     end_ms: Array.isArray(e.time_range_ms) ? e.time_range_ms[1] : (e.end_ms || undefined),
@@ -449,7 +586,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
   // ── transcript: extract from raw.transcript ──
   const normalizedTranscript: TranscriptUtterance[] = (() => {
     if (!Array.isArray(raw.transcript)) return [];
-    return raw.transcript.map((u: any) => ({
+    return raw.transcript.map((u: RawUtterance) => ({
       utterance_id: u.utterance_id || '',
       speaker_name: u.speaker_name || null,
       text: u.text || '',
@@ -560,7 +697,7 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
       keyFindings: keyFindings.length > 0 ? keyFindings : undefined,
       suggestedDimensions: suggestedDimensions.length > 0 ? suggestedDimensions : undefined,
       recommendation,
-      questionAnalysis: questionAnalysis?.length > 0 ? questionAnalysis : undefined,
+      questionAnalysis: questionAnalysis && questionAnalysis.length > 0 ? questionAnalysis : undefined,
       interviewQuality,
     },
     persons,
@@ -2909,10 +3046,11 @@ function EditClaimModal({
         sessionId,
         body: { claim_id: claim.id, evidence_refs: refs },
       });
-      if (result && typeof result === 'object' && (result as any).text) {
-        setText((result as any).text);
-        if (Array.isArray((result as any).evidence_refs)) {
-          setRefs((result as any).evidence_refs);
+      const typed = result as RegenerateClaimResult | null;
+      if (typed && typed.text) {
+        setText(typed.text);
+        if (Array.isArray(typed.evidence_refs)) {
+          setRefs(typed.evidence_refs);
         }
       }
     } catch {
@@ -3620,11 +3758,11 @@ export function FeedbackView() {
     async function tryLoadReport() {
       try {
         // First check finalization status — detect 'failed' or 'running' early
-        const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! });
+        const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! }) as FinalizeStatusResult | null;
         if (!cancelled && status && typeof status === 'object') {
-          const backendStatus = (status as any).status;
+          const backendStatus = status.status;
           if (backendStatus === 'failed') {
-            const errors = (status as any).errors;
+            const errors = status.errors;
             const msg = Array.isArray(errors) && errors.length > 0
               ? errors.join('; ')
               : 'Finalization failed on the server.';
@@ -3643,7 +3781,7 @@ export function FeedbackView() {
         }
 
         // Then try to load a finalized report via feedback-open (quality-gated)
-        const result = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as any;
+        const result = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as OpenFeedbackResult | null;
         if (!cancelled && result && typeof result === 'object') {
           if (result.report) {
             const normalized = normalizeApiReport(result.report, {
@@ -3704,14 +3842,14 @@ export function FeedbackView() {
       }
 
       try {
-        const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! });
+        const status = await window.desktopAPI.getFinalizeStatus({ baseUrl, sessionId: sessionId! }) as FinalizeStatusResult | null;
         if (cancelled) return;
 
         if (status && typeof status === 'object') {
-          const backendStatus = (status as any).status;
+          const backendStatus = status.status;
           // Surface progress info from Worker so user sees what stage we're at
-          const stage = (status as any).stage as string | undefined;
-          const progress = (status as any).progress as number | undefined;
+          const stage = status.stage;
+          const progress = status.progress;
           if (stage && typeof progress === 'number') {
             setFinalizeProgressInfo({ stage, progress });
           }
@@ -3719,7 +3857,7 @@ export function FeedbackView() {
           if (backendStatus === 'failed') {
             // Backend explicitly says finalization failed — stop polling immediately
             if (interval) clearInterval(interval);
-            const errors = (status as any).errors;
+            const errors = status.errors;
             const msg = Array.isArray(errors) && errors.length > 0
               ? errors.join('; ')
               : 'Finalization failed on the server.';
@@ -3733,7 +3871,7 @@ export function FeedbackView() {
             if (interval) clearInterval(interval);
             setFinalizeStatus('finalizing');
             try {
-              const result = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as any;
+              const result = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as OpenFeedbackResult | null;
               if (!cancelled && result && typeof result === 'object') {
                 if (result.report) {
                   const normalized = normalizeApiReport(result.report, {
@@ -3747,7 +3885,7 @@ export function FeedbackView() {
                   setFinalizeStatus('final');
                 } else {
                   // Quality gate failed — report withheld by backend
-                  const reason = (result as any).blocking_reason || 'Report quality did not meet threshold.';
+                  const reason = result.blocking_reason || 'Report quality did not meet threshold.';
                   setFinalizeError(reason);
                   setFinalizeStatus('error');
                 }
@@ -3809,7 +3947,7 @@ export function FeedbackView() {
           if (tier2PollRef.current) clearInterval(tier2PollRef.current);
           // Fetch the enhanced report
           try {
-            const freshResult = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as any;
+            const freshResult = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as OpenFeedbackResult | null;
             if (!cancelled && freshResult?.report) {
               const normalized = normalizeApiReport(freshResult.report, {
                 name: sessionData?.sessionName,
@@ -3994,10 +4132,9 @@ export function FeedbackView() {
       });
 
       const keys = fieldPath.split('.');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let obj: any = stored.report;
+      let obj: Record<string, unknown> = stored.report;
       for (let i = 0; i < keys.length - 1; i++) {
-        obj = obj[keys[i]];
+        obj = obj[keys[i]] as Record<string, unknown>;
         if (!obj) return;
       }
       obj[keys[keys.length - 1]] = newValue;

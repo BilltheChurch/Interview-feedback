@@ -655,6 +655,15 @@ const HISTORY_PREFIX = "history/";
 const HISTORY_MAX_LIMIT = 50;
 const HISTORY_REVERSE_EPOCH_MAX = 9_999_999_999_999;
 
+// ── Reliability & timeout constants ──────────────────────────────────
+const DASHSCOPE_TIMEOUT_CAP_MS = 15_000;
+const DEFAULT_ASR_TIMEOUT_MS = 45_000;
+const DRAIN_TIMEOUT_CAP_MS = 30_000;
+const WS_CLOSE_REASON_MAX_LEN = 120;
+const R2_LIST_LIMIT = 100;
+const MAX_BACKOFF_MS = 60_000;
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 /**
  * Report sources considered "ready" for feedback delivery.
  * llm_enhanced       — legacy polish pipeline (inference /analysis/report)
@@ -666,6 +675,17 @@ const ACCEPTED_REPORT_SOURCES: ReadonlySet<string> = new Set([
   "llm_synthesized",
   "llm_synthesized_truncated"
 ]);
+
+/** Extract error message safely from unknown catch value. */
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+/** Calculate total transcript duration from the last utterance's end_ms. */
+function calcTranscriptDurationMs(transcript: Array<{ end_ms: number }>): number {
+  return transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+}
 
 function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(payload), {
@@ -1648,7 +1668,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       ? this.captionBuffer.slice(-this.CAPTION_BUFFER_MAX)
       : this.captionBuffer;
     this.ctx.storage.put(STORAGE_KEY_CAPTION_BUFFER, toStore).catch((err) => {
-      console.warn(`[caption-persist] flush failed: ${(err as Error).message}`);
+      console.warn(`[caption-persist] flush failed: ${getErrorMessage(err)}`);
     });
     this.captionFlushPending = 0;
   }
@@ -1748,7 +1768,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const listing = await this.env.RESULT_BUCKET.list({
         prefix: chunksPrefix,
         cursor,
-        limit: 100
+        limit: R2_LIST_LIMIT
       });
       if (listing.objects.length > 0) {
         await Promise.all(
@@ -2753,8 +2773,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       }
     } catch (error) {
       reportSource = "llm_failed";
-      reportError = (error as Error).message;
-      reportBlockingReason = `analysis/report failed: ${(error as Error).message}`;
+      reportError = getErrorMessage(error);
+      reportBlockingReason = `analysis/report failed: ${getErrorMessage(error)}`;
     }
     const reportMs = Date.now() - reportStart;
 
@@ -3111,7 +3131,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         // ignore finish-task errors during close
       }
       try {
-        ws.close(1000, reason.slice(0, 120));
+        ws.close(1000, reason.slice(0, WS_CLOSE_REASON_MAX_LEN));
       } catch {
         // ignore close errors
       }
@@ -3186,7 +3206,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const timeoutMs = parseTimeoutMs(this.env.ASR_TIMEOUT_MS ?? "45000");
 
       const fetchAbort = new AbortController();
-      const fetchTimer = setTimeout(() => fetchAbort.abort(), Math.min(timeoutMs, 15_000));
+      const fetchTimer = setTimeout(() => fetchAbort.abort(), Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
       const response = await fetch(handshakeUrl, {
         method: "GET",
         headers: {
@@ -3220,7 +3240,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
             console.error(`asr realtime message handler failed stream=${streamRole}:`, error);
             await this.refreshAsrStreamMetrics(sessionId, streamRole, {
               asr_ws_state: "error",
-              last_error: (error as Error).message
+              last_error: getErrorMessage(error)
             });
           })
         );
@@ -3269,7 +3289,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       const startedTimeout = setTimeout(() => {
         runtime.readyReject?.(new Error("dashscope task-started timeout"));
-      }, Math.min(timeoutMs, 15000));
+      }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
 
       await runtime.readyPromise;
       clearTimeout(startedTimeout);
@@ -3290,7 +3310,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         runtime.readyReject = null;
         await this.refreshAsrStreamMetrics(sessionId, streamRole, {
           asr_ws_state: "error",
-          last_error: (error as Error).message
+          last_error: getErrorMessage(error)
         });
         throw error;
       })
@@ -3431,7 +3451,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           speaker_name: null,
           decision: "unknown",
           evidence: null,
-          note: `students auto-resolve failed: ${(error as Error).message}`,
+          note: `students auto-resolve failed: ${getErrorMessage(error)}`,
           backend: inferenceError ? inferenceError.health.active_backend : "primary",
           fallback_reason: inferenceError ? "resolve_all_backends_failed" : null,
           confidence_bucket: "unknown",
@@ -3597,7 +3617,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           if (runtime.drainGeneration !== startGen) break;
           await this.refreshAsrStreamMetrics(sessionId, streamRole, {
             asr_ws_state: "error",
-            last_error: (error as Error).message
+            last_error: getErrorMessage(error)
           });
           await this.closeRealtimeAsrSession(streamRole, "reconnect", false, false);
           if (runtime.drainGeneration !== startGen) break;
@@ -3787,7 +3807,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
     const readyTimer = setTimeout(() => {
       rejectAll(new Error("dashscope task-started timeout"));
-    }, Math.min(timeoutMs, 15000));
+    }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
     await readyPromise;
     clearTimeout(readyTimer);
 
@@ -4217,7 +4237,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
               speaker_name: null,
               decision: "unknown",
               evidence: null,
-              note: `students auto-resolve failed: ${(error as Error).message}`,
+              note: `students auto-resolve failed: ${getErrorMessage(error)}`,
               backend: inferenceError ? inferenceError.health.active_backend : "primary",
               fallback_reason: inferenceError ? "resolve_all_backends_failed" : null,
               confidence_bucket: "unknown",
@@ -4262,8 +4282,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       };
     } catch (error) {
       asrState.consecutive_failures += 1;
-      asrState.last_error = (error as Error).message;
-      const backoffMs = Math.min(60_000, 1000 * 2 ** Math.min(asrState.consecutive_failures, 6));
+      asrState.last_error = getErrorMessage(error);
+      const backoffMs = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(asrState.consecutive_failures, 6));
       asrState.next_retry_after_ms = Date.now() + backoffMs;
       asrByStream[streamRole] = asrState;
       await this.storeAsrByStream(asrByStream);
@@ -4275,7 +4295,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const mergedByStream = await this.loadUtterancesMergedByStream();
         mergedByStream[streamRole] = mergeUtterances(utterances);
         await this.storeUtterancesMergedByStream(mergedByStream);
-        console.log(`[asr] persisted ${generated} partial utterances for ${streamRole} despite error: ${(error as Error).message}`);
+        console.log(`[asr] persisted ${generated} partial utterances for ${streamRole} despite error: ${getErrorMessage(error)}`);
       }
 
       return {
@@ -4587,7 +4607,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // Checkpoint failures are non-fatal — log and continue
       console.error(
         `[checkpoint] session=${sessionId} failed:`,
-        (error as Error).message
+        getErrorMessage(error)
       );
     }
   }
@@ -4878,7 +4898,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 75 });
           await this.ensureFinalizeJobActive(jobId);
 
-          const audioDurationMs = transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+          const audioDurationMs = calcTranscriptDurationMs(transcript);
           const statsObservations = generateStatsObservations(stats, audioDurationMs);
           const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats });
           let finalOverall = memoFirstReport.overall;
@@ -4965,8 +4985,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
             }
           } catch (synthErr) {
             reportSource = "memo_first_fallback";
-            reportError = (synthErr as Error).message;
-            finalizeWarnings.push(`report-only synthesis failed: ${(synthErr as Error).message}`);
+            reportError = getErrorMessage(synthErr);
+            finalizeWarnings.push(`report-only synthesis failed: ${getErrorMessage(synthErr)}`);
           }
 
           if (!ACCEPTED_REPORT_SOURCES.has(reportSource)) {
@@ -5080,10 +5100,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
           // ── Async: generate improvement suggestions (non-blocking) ──
           this.triggerImprovementGeneration(sessionId, resultV2, resultV2.transcript, resultV2Key).catch(err2 => {
-            console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${(err2 as Error).message}`);
+            console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${getErrorMessage(err2)}`);
           });
         } catch (err) {
-          const errMsg = (err as Error).message || "unknown error";
+          const errMsg = getErrorMessage(err) || "unknown error";
           console.error(`[finalize-v2] report-only failed: ${errMsg}`);
           await this.updateFinalizeV2Status(jobId, {
             status: "failed",
@@ -5115,7 +5135,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // outages from blocking the entire finalization pipeline.
       await this.updateFinalizeV2Status(jobId, { stage: "drain", progress: 18 });
       await this.ensureFinalizeJobActive(jobId);
-      const drainTimeoutMs = Math.min(timeoutMs, 30_000); // cap drain at 30s
+      const drainTimeoutMs = Math.min(timeoutMs, DRAIN_TIMEOUT_CAP_MS); // cap drain at 30s
       const drainWithTimeout = async (streamRole: StreamRole): Promise<void> => {
         await Promise.race([
           this.drainRealtimeQueue(sessionId, streamRole),
@@ -5127,8 +5147,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
       } catch (drainErr) {
-        console.warn(`[finalize-v2] drain failed (non-fatal), continuing: ${(drainErr as Error).message}`);
-        finalizeWarnings.push(`drain degraded: ${(drainErr as Error).message}`);
+        console.warn(`[finalize-v2] drain failed (non-fatal), continuing: ${getErrorMessage(drainErr)}`);
+        finalizeWarnings.push(`drain degraded: ${getErrorMessage(drainErr)}`);
         finalizeDegraded = true;
       }
 
@@ -5142,8 +5162,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await Promise.all([this.replayGapFromR2(sessionId, "teacher"), this.replayGapFromR2(sessionId, "students")]);
         await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
       } catch (replayErr) {
-        console.warn(`[finalize-v2] replay/drain failed (non-fatal), continuing: ${(replayErr as Error).message}`);
-        finalizeWarnings.push(`replay degraded: ${(replayErr as Error).message}`);
+        console.warn(`[finalize-v2] replay/drain failed (non-fatal), continuing: ${getErrorMessage(replayErr)}`);
+        finalizeWarnings.push(`replay degraded: ${getErrorMessage(replayErr)}`);
         finalizeDegraded = true;
       }
 
@@ -5233,8 +5253,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
             finalizeWarnings.push("local-whisper produced 0 utterances");
           }
         } catch (localAsrErr) {
-          console.warn(`[finalize-v2] local-whisper ASR failed (non-fatal): ${(localAsrErr as Error).message}`);
-          finalizeWarnings.push(`local-whisper degraded: ${(localAsrErr as Error).message}`);
+          console.warn(`[finalize-v2] local-whisper ASR failed (non-fatal): ${getErrorMessage(localAsrErr)}`);
+          finalizeWarnings.push(`local-whisper degraded: ${getErrorMessage(localAsrErr)}`);
           finalizeDegraded = true;
         }
       }
@@ -5321,8 +5341,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
               console.log(`[finalize-v2] only ${embeddings.length} embedding(s), skipping clustering`);
             }
           } catch (clusterErr) {
-            console.warn(`[finalize-v2] clustering failed (non-fatal): ${(clusterErr as Error).message}`);
-            finalizeWarnings.push(`clustering degraded: ${(clusterErr as Error).message}`);
+            console.warn(`[finalize-v2] clustering failed (non-fatal): ${getErrorMessage(clusterErr)}`);
+            finalizeWarnings.push(`clustering degraded: ${getErrorMessage(clusterErr)}`);
             finalizeDegraded = true;
           }
         }
@@ -5526,7 +5546,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       evidence = [...evidence, ...enrichedEvidence];
 
       // ── Generate stats observations for LLM context ──
-      const audioDurationMs = transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+      const audioDurationMs = calcTranscriptDurationMs(transcript);
       const statsObservations = generateStatsObservations(stats, audioDurationMs);
 
       // Keep legacy evidence + memo-first as fallback baseline
@@ -5801,8 +5821,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
           }
         } catch (reportError2) {
           reportSource = "memo_first_fallback";
-          reportError = (synthError as Error).message;
-          reportBlockingReason = `analysis/synthesize failed: ${(synthError as Error).message}, analysis/report fallback also failed: ${(reportError2 as Error).message}`;
+          reportError = getErrorMessage(synthError);
+          reportBlockingReason = `analysis/synthesize failed: ${getErrorMessage(synthError)}, analysis/report fallback also failed: ${getErrorMessage(reportError2)}`;
           finalizeWarnings.push(reportBlockingReason);
         }
       }
@@ -5997,7 +6017,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       // ── Async: generate improvement suggestions (non-blocking) ──
       this.triggerImprovementGeneration(sessionId, resultV2, transcript, resultV2Key).catch(err => {
-        console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${(err as Error).message}`);
+        console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${getErrorMessage(err)}`);
       });
 
       // ── Tier 2 background trigger ──
@@ -6023,12 +6043,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
           console.log(`[finalize-v2] tier2 scheduled for session=${sessionId}`);
         } catch (tier2ScheduleErr) {
           console.warn(
-            `[finalize-v2] failed to schedule tier2 (non-fatal): ${(tier2ScheduleErr as Error).message}`
+            `[finalize-v2] failed to schedule tier2 (non-fatal): ${getErrorMessage(tier2ScheduleErr)}`
           );
         }
       }
     } catch (error) {
-      const message = (error as Error).message;
+      const message = getErrorMessage(error);
       const current = await this.loadFinalizeV2Status();
       if (current && current.job_id === jobId && !this.isFinalizeTerminal(current.status)) {
         await this.updateFinalizeV2Status(jobId, {
@@ -6338,7 +6358,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       evidence = [...evidence, ...tier2EnrichedEvidence];
 
       // ── Generate stats observations for LLM context ──
-      const tier2AudioDurationMs = finalTranscript.length > 0 ? Math.max(...finalTranscript.map(u => u.end_ms)) : 0;
+      const tier2AudioDurationMs = calcTranscriptDurationMs(finalTranscript);
       const tier2StatsObservations = generateStatsObservations(mergedStats, tier2AudioDurationMs);
 
       const locale = getSessionLocale(state, this.env);
@@ -6490,7 +6510,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       console.log(`[tier2] completed for session=${sessionId}`);
     } catch (err) {
-      const message = (err as Error).message;
+      const message = getErrorMessage(err);
       console.error(`[tier2] failed for session=${sessionId}: ${message}`);
       await this.updateTier2Status({
         status: "failed",
@@ -6801,14 +6821,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
             if (src === "acs-teams" || src === "none") {
               this.captionSource = src;
               this.ctx.storage.put(STORAGE_KEY_CAPTION_SOURCE, src).catch((err) => {
-                console.warn(`[caption-persist] captionSource flush failed: ${(err as Error).message}`);
+                console.warn(`[caption-persist] captionSource flush failed: ${getErrorMessage(err)}`);
               });
             }
             return;
           }
 
           if (type === "close") {
-            const reason = String(message.reason ?? "client-close").slice(0, 120);
+            const reason = String(message.reason ?? "client-close").slice(0, WS_CLOSE_REASON_MAX_LEN);
             if (this.asrRealtimeEnabled()) {
               await this.closeRealtimeAsrSession(connectionRole, `client-close:${reason}`, false);
               await this.refreshAsrStreamMetrics(sessionId, connectionRole);

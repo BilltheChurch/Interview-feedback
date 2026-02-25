@@ -16,6 +16,7 @@ import { Chip } from '../components/ui/Chip';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { staggerContainer, staggerItem } from '../lib/animations';
+import type { StoredSessionRecord } from '../types/stored-session';
 
 /* ─── Types ─────────────────────────────────── */
 
@@ -35,7 +36,7 @@ type FilterStatus = 'all' | 'completed' | 'finalized' | 'draft' | 'failed';
 function getStoredSessions(): SessionRecord[] {
   try {
     const stored = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
-    return stored.map((s: any) => ({
+    return stored.map((s: StoredSessionRecord) => ({
       id: s.id,
       name: s.name,
       date: s.date,
@@ -54,7 +55,7 @@ function getStoredSessions(): SessionRecord[] {
 function removeSessionFromStorage(sessionId: string): void {
   try {
     const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
-    const updated = sessions.filter((s: any) => s.id !== sessionId);
+    const updated = sessions.filter((s: StoredSessionRecord) => s.id !== sessionId);
     localStorage.setItem('ifb_sessions', JSON.stringify(updated));
   } catch { /* ignore */ }
   try {

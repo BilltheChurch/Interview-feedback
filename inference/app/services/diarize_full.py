@@ -19,7 +19,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from app.services.device import DeviceType, detect_device
 
 logger = logging.getLogger(__name__)
 
@@ -45,30 +45,6 @@ class DiarizeResult:
     duration_ms: int
     processing_time_ms: int
     global_clustering_done: bool = True
-
-
-# ---------------------------------------------------------------------------
-# Device detection (shared with whisper_batch)
-# ---------------------------------------------------------------------------
-
-DeviceType = Literal["cuda", "rocm", "mps", "cpu"]
-
-
-def detect_device() -> DeviceType:
-    """Return the best available torch device for pyannote."""
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            # Check for ROCm (AMD) — torch.cuda works for ROCm too via HIP
-            if hasattr(torch.version, "hip") and torch.version.hip is not None:
-                return "rocm"
-            return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-    except ImportError:
-        pass
-    return "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +120,7 @@ class PyannoteFullDiarizer:
             # pyannote 3.1 has limited MPS support — some ops may fall back to CPU
             try:
                 self._pipeline.to(torch.device("mps"))
-            except Exception:
+            except RuntimeError:
                 logger.warning("MPS transfer failed for pyannote, falling back to CPU")
                 self._pipeline.to(torch.device("cpu"))
         else:
@@ -175,7 +151,7 @@ class PyannoteFullDiarizer:
 
             if self._device in ("cuda", "rocm") and torch.cuda.is_available():
                 self._embedding_model.to(torch.device("cuda"))
-        except Exception:
+        except (ImportError, OSError, RuntimeError):
             logger.warning("Failed to load embedding model, embeddings will be empty", exc_info=True)
             self._embedding_model = None
 
@@ -325,7 +301,7 @@ class PyannoteFullDiarizer:
                 excerpt = Segment(start, min(end, start + 10.0))  # cap at 10s
                 emb = self._embedding_model.crop(audio_path, excerpt)
                 embeddings[speaker] = emb.flatten().tolist()
-            except Exception:
+            except Exception:  # noqa: BLE001 — per-speaker fault barrier, must not abort other speakers
                 logger.warning("Failed to extract embedding for speaker %s", speaker, exc_info=True)
                 continue
 

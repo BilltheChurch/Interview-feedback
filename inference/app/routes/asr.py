@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import logging
 import time
 from typing import Literal
@@ -157,13 +158,13 @@ async def transcribe_window(
         # JSON mode
         try:
             body = await request.json()
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             raise HTTPException(status_code=400, detail="Invalid JSON body")
 
         req = TranscribeWindowRequest(**body)
         try:
             pcm_data = base64.b64decode(req.pcm_base64)
-        except Exception:
+        except (ValueError, binascii.Error):
             raise HTTPException(status_code=400, detail="Invalid base64 in pcm_base64 field")
 
         if len(pcm_data) == 0:
