@@ -51,6 +51,15 @@ import { TextArea } from '../components/ui/TextArea';
 import { FootnoteRef } from '../components/ui/FootnoteRef';
 import { FootnoteList, type FootnoteEntry } from '../components/ui/FootnoteList';
 import { InlineEvidenceCard } from '../components/ui/InlineEvidenceCard';
+import { InlineEditable } from '../components/ui/InlineEditable';
+import { CommunicationMetrics } from '../components/CommunicationMetrics';
+import { CandidateComparison } from '../components/CandidateComparison';
+import { RecommendationBadge } from '../components/RecommendationBadge';
+import { QuestionBreakdownSection, type QuestionAnalysisItem } from '../components/QuestionBreakdownSection';
+import { escapeHtml, sanitizeHtml } from '../lib/sanitize';
+import { InterviewQualityCard } from '../components/InterviewQualityCard';
+import { FollowUpQuestions } from '../components/FollowUpQuestions';
+import { ActionPlanCard } from '../components/ActionPlanCard';
 import { useFootnotes } from '../hooks/useFootnotes';
 
 /* ─── Motion Variants ────────────────────────────────── */
@@ -69,11 +78,13 @@ const fadeInUp = {
 type EvidenceRef = {
   id: string;
   timestamp_ms: number;
+  end_ms?: number;
   speaker: string;
   text: string;
   confidence: number;
   weak?: boolean;
   weak_reason?: string;
+  utterance_ids?: string[];
 };
 
 type Claim = {
@@ -94,6 +105,18 @@ type DimensionFeedback = {
   claims: Claim[];
 };
 
+type CommunicationMetricsData = {
+  speakingTimeSec: number;
+  totalSessionSec: number;
+  speakingRatio: number;
+  avgResponseSec: number;
+  fillerWordCount: number;
+  fillerWordsPerMin: number;
+  avgLatencySec: number;
+  longestPauseSec: number;
+  turnCount: number;
+};
+
 type PersonFeedback = {
   person_name: string;
   speaker_id: string;
@@ -103,11 +126,19 @@ type PersonFeedback = {
     risks: string;
     actions: string;
   };
+  communicationMetrics?: CommunicationMetricsData;
 };
 
 type TeamDynamic = {
   type: 'highlight' | 'risk';
   text: string;
+};
+
+type Recommendation = {
+  decision: 'recommend' | 'tentative' | 'not_recommend';
+  confidence: number;
+  rationale: string;
+  context_type: 'hiring' | 'admission';
 };
 
 type OverallFeedback = {
@@ -131,6 +162,14 @@ type OverallFeedback = {
     action: 'add' | 'replace' | 'mark_not_applicable';
     replaces?: string;
   }>;
+  recommendation?: Recommendation;
+  questionAnalysis?: QuestionAnalysisItem[];
+  interviewQuality?: {
+    coverage_ratio: number;
+    follow_up_depth: number;
+    structure_score: number;
+    suggestions: string;
+  };
 };
 
 type ClaimBeforeAfter = {
@@ -161,6 +200,8 @@ type ImprovementReport = {
   overall: OverallImprovement;
   dimensions: DimensionImprovement[];
   claims: ClaimImprovement[];
+  follow_up_questions?: Array<{ question: string; purpose: string; related_claim_id?: string }>;
+  action_plan?: Array<{ action: string; related_claim_id?: string; practice_method: string; expected_outcome: string }>;
 };
 
 type FeedbackReport = {
@@ -396,11 +437,13 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
   const evidence: EvidenceRef[] = (Array.isArray(raw.evidence) ? raw.evidence : []).map((e: any) => ({
     id: e.evidence_id || e.id || '',
     timestamp_ms: Array.isArray(e.time_range_ms) ? e.time_range_ms[0] : (e.timestamp_ms || 0),
+    end_ms: Array.isArray(e.time_range_ms) ? e.time_range_ms[1] : (e.end_ms || undefined),
     speaker: typeof e.speaker === 'string' ? e.speaker : (e.speaker?.display_name || e.speaker?.person_id || 'Unknown'),
     text: e.quote || e.text || '',
     confidence: typeof e.confidence === 'number' ? e.confidence : 0.5,
     weak: e.weak || false,
     weak_reason: e.weak_reason,
+    utterance_ids: Array.isArray(e.utterance_ids) ? e.utterance_ids : undefined,
   }));
 
   // ── transcript: extract from raw.transcript ──
@@ -436,6 +479,66 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
 
   const durationMs = sessionMeta?.durationMs || raw.duration_ms || 0;
 
+  // ── Communication metrics: compute per-person from transcript ──
+  const FILLER_WORDS_EN = /\b(um|uh|like|you know|i mean|basically|actually|so yeah)\b/gi;
+  const FILLER_WORDS_ZH = /(就是|然后|那个|嗯|啊|对吧|这个)/g;
+
+  for (const person of persons) {
+    const personUtterances = normalizedTranscript.filter(
+      u => u.speaker_name === person.person_name
+    );
+    if (personUtterances.length === 0) continue;
+
+    const speakingTimeSec = personUtterances.reduce(
+      (sum, u) => sum + (u.end_ms - u.start_ms) / 1000, 0
+    );
+    const totalSessionSec = normalizedTranscript.length > 0
+      ? (normalizedTranscript[normalizedTranscript.length - 1].end_ms - normalizedTranscript[0].start_ms) / 1000
+      : 1;
+
+    let fillerCount = 0;
+    for (const u of personUtterances) {
+      fillerCount += (u.text.match(FILLER_WORDS_EN) || []).length;
+      fillerCount += (u.text.match(FILLER_WORDS_ZH) || []).length;
+    }
+
+    const latencies: number[] = [];
+    for (let i = 1; i < normalizedTranscript.length; i++) {
+      const prev = normalizedTranscript[i - 1];
+      const curr = normalizedTranscript[i];
+      if (curr.speaker_name === person.person_name && prev.speaker_name !== person.person_name) {
+        latencies.push(Math.max(0, (curr.start_ms - prev.end_ms) / 1000));
+      }
+    }
+
+    person.communicationMetrics = {
+      speakingTimeSec: Math.round(speakingTimeSec),
+      totalSessionSec: Math.round(totalSessionSec),
+      speakingRatio: totalSessionSec > 0 ? speakingTimeSec / totalSessionSec : 0,
+      avgResponseSec: personUtterances.length > 0
+        ? Math.round(speakingTimeSec / personUtterances.length)
+        : 0,
+      fillerWordCount: fillerCount,
+      fillerWordsPerMin: speakingTimeSec > 0
+        ? Math.round((fillerCount / speakingTimeSec) * 60 * 10) / 10
+        : 0,
+      avgLatencySec: latencies.length > 0
+        ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length * 10) / 10
+        : 0,
+      longestPauseSec: latencies.length > 0 ? Math.round(Math.max(...latencies) * 10) / 10 : 0,
+      turnCount: personUtterances.length,
+    };
+  }
+
+  // ── Parse recommendation, questionAnalysis, interviewQuality ──
+  const recommendation = raw.overall?.recommendation || raw.recommendation || undefined;
+  const questionAnalysis = Array.isArray(raw.overall?.question_analysis)
+    ? raw.overall.question_analysis
+    : Array.isArray(raw.question_analysis)
+      ? raw.question_analysis
+      : undefined;
+  const interviewQuality = raw.overall?.interview_quality || raw.interview_quality || undefined;
+
   return {
     session_id: raw.session?.session_id || raw.session_id || '',
     session_name: sessionMeta?.name || raw.session_name || '',
@@ -456,6 +559,9 @@ function normalizeApiReport(raw: any, sessionMeta?: { name?: string; date?: stri
       teamSummaryEvidenceRefs: teamSummaryEvidenceRefs.length > 0 ? teamSummaryEvidenceRefs : undefined,
       keyFindings: keyFindings.length > 0 ? keyFindings : undefined,
       suggestedDimensions: suggestedDimensions.length > 0 ? suggestedDimensions : undefined,
+      recommendation,
+      questionAnalysis: questionAnalysis?.length > 0 ? questionAnalysis : undefined,
+      interviewQuality,
     },
     persons,
     evidence,
@@ -803,6 +909,56 @@ const DEMO_REPORT: FeedbackReport = {
   ],
   transcript: [],
   utteranceEvidenceMap: {},
+  improvements: {
+    overall: {
+      summary: '候选人在本次面试中展现了较强的推动讨论与收敛结论的能力，但在主导节奏与倾听他人之间仍需更好平衡。建议在表达时更主动地确认同伴观点，并采用结构化框架提升逻辑清晰度。',
+      key_points: [
+        '加强倾听与确认他人观点的回应',
+        '使用"结论-依据-验证"三步法强化逻辑推理',
+        '在关键节点前先明确分工并给出框架提纲',
+      ],
+    },
+    dimensions: [
+      {
+        dimension: 'leadership',
+        advice: '在主导讨论节奏的同时，应更主动地邀请和确认他人意见，避免单向推进导致协作感减弱。',
+        framework: 'PREP 框架（Point-Reason-Example-Point）：先明确立场，再解释原因，举例说明，最后重申观点。',
+        example_response: 'I see your point about the freeform notes being hard to manage. Let me summarize: you\'re suggesting we need a way to preserve unstructured thoughts without forcing categorization, right?',
+      },
+      {
+        dimension: 'collaboration',
+        advice: '在回应他人观点时，应增加复述与确认性语言，以确保理解一致并促进协作清晰度。',
+        framework: 'Active Listening + Confirmation Loop：重复对方核心观点 + 用提问或总结确认理解。',
+        example_response: 'So what I\'m hearing is that you\'re concerned about losing context when switching between stages—is that accurate?',
+      },
+      {
+        dimension: 'logic',
+        advice: '在提出结论前，应系统性地呈现"结论-依据-验证"链条，使推理更具说服力。',
+        framework: '结论-依据-验证（C-I-V）三步法：先说结论，再列出支持依据，最后通过反问或假设验证其合理性。',
+        example_response: 'My conclusion is that we should allow persistent freeform notes. The reason is that users often capture insights before they\'re ready to classify. To validate: imagine forcing categorization mid-flow—wouldn\'t that be disruptive?',
+      },
+    ],
+    claims: [
+      {
+        claim_id: 'c_demo_leadership_02',
+        advice: '在主导讨论时，应主动平衡话语权，避免长时间独白，适时引入他人视角。',
+        suggested_wording: 'I\'d love to hear your take on this—what do you think about keeping some notes freeform?',
+        before_after: {
+          before: 'Okay, so yeah, and um. So I might have a problem where I just wanna.',
+          after: 'Okay, so I\'ve been thinking about a potential issue here—what if we want to keep some notes freeform? What\'s your perspective?',
+        },
+      },
+      {
+        claim_id: 'c_demo_logic_02',
+        advice: '在得出结论前，应明确展示证据与推理之间的衔接，避免跳跃式判断。',
+        suggested_wording: 'The key insight here is that users need flexibility—because insights emerge unpredictably during interviews.',
+        before_after: {
+          before: 'So this is a big UX problem, we need to fix it.',
+          after: 'So this is a significant UX issue because it breaks the natural note-taking flow. Users capture ideas in real time, but forced classification too early leads to lost insights.',
+        },
+      },
+    ],
+  },
 };
 
 /* ─── Helpers ─────────────────────────────────────────── */
@@ -888,14 +1044,68 @@ function updateClaimInReport(
 }
 
 /** Get surrounding evidence items for context */
-function getSurroundingEvidence(report: FeedbackReport, evidenceId: string): { before: EvidenceRef[]; after: EvidenceRef[] } {
-  const sorted = [...report.evidence].sort((a, b) => a.timestamp_ms - b.timestamp_ms);
-  const idx = sorted.findIndex((e) => e.id === evidenceId);
-  if (idx === -1) return { before: [], after: [] };
-  return {
-    before: sorted.slice(Math.max(0, idx - 2), idx),
-    after: sorted.slice(idx + 1, idx + 3),
-  };
+type SurroundingUtterance = {
+  utterance_id: string;
+  speaker: string;
+  text: string;
+  start_ms: number;
+  isPartOfEvidence: boolean;
+};
+
+/**
+ * Get transcript utterances surrounding an evidence item.
+ * Uses the evidence's utterance_ids to find the referenced conversation,
+ * then includes 2 utterances before and after for context (including interviewer questions).
+ */
+function getSurroundingContext(report: FeedbackReport, evidenceId: string): SurroundingUtterance[] {
+  const ev = report.evidence.find(e => e.id === evidenceId);
+  if (!ev) return [];
+
+  const transcript = report.transcript;
+  if (!transcript.length) return [];
+
+  // If evidence has utterance_ids, use them directly
+  const evUttIds = new Set(ev.utterance_ids || []);
+
+  if (evUttIds.size > 0) {
+    // Find the range of indices covered by this evidence
+    const indices = transcript
+      .map((u, i) => evUttIds.has(u.utterance_id) ? i : -1)
+      .filter(i => i >= 0);
+    if (indices.length === 0) return [];
+
+    const minIdx = Math.min(...indices);
+    const maxIdx = Math.max(...indices);
+
+    // Include 2 utterances before and 2 after for context
+    const startIdx = Math.max(0, minIdx - 2);
+    const endIdx = Math.min(transcript.length - 1, maxIdx + 2);
+
+    return transcript.slice(startIdx, endIdx + 1).map(u => ({
+      utterance_id: u.utterance_id,
+      speaker: u.speaker_name || 'Unknown',
+      text: u.text,
+      start_ms: u.start_ms,
+      isPartOfEvidence: evUttIds.has(u.utterance_id),
+    }));
+  }
+
+  // Fallback: find by timestamp range
+  const evStart = ev.timestamp_ms;
+  const evEnd = ev.end_ms || evStart + 1;
+  const matchIdx = transcript.findIndex(u => u.start_ms >= evStart && u.start_ms < evEnd);
+  if (matchIdx < 0) return [];
+
+  const startIdx = Math.max(0, matchIdx - 2);
+  const endIdx = Math.min(transcript.length - 1, matchIdx + 2);
+
+  return transcript.slice(startIdx, endIdx + 1).map(u => ({
+    utterance_id: u.utterance_id,
+    speaker: u.speaker_name || 'Unknown',
+    text: u.text,
+    start_ms: u.start_ms,
+    isPartOfEvidence: u.start_ms >= evStart && u.start_ms < evEnd,
+  }));
 }
 
 /* ─── Memo Types ─────────────────────────────────────── */
@@ -1040,7 +1250,7 @@ function StageMemosSection({
                       {(archive.freeformHtml || archive.freeformText) && (
                         <div
                           className="text-sm text-ink-secondary leading-relaxed prose prose-sm max-w-none memo-highlight-view"
-                          dangerouslySetInnerHTML={{ __html: archive.freeformHtml || archive.freeformText }}
+                          dangerouslySetInnerHTML={{ __html: sanitizeHtml(archive.freeformHtml || archive.freeformText || '') }}
                         />
                       )}
                       {/* Memos for this stage */}
@@ -1101,7 +1311,7 @@ function StageMemosSection({
                   >
                     <div
                       className="text-sm text-ink-secondary leading-relaxed prose prose-sm max-w-none"
-                      dangerouslySetInnerHTML={{ __html: notes }}
+                      dangerouslySetInnerHTML={{ __html: sanitizeHtml(notes) }}
                     />
                   </motion.div>
                 )}
@@ -1171,6 +1381,405 @@ function StageMemosSection({
   );
 }
 
+/* ─── Export Helpers ──────────────────────────────────── */
+
+function buildFullMarkdown(
+  report: FeedbackReport,
+  sessionNotes?: string,
+  sessionMemos?: Memo[],
+): string {
+  const lines: string[] = [
+    `# ${report.session_name}`,
+    `**Date:** ${report.date}  `,
+    `**Duration:** ${formatDuration(report.duration_ms)}  `,
+    `**Mode:** ${report.mode}  `,
+    `**Participants:** ${report.participants.join(', ')}`,
+    '',
+  ];
+
+  // Recommendation
+  if (report.overall.recommendation) {
+    const rec = report.overall.recommendation;
+    const label = rec.decision === 'recommend' ? 'Recommend' : rec.decision === 'tentative' ? 'Tentative' : 'Not Recommend';
+    lines.push(`## Recommendation: ${label}`, '');
+    lines.push(`**Confidence:** ${Math.round(rec.confidence * 100)}%  `);
+    lines.push(`**Rationale:** ${rec.rationale}`, '');
+  }
+
+  // Session notes
+  const notesText = sessionNotes?.replace(/<[^>]*>/g, '').trim();
+  if (notesText) {
+    lines.push('## Session Notes', '', notesText, '');
+  }
+
+  // Session memos
+  if (sessionMemos && sessionMemos.length > 0) {
+    lines.push('## Session Memos', '');
+    for (const m of sessionMemos) {
+      lines.push(`- **[${m.stage}]** ${m.text}`);
+    }
+    lines.push('');
+  }
+
+  // Overall Narrative
+  lines.push('## Overview', '');
+  if (report.overall.teamSummaryNarrative) {
+    lines.push(report.overall.teamSummaryNarrative, '');
+  } else if (report.overall.team_summary) {
+    lines.push(report.overall.team_summary, '');
+  }
+
+  // Key Findings
+  if (report.overall.keyFindings && report.overall.keyFindings.length > 0) {
+    lines.push('### Key Findings', '');
+    for (const f of report.overall.keyFindings) {
+      const icon = f.type === 'strength' ? '+' : f.type === 'risk' ? '!' : '>';
+      lines.push(`- **[${icon}]** ${f.text}`);
+    }
+    lines.push('');
+  }
+
+  // Interview Quality
+  if (report.overall.interviewQuality) {
+    const q = report.overall.interviewQuality;
+    lines.push('### Interview Quality', '');
+    lines.push(`- **Coverage:** ${Math.round(q.coverage_ratio * 100)}%`);
+    lines.push(`- **Follow-up Depth:** ${q.follow_up_depth}`);
+    lines.push(`- **Structure Score:** ${q.structure_score.toFixed(1)}/10`);
+    lines.push(`- **Suggestions:** ${q.suggestions}`);
+    lines.push('');
+  }
+
+  // Team Dynamics
+  if (report.overall.teacher_memos.length > 0) {
+    lines.push('### Teacher Memos');
+    lines.push(...report.overall.teacher_memos.map((m) => `- ${m}`));
+    lines.push('');
+  }
+
+  if (report.overall.interaction_events.length > 0) {
+    lines.push('### Interaction Events');
+    lines.push(...report.overall.interaction_events.map((e) => `- ${e}`));
+    lines.push('');
+  }
+
+  if (report.overall.team_dynamics.length > 0) {
+    lines.push('### Team Dynamics');
+    lines.push(...report.overall.team_dynamics.map((d) => `- ${d.type === 'highlight' ? '+' : '!'} ${d.text}`));
+    lines.push('');
+  }
+
+  // Candidate Comparison (group mode)
+  if (report.mode === 'group' && report.persons.length >= 2) {
+    lines.push('### Candidate Comparison', '');
+    const dims = report.persons[0].dimensions;
+    const header = `| Dimension | ${report.persons.map(p => p.person_name).join(' | ')} |`;
+    const sep = `|---|${report.persons.map(() => '---').join('|')}|`;
+    lines.push(header, sep);
+    for (const dim of dims) {
+      const scores = report.persons.map(p => {
+        const d = p.dimensions.find(pd => pd.dimension === dim.dimension);
+        return d?.score !== undefined ? d.score.toFixed(1) : '\u2014';
+      });
+      lines.push(`| ${dim.label_zh || dim.dimension} | ${scores.join(' | ')} |`);
+    }
+    lines.push('');
+  }
+
+  // Question-by-Question Analysis
+  if (report.overall.questionAnalysis && report.overall.questionAnalysis.length > 0) {
+    lines.push('## Question-by-Question Analysis', '');
+    for (const q of report.overall.questionAnalysis) {
+      lines.push(`### [${q.answer_quality}] ${q.question_text}`, '');
+      lines.push(`${q.comment}`, '');
+      if (q.scoring_rationale) {
+        lines.push(`**Scoring Rationale:** ${q.scoring_rationale}`, '');
+      }
+      if (q.answer_highlights && q.answer_highlights.length > 0) {
+        lines.push('**Highlights:**');
+        for (const h of q.answer_highlights) { lines.push(`- ${h}`); }
+        lines.push('');
+      }
+      if (q.answer_weaknesses && q.answer_weaknesses.length > 0) {
+        lines.push('**Areas for Improvement:**');
+        for (const w of q.answer_weaknesses) { lines.push(`- ${w}`); }
+        lines.push('');
+      }
+      if (q.suggested_better_answer) {
+        lines.push(`**Suggested Approach:** ${q.suggested_better_answer}`, '');
+      }
+      if (q.related_dimensions.length > 0) {
+        lines.push(`_Related: ${q.related_dimensions.join(', ')}_`, '');
+      }
+    }
+  }
+
+  // Per-person sections
+  for (const person of report.persons) {
+    lines.push(`## ${person.person_name}`, '');
+
+    // Communication Metrics
+    if (person.communicationMetrics) {
+      const m = person.communicationMetrics;
+      lines.push('### Communication Metrics', '');
+      lines.push(`- **Speaking Time:** ${Math.floor(m.speakingTimeSec / 60)}m ${m.speakingTimeSec % 60}s (${Math.round(m.speakingRatio * 100)}% of session)`);
+      lines.push(`- **Avg Response:** ${Math.floor(m.avgResponseSec / 60)}m ${Math.round(m.avgResponseSec % 60)}s (${m.turnCount} turns)`);
+      lines.push(`- **Filler Words:** ${m.fillerWordCount} (${m.fillerWordsPerMin.toFixed(1)}/min)`);
+      lines.push(`- **Response Latency:** ${m.avgLatencySec.toFixed(1)}s avg, ${m.longestPauseSec.toFixed(1)}s longest`);
+      lines.push('');
+    }
+
+    // Dimensions + Claims
+    for (const dim of person.dimensions) {
+      const label = dim.label_zh || (dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1));
+      const scoreStr = dim.score !== undefined ? ` (${dim.score.toFixed(1)}/10)` : '';
+      lines.push(`### ${label}${scoreStr}`, '');
+      if (dim.score_rationale) {
+        lines.push(`> ${dim.score_rationale}`, '');
+      }
+      for (const claim of dim.claims) {
+        const tag = claim.category === 'strength' ? '+' : claim.category === 'risk' ? '!' : '>';
+        lines.push(`- **[${tag}]** ${claim.text} _(${Math.round(claim.confidence * 100)}%)_`);
+      }
+      lines.push('');
+    }
+
+    // Person Summary
+    lines.push('### Summary', '');
+    lines.push(`- **Strengths:** ${person.summary.strengths}`);
+    lines.push(`- **Risks:** ${person.summary.risks}`);
+    lines.push(`- **Actions:** ${person.summary.actions}`);
+    lines.push('');
+  }
+
+  // Improvement Suggestions
+  if (report.improvements) {
+    lines.push('## Improvement Suggestions', '');
+    if (report.improvements.overall) {
+      lines.push(report.improvements.overall.summary, '');
+      if (report.improvements.overall.key_points?.length > 0) {
+        for (const kp of report.improvements.overall.key_points) {
+          lines.push(`- ${kp}`);
+        }
+        lines.push('');
+      }
+    }
+
+    // Dimension improvements
+    if (report.improvements.dimensions?.length > 0) {
+      for (const di of report.improvements.dimensions) {
+        lines.push(`### ${di.dimension} \u2014 Improvement`, '');
+        lines.push(di.advice, '');
+        if (di.framework) {
+          lines.push(`**Framework:** ${di.framework}`, '');
+        }
+        if (di.example_response) {
+          lines.push(`**Example:** "${di.example_response}"`, '');
+        }
+      }
+    }
+
+    // Claim improvements
+    if (report.improvements.claims?.length > 0) {
+      lines.push('### Claim-level Improvements', '');
+      for (const ci of report.improvements.claims) {
+        lines.push(`- **${ci.claim_id}:** ${ci.advice}`);
+        if (ci.suggested_wording) {
+          lines.push(`  > "${ci.suggested_wording}"`);
+        }
+      }
+      lines.push('');
+    }
+
+    // Follow-up Questions
+    if (report.improvements.follow_up_questions && report.improvements.follow_up_questions.length > 0) {
+      lines.push('### Suggested Follow-up Questions', '');
+      for (const q of report.improvements.follow_up_questions) {
+        lines.push(`- **Q:** ${q.question}`);
+        lines.push(`  _Purpose: ${q.purpose}_`);
+      }
+      lines.push('');
+    }
+
+    // Action Plan
+    if (report.improvements.action_plan && report.improvements.action_plan.length > 0) {
+      lines.push('### 30-Day Action Plan', '');
+      for (let i = 0; i < report.improvements.action_plan.length; i++) {
+        const item = report.improvements.action_plan[i];
+        lines.push(`${i + 1}. **${item.action}**`);
+        lines.push(`   - Practice: ${item.practice_method}`);
+        lines.push(`   - Expected: ${item.expected_outcome}`);
+      }
+      lines.push('');
+    }
+  }
+
+  // Evidence Timeline
+  if (report.evidence.length > 0) {
+    lines.push('## Evidence Timeline', '');
+    for (const ev of report.evidence) {
+      const weakTag = ev.weak ? ' **(weak)**' : '';
+      lines.push(
+        `- **[${formatTimestamp(ev.timestamp_ms)}]** ${ev.speaker}: "${ev.text}"${weakTag} _(${Math.round(ev.confidence * 100)}%)_`
+      );
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+function markdownToSimpleHtml(md: string): string {
+  return md
+    .split('\n')
+    .map(line => {
+      // Headers
+      if (line.startsWith('### ')) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
+      if (line.startsWith('## ')) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
+      if (line.startsWith('# ')) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
+      // Escape first, then apply inline formatting
+      line = escapeHtml(line);
+      // Bold (on escaped text, ** markers are safe since < > are escaped)
+      line = line.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+      // Italic
+      line = line.replace(/_(.+?)_/g, '<i>$1</i>');
+      // Numbered list items
+      if (/^\d+\.\s/.test(line)) return `<li>${line.replace(/^\d+\.\s/, '')}</li>`;
+      // List items
+      if (line.startsWith('- ')) return `<li>${line.slice(2)}</li>`;
+      // Blockquote
+      if (line.startsWith('&gt; ')) return `<blockquote>${line.slice(5)}</blockquote>`;
+      // Table rows (> is now &gt; from escapeHtml, | is safe)
+      if (line.startsWith('|') && !line.match(/^\|[-|]+\|$/)) {
+        const cells = line.split('|').filter(c => c.trim() !== '');
+        return `<tr>${cells.map(c => `<td>${c.trim()}</td>`).join('')}</tr>`;
+      }
+      // Table separator — skip
+      if (line.match(/^\|[-|]+\|$/)) return '';
+      // Empty lines = paragraph breaks
+      if (line.trim() === '') return '<br/>';
+      return `<p>${line}</p>`;
+    })
+    .join('\n');
+}
+
+/**
+ * Build a self-contained HTML document optimized for Chromium's printToPDF.
+ * Loaded in a hidden offscreen BrowserWindow — no scrollable containers.
+ */
+function buildPrintHtml(
+  report: FeedbackReport,
+  sessionNotes?: string,
+  sessionMemos?: Memo[],
+): string {
+  const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
+  const bodyHtml = markdownToSimpleHtml(md);
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 14mm 18mm 14mm;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+      'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #1E2A32;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    color: #0D6A63;
+    border-bottom: 2px solid #0D6A63;
+    padding-bottom: 6px;
+  }
+  h2 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-top: 18px;
+    margin-bottom: 6px;
+    color: #1E2A32;
+    border-bottom: 1px solid #E8E4DC;
+    padding-bottom: 4px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  h3 {
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 12px;
+    margin-bottom: 4px;
+    color: #566A77;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  p {
+    margin-bottom: 4px;
+    orphans: 3;
+    widows: 3;
+  }
+  b { font-weight: 600; }
+  i { color: #566A77; }
+
+  li {
+    margin-left: 20px;
+    margin-bottom: 3px;
+    list-style-type: disc;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  li li { list-style-type: circle; }
+
+  blockquote {
+    margin: 4px 0 4px 12px;
+    padding: 4px 10px;
+    border-left: 3px solid #0D6A63;
+    background: #F6F2EA;
+    color: #566A77;
+    font-style: italic;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 10.5px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  td {
+    border: 1px solid #E8E4DC;
+    padding: 4px 8px;
+    text-align: center;
+  }
+  tr:first-child td {
+    background: #F6F2EA;
+    font-weight: 600;
+  }
+
+  br { display: block; height: 4px; }
+</style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`;
+}
+
 /* ─── Sub-components ──────────────────────────────────── */
 
 function FeedbackHeader({
@@ -1185,6 +1794,8 @@ function FeedbackHeader({
   sessionMemos,
   captionSource,
   onTranscriptToggle,
+  sessionId,
+  baseApiUrl,
 }: {
   report: FeedbackReport;
   onRegenerate: (mode?: 'full' | 'report-only') => void;
@@ -1197,65 +1808,18 @@ function FeedbackHeader({
   sessionMemos?: Memo[];
   captionSource?: string;
   onTranscriptToggle?: () => void;
+  sessionId?: string;
+  baseApiUrl?: string;
 }) {
   const [copiedText, setCopiedText] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
 
   const handleCopyText = useCallback(async () => {
-    const lines: string[] = [
-      report.session_name,
-      `${report.date} | ${formatDuration(report.duration_ms)}`,
-      '',
-    ];
-
-    // Session notes (freeform)
-    const notesText = sessionNotes?.replace(/<[^>]*>/g, '').trim();
-    if (notesText) {
-      lines.push('Session Notes:', notesText, '');
-    }
-
-    // Session memos (tagged by stage)
-    if (sessionMemos && sessionMemos.length > 0) {
-      lines.push('Session Memos:');
-      for (const m of sessionMemos) {
-        lines.push(`- [${m.stage}] ${m.text}`);
-      }
-      lines.push('');
-    }
-
-    lines.push('Team Summary:', report.overall.team_summary, '');
-
-    if (report.overall.teacher_memos.length > 0) {
-      lines.push('Teacher Memos:');
-      lines.push(...report.overall.teacher_memos.map((m) => `- ${m}`));
-      lines.push('');
-    }
-
-    if (report.overall.interaction_events.length > 0) {
-      lines.push('Interaction Events:');
-      lines.push(...report.overall.interaction_events.map((e) => `- ${e}`));
-      lines.push('');
-    }
-
-    for (const person of report.persons) {
-      lines.push(`--- ${person.person_name} ---`);
-      for (const dim of person.dimensions) {
-        lines.push(`  ${dim.dimension.toUpperCase()}:`);
-        for (const claim of dim.claims) {
-          lines.push(`    [${claim.category}] ${claim.text} (${Math.round(claim.confidence * 100)}%)`);
-        }
-      }
-      lines.push(`  Strengths: ${person.summary.strengths}`);
-      lines.push(`  Risks: ${person.summary.risks}`);
-      lines.push(`  Actions: ${person.summary.actions}`);
-      lines.push('');
-    }
-
-    const text = lines.join('\n');
+    const text = buildFullMarkdown(report, sessionNotes, sessionMemos);
     try {
       await navigator.clipboard.writeText(text);
     } catch {
-      // Clipboard API may fail in Electron — fall back to execCommand
+      // Clipboard API may fail in Electron -- fall back to execCommand
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.position = 'fixed';
@@ -1270,79 +1834,8 @@ function FeedbackHeader({
   }, [report, sessionNotes, sessionMemos]);
 
   const handleExportMarkdown = useCallback(() => {
-    const lines: string[] = [
-      `# ${report.session_name}`,
-      `**Date:** ${report.date}  `,
-      `**Duration:** ${formatDuration(report.duration_ms)}  `,
-      `**Mode:** ${report.mode}  `,
-      `**Participants:** ${report.participants.join(', ')}`,
-      '',
-    ];
-
-    // Session notes (freeform)
-    const notesText = sessionNotes?.replace(/<[^>]*>/g, '').trim();
-    if (notesText) {
-      lines.push('## Session Notes', '', notesText, '');
-    }
-
-    // Session memos (tagged by stage)
-    if (sessionMemos && sessionMemos.length > 0) {
-      lines.push('## Session Memos', '');
-      for (const m of sessionMemos) {
-        lines.push(`- **[${m.stage}]** ${m.text}`);
-      }
-      lines.push('');
-    }
-
-    lines.push('## Team Summary', '', report.overall.team_summary, '');
-
-    if (report.overall.teacher_memos.length > 0) {
-      lines.push('### Teacher Memos');
-      lines.push(...report.overall.teacher_memos.map((m) => `- ${m}`));
-      lines.push('');
-    }
-
-    if (report.overall.interaction_events.length > 0) {
-      lines.push('### Interaction Events');
-      lines.push(...report.overall.interaction_events.map((e) => `- ${e}`));
-      lines.push('');
-    }
-
-    if (report.overall.team_dynamics.length > 0) {
-      lines.push('### Team Dynamics');
-      lines.push(...report.overall.team_dynamics.map((d) => `- ${d.type === 'highlight' ? '+' : '!'} ${d.text}`));
-      lines.push('');
-    }
-
-    for (const person of report.persons) {
-      lines.push(`## ${person.person_name}`);
-      for (const dim of person.dimensions) {
-        lines.push(`### ${dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1)}`);
-        for (const claim of dim.claims) {
-          const tag =
-            claim.category === 'strength' ? '+' : claim.category === 'risk' ? '!' : '>';
-          lines.push(`- **[${tag}]** ${claim.text} _(${Math.round(claim.confidence * 100)}%)_`);
-        }
-        lines.push('');
-      }
-      lines.push('#### Summary');
-      lines.push(`- **Strengths:** ${person.summary.strengths}`);
-      lines.push(`- **Risks:** ${person.summary.risks}`);
-      lines.push(`- **Actions:** ${person.summary.actions}`);
-      lines.push('');
-    }
-
-    if (report.evidence.length > 0) {
-      lines.push('## Evidence Timeline');
-      for (const ev of report.evidence) {
-        const weakTag = ev.weak ? ' **(weak)** ' : '';
-        lines.push(
-          `- **[${formatTimestamp(ev.timestamp_ms)}]** ${ev.speaker}: "${ev.text}"${weakTag} _(${Math.round(ev.confidence * 100)}%)_`
-        );
-      }
-    }
-
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
+    const blob = new Blob([md], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1355,6 +1848,40 @@ function FeedbackHeader({
     setRegenerating(true);
     onRegenerate(mode);
     setTimeout(() => setRegenerating(false), 3000);
+  };
+
+  const handleExportSlack = async () => {
+    const webhookUrl = localStorage.getItem('ifb_slack_webhook');
+    if (!webhookUrl) {
+      alert('Please configure Slack Webhook URL in Settings first.');
+      return;
+    }
+
+    const blocks: Array<{ type: string; text: { type: string; text: string } }> = [
+      { type: 'header', text: { type: 'plain_text', text: `Interview Report: ${report.session_name}` } },
+      { type: 'section', text: { type: 'mrkdwn', text: `*Date:* ${report.date} | *Duration:* ${report.durationLabel || '\u2014'} | *Mode:* ${report.mode}` } },
+    ];
+
+    if (report.overall.recommendation) {
+      const rec = report.overall.recommendation;
+      const label = rec.decision === 'recommend' ? 'RECOMMEND' : rec.decision === 'tentative' ? 'TENTATIVE' : 'NOT RECOMMEND';
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${label}* \u2014 ${rec.rationale}` } });
+    }
+
+    for (const person of report.persons) {
+      const scores = person.dimensions.map(d => `${d.label_zh || d.dimension}: ${d.score ?? '\u2014'}`).join(' | ');
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${person.person_name}:* ${scores}` } });
+    }
+
+    try {
+      await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocks }),
+      });
+    } catch (err) {
+      console.warn('Slack export failed:', err);
+    }
   };
 
   return (
@@ -1402,9 +1929,42 @@ function FeedbackHeader({
           <FileText className="w-3.5 h-3.5" />
           Export Markdown
         </Button>
-        <Button variant="secondary" size="sm" disabled className="transition-all duration-200">
+        <Button variant="secondary" size="sm" onClick={() => {
+          const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
+          const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><style>body{font-family:Calibri,sans-serif;font-size:11pt;line-height:1.5}h1{font-size:18pt;color:#0D6A63}h2{font-size:14pt;color:#1A2B33;border-bottom:1px solid #E0D9CE;padding-bottom:4pt}h3{font-size:12pt;color:#566A77}table{border-collapse:collapse;width:100%}td,th{border:1px solid #E0D9CE;padding:4pt 8pt;font-size:10pt}th{background:#F6F2EA}blockquote{border-left:3px solid #0D6A63;padding-left:8pt;color:#566A77;margin:8pt 0}</style></head>
+<body>${markdownToSimpleHtml(md)}</body></html>`;
+          const blob = new Blob([html], { type: 'application/vnd.ms-word' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${report.session_name.replace(/[/\\?%*:|"<>\s]+/g, '_')}_feedback.doc`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }} className="transition-all duration-200">
           <Download className="w-3.5 h-3.5" />
           Export DOCX
+        </Button>
+        <Button variant="secondary" size="sm" onClick={async () => {
+          try {
+            const html = buildPrintHtml(report, sessionNotes, sessionMemos);
+            const result = await window.desktopAPI.exportPDF({
+              sessionName: report.session_name,
+              html,
+            });
+            if (result.success) {
+              // success - no additional action needed
+            }
+          } catch (err) {
+            console.warn('PDF export failed:', err);
+          }
+        }} className="transition-all duration-200">
+          <FileText className="w-3.5 h-3.5" />
+          Export PDF
+        </Button>
+        <Button variant="secondary" size="sm" onClick={handleExportSlack} className="transition-all duration-200">
+          <MessageSquare className="w-3.5 h-3.5" />
+          Share to Slack
         </Button>
         <div className="w-px h-5 bg-border mx-1" />
         {onTranscriptToggle && (
@@ -1414,21 +1974,14 @@ function FeedbackHeader({
           </Button>
         )}
         <div className="w-px h-5 bg-border mx-1" />
-        {captionSource === 'acs-teams' ? (
-          <SplitButton
-            options={[
-              { label: 'Re-generate Report', value: 'report-only', icon: <RefreshCw className="w-3.5 h-3.5" /> },
-              { label: 'Full Re-analysis', value: 'full', icon: <Layers className="w-3.5 h-3.5" /> },
-            ]}
-            onSelect={(v) => handleRegenerate(v as 'full' | 'report-only')}
-            loading={regenerating}
-          />
-        ) : (
-          <Button variant="secondary" size="sm" onClick={() => handleRegenerate('full')} loading={regenerating} className="transition-all duration-200">
-            <RefreshCw className="w-3.5 h-3.5" />
-            Re-generate
-          </Button>
-        )}
+        <SplitButton
+          options={[
+            { label: 'Re-generate Report', value: 'report-only', icon: <RefreshCw className="w-3.5 h-3.5" /> },
+            { label: 'Full Re-analysis', value: 'full', icon: <Layers className="w-3.5 h-3.5" /> },
+          ]}
+          onSelect={(v) => handleRegenerate(v as 'full' | 'report-only')}
+          loading={regenerating}
+        />
       </div>
     </div>
   );
@@ -1441,6 +1994,7 @@ function OverallCard({
   suggestedDimensions,
   onAcceptSuggestions,
   onDismissSuggestions,
+  onInlineEdit,
 }: {
   report: FeedbackReport;
   onEvidenceClick: (ev: EvidenceRef) => void;
@@ -1448,6 +2002,7 @@ function OverallCard({
   suggestedDimensions?: OverallFeedback['suggestedDimensions'];
   onAcceptSuggestions?: () => void;
   onDismissSuggestions?: () => void;
+  onInlineEdit?: (fieldPath: string, newValue: string) => void;
 }) {
   const [memosOpen, setMemosOpen] = useState(true);
   const [eventsOpen, setEventsOpen] = useState((report.overall?.interaction_events?.length ?? 0) > 0);
@@ -1488,8 +2043,19 @@ function OverallCard({
       {/* New narrative format with footnotes */}
       {hasNarrative ? (
         <div className="mb-4">
-          <p className="text-sm text-ink-secondary leading-relaxed">
-            {report.overall.teamSummaryNarrative}
+          {onInlineEdit ? (
+            <InlineEditable
+              value={report.overall.teamSummaryNarrative || ''}
+              onSave={(v) => onInlineEdit('overall.narrative', v)}
+              as="p"
+              className="text-sm text-ink-secondary leading-relaxed"
+            />
+          ) : (
+            <p className="text-sm text-ink-secondary leading-relaxed">
+              {report.overall.teamSummaryNarrative}
+            </p>
+          )}
+          <span>
             {narrativeEvidenceRefs.map((refId) => {
               const idx = getOverallFootnoteIndex(refId);
               if (idx === 0) return null;
@@ -1502,7 +2068,7 @@ function OverallCard({
                 />
               );
             })}
-          </p>
+          </span>
           <AnimatePresence>
             {expandedOverallRef && (() => {
               const evData = overallEvidenceMap.get(expandedOverallRef);
@@ -1531,6 +2097,11 @@ function OverallCard({
         </p>
       )}
 
+      {/* Recommendation Badge */}
+      {report.overall.recommendation && (
+        <RecommendationBadge recommendation={report.overall.recommendation} />
+      )}
+
       {/* Key Findings */}
       {report.overall.keyFindings && report.overall.keyFindings.length > 0 && (
         <div className="mb-4 space-y-2">
@@ -1548,8 +2119,19 @@ function OverallCard({
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-xs font-medium text-ink-secondary">{findingLabel}</span>
                 </div>
-                <p className="text-sm text-ink leading-relaxed">
-                  {finding.text}
+                {onInlineEdit ? (
+                  <InlineEditable
+                    value={finding.text}
+                    onSave={(v) => onInlineEdit(`overall.key_findings.${i}.text`, v)}
+                    as="p"
+                    className="text-sm text-ink leading-relaxed"
+                  />
+                ) : (
+                  <p className="text-sm text-ink leading-relaxed">
+                    {finding.text}
+                  </p>
+                )}
+                <span>
                   {(finding.evidence_refs ?? []).map((refId) => {
                     const idx = getOverallFootnoteIndex(refId);
                     if (idx === 0) return null;
@@ -1562,11 +2144,16 @@ function OverallCard({
                       />
                     );
                   })}
-                </p>
+                </span>
               </div>
             );
           })}
         </div>
+      )}
+
+      {/* Candidate Comparison (group mode only) */}
+      {report.mode === 'group' && report.persons.length >= 2 && (
+        <CandidateComparison persons={report.persons} />
       )}
 
       {/* Legacy: Evidence chips (when no narrative) */}
@@ -1708,6 +2295,11 @@ function OverallCard({
         </div>
       )}
 
+      {/* Interview Quality Card */}
+      {report.overall.interviewQuality && (
+        <InterviewQualityCard quality={report.overall.interviewQuality} />
+      )}
+
       {/* AI Dimension Suggestions */}
       {suggestedDimensions && suggestedDimensions.length > 0 && (
         <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 mt-4">
@@ -1752,6 +2344,7 @@ function ClaimCard({
   getFootnoteIndex,
   onFootnoteClick,
   improvement,
+  onInlineEdit,
 }: {
   claim: Claim;
   report: FeedbackReport;
@@ -1761,6 +2354,7 @@ function ClaimCard({
   getFootnoteIndex?: (evidenceId: string) => number;
   onFootnoteClick?: (evidenceId: string) => void;
   improvement?: ClaimImprovement;
+  onInlineEdit?: (fieldPath: string, newValue: string) => void;
 }) {
   const hasFootnotes = !!getFootnoteIndex;
   const [expandedRef, setExpandedRef] = useState<string | null>(null);
@@ -1770,8 +2364,17 @@ function ClaimCard({
       className={`group border border-border border-l-4 ${CATEGORY_BORDER[claim.category]} rounded-[--radius-button] p-3 hover:bg-surface-hover transition-colors`}
     >
       <div className="flex items-start gap-2 mb-2">
-        <p className="text-sm text-ink flex-1 leading-relaxed">
-          {claim.text}
+        <div className="text-sm text-ink flex-1 leading-relaxed">
+          {onInlineEdit ? (
+            <InlineEditable
+              value={claim.text}
+              onSave={(v) => onInlineEdit(`claims.${claim.id}.text`, v)}
+              as="span"
+              className="text-sm text-ink leading-relaxed"
+            />
+          ) : (
+            claim.text
+          )}
           {hasFootnotes && (claim.evidence_refs ?? []).map((refId) => {
             const idx = getFootnoteIndex(refId);
             if (idx === 0) return null;
@@ -1784,7 +2387,7 @@ function ClaimCard({
               />
             );
           })}
-        </p>
+        </div>
         <ConfidenceBadge score={claim.confidence} />
         <button
           type="button"
@@ -1921,20 +2524,52 @@ function DimensionSection({
   );
 }
 
-function PersonSummary({ summary }: { summary: PersonFeedback['summary'] }) {
+function PersonSummary({ summary, personName, onInlineEdit }: {
+  summary: PersonFeedback['summary'];
+  personName?: string;
+  onInlineEdit?: (fieldPath: string, newValue: string) => void;
+}) {
+  const prefix = personName ? `persons.${personName}.summary` : 'summary';
   return (
     <div className="border-t border-border mt-4 pt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
       <div>
         <h5 className="text-xs font-semibold text-success mb-1">Strengths</h5>
-        <p className="text-xs text-ink-secondary leading-relaxed">{summary.strengths}</p>
+        {onInlineEdit ? (
+          <InlineEditable
+            value={summary.strengths}
+            onSave={(v) => onInlineEdit(`${prefix}.strengths`, v)}
+            as="p"
+            className="text-xs text-ink-secondary leading-relaxed"
+          />
+        ) : (
+          <p className="text-xs text-ink-secondary leading-relaxed">{summary.strengths}</p>
+        )}
       </div>
       <div>
         <h5 className="text-xs font-semibold text-warning mb-1">Risks</h5>
-        <p className="text-xs text-ink-secondary leading-relaxed">{summary.risks}</p>
+        {onInlineEdit ? (
+          <InlineEditable
+            value={summary.risks}
+            onSave={(v) => onInlineEdit(`${prefix}.risks`, v)}
+            as="p"
+            className="text-xs text-ink-secondary leading-relaxed"
+          />
+        ) : (
+          <p className="text-xs text-ink-secondary leading-relaxed">{summary.risks}</p>
+        )}
       </div>
       <div>
         <h5 className="text-xs font-semibold text-blue-700 mb-1">Actions</h5>
-        <p className="text-xs text-ink-secondary leading-relaxed">{summary.actions}</p>
+        {onInlineEdit ? (
+          <InlineEditable
+            value={summary.actions}
+            onSave={(v) => onInlineEdit(`${prefix}.actions`, v)}
+            as="p"
+            className="text-xs text-ink-secondary leading-relaxed"
+          />
+        ) : (
+          <p className="text-xs text-ink-secondary leading-relaxed">{summary.actions}</p>
+        )}
       </div>
     </div>
   );
@@ -1947,6 +2582,7 @@ function PersonFeedbackCard({
   onEvidenceClick,
   onNeedsEvidence,
   onFootnoteClick,
+  onInlineEdit,
 }: {
   person: PersonFeedback;
   report: FeedbackReport;
@@ -1954,6 +2590,7 @@ function PersonFeedbackCard({
   onEvidenceClick: (ev: EvidenceRef) => void;
   onNeedsEvidence: (claim: Claim) => void;
   onFootnoteClick?: (evidenceId: string) => void;
+  onInlineEdit?: (fieldPath: string, newValue: string) => void;
 }) {
   // Collect all evidence_refs across all claims for this person
   const allPersonEvidenceRefs = useMemo(() => {
@@ -2004,6 +2641,10 @@ function PersonFeedbackCard({
       {person.dimensions.length >= 3 && (
         <CompetencyRadar dimensions={person.dimensions} />
       )}
+      {/* Communication Metrics */}
+      {person.communicationMetrics && (
+        <CommunicationMetrics metrics={person.communicationMetrics} />
+      )}
       {/* Collapsible dimensions */}
       {person.dimensions.map((dim) => {
         const dimImprovement = report.improvements?.dimensions.find(
@@ -2020,10 +2661,19 @@ function PersonFeedbackCard({
             getFootnoteIndex={getFootnoteIndex}
             onFootnoteClick={onFootnoteClick}
             dimensionImprovement={dimImprovement}
+            onInlineEdit={onInlineEdit}
           />
         );
       })}
-      <PersonSummary summary={person.summary} />
+      <PersonSummary summary={person.summary} personName={person.person_name} onInlineEdit={onInlineEdit} />
+      {/* Follow-up Questions */}
+      {report.improvements?.follow_up_questions && (
+        <FollowUpQuestions questions={report.improvements.follow_up_questions} />
+      )}
+      {/* Action Plan */}
+      {report.improvements?.action_plan && (
+        <ActionPlanCard items={report.improvements.action_plan} />
+      )}
       {/* Footnote list at the bottom of the person section */}
       {footnoteEntries.length > 0 && (
         <FootnoteList entries={footnoteEntries} onFootnoteClick={onFootnoteClick} />
@@ -2052,7 +2702,7 @@ function EvidenceDetailModal({
 }) {
   if (!evidence) return null;
 
-  const { before, after } = getSurroundingEvidence(report, evidence.id);
+  const surroundingUtterances = getSurroundingContext(report, evidence.id);
   const refClaims = getClaimsForEvidence(report, evidence.id);
 
   return (
@@ -2083,40 +2733,39 @@ function EvidenceDetailModal({
           </div>
         )}
 
-        {/* Surrounding context */}
+        {/* Conversation context — shows full dialogue including interviewer questions */}
+        {surroundingUtterances.length > 0 && (
         <div>
           <h4 className="text-xs font-semibold text-ink-secondary uppercase tracking-wide mb-2">
-            Surrounding Context
+            Conversation Context
           </h4>
           <div className="space-y-1.5">
-            {before.map((ev) => (
-              <div key={ev.id} className="flex items-start gap-2 text-xs text-ink-tertiary pl-2 border-l-2 border-border">
+            {surroundingUtterances.map((u) => (
+              <div
+                key={u.utterance_id}
+                className={`flex items-start gap-2 text-xs pl-2 border-l-2 rounded-r py-1 ${
+                  u.isPartOfEvidence
+                    ? 'border-l-accent bg-accent-soft/30 text-ink'
+                    : 'border-l-border text-ink-tertiary'
+                }`}
+              >
+                {u.isPartOfEvidence && (
+                  <ArrowRight className="w-3 h-3 text-accent shrink-0 mt-0.5" />
+                )}
                 <span className="font-mono whitespace-nowrap">
-                  [{formatTimestamp(ev.timestamp_ms)}]
+                  [{formatTimestamp(u.start_ms)}]
                 </span>
-                <span className="font-medium whitespace-nowrap">{ev.speaker}:</span>
-                <span className="leading-relaxed">&ldquo;{ev.text}&rdquo;</span>
-              </div>
-            ))}
-            <div className="flex items-start gap-2 text-xs text-ink pl-2 border-l-2 border-accent bg-accent-soft/30 rounded-r py-1">
-              <ArrowRight className="w-3 h-3 text-accent shrink-0 mt-0.5" />
-              <span className="font-mono whitespace-nowrap font-medium">
-                [{formatTimestamp(evidence.timestamp_ms)}]
-              </span>
-              <span className="font-medium whitespace-nowrap">{evidence.speaker}:</span>
-              <span className="leading-relaxed font-medium">&ldquo;{evidence.text}&rdquo;</span>
-            </div>
-            {after.map((ev) => (
-              <div key={ev.id} className="flex items-start gap-2 text-xs text-ink-tertiary pl-2 border-l-2 border-border">
-                <span className="font-mono whitespace-nowrap">
-                  [{formatTimestamp(ev.timestamp_ms)}]
+                <span className={`font-medium whitespace-nowrap ${u.isPartOfEvidence ? '' : 'text-ink-secondary'}`}>
+                  {u.speaker}:
                 </span>
-                <span className="font-medium whitespace-nowrap">{ev.speaker}:</span>
-                <span className="leading-relaxed">&ldquo;{ev.text}&rdquo;</span>
+                <span className={`leading-relaxed ${u.isPartOfEvidence ? 'font-medium' : ''}`}>
+                  &ldquo;{u.text}&rdquo;
+                </span>
               </div>
             ))}
           </div>
         </div>
+        )}
 
         {/* Referenced by claims */}
         {refClaims.length > 0 && (
@@ -2641,9 +3290,11 @@ function SectionNav({
   onSectionClick: (id: string) => void;
   hasNotes?: boolean;
 }) {
+  const hasQuestions = (report.overall.questionAnalysis?.length ?? 0) > 0;
   const sections = [
     { id: 'overview', label: 'Overview' },
     ...(hasNotes ? [{ id: 'notes', label: 'Session Notes' }] : []),
+    ...(hasQuestions ? [{ id: 'questions', label: 'Q&A Analysis' }] : []),
     ...report.persons.map((p) => ({ id: `person-${p.speaker_id}`, label: p.person_name })),
     ...(report.transcript.length > 0 ? [{ id: 'transcript', label: 'Transcript' }] : []),
   ];
@@ -2686,6 +3337,7 @@ function DimensionSummaryRow({
   getFootnoteIndex,
   onFootnoteClick,
   dimensionImprovement,
+  onInlineEdit,
 }: {
   dim: DimensionFeedback;
   report: FeedbackReport;
@@ -2695,6 +3347,7 @@ function DimensionSummaryRow({
   getFootnoteIndex?: (evidenceId: string) => number;
   onFootnoteClick?: (evidenceId: string) => void;
   dimensionImprovement?: DimensionImprovement;
+  onInlineEdit?: (fieldPath: string, newValue: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = DIMENSION_ICONS[dim.dimension] ?? Layers;
@@ -2754,6 +3407,7 @@ function DimensionSummaryRow({
                     getFootnoteIndex={getFootnoteIndex}
                     onFootnoteClick={onFootnoteClick}
                     improvement={claimImprovement}
+                    onInlineEdit={onInlineEdit}
                   />
                 );
               })}
@@ -2826,6 +3480,7 @@ export function FeedbackView() {
     elapsedSeconds?: number;
     date?: string;
     baseApiUrl?: string;
+    report?: Record<string, unknown>;
   };
 
   // ── Resolve session data: localStorage (full) > location.state > session list ──
@@ -2892,6 +3547,25 @@ export function FeedbackView() {
       localStorage.setItem('ifb_sessions', JSON.stringify(updated));
     } catch { /* ignore */ }
   }, [finalizeStatus, sessionId]);
+
+  // If session data includes a pre-stored report (e.g. demo injection), use it directly
+  useEffect(() => {
+    if (!sessionData?.report || apiReport) return;
+    try {
+      const normalized = normalizeApiReport(sessionData.report, {
+        name: sessionData.sessionName,
+        date: sessionData.date,
+        durationMs: (sessionData.elapsedSeconds || 0) * 1000,
+        mode: sessionData.mode,
+        participants: sessionData.participants,
+      });
+      setApiReport(normalized);
+      setFinalizeStatus('final');
+      setReportLoading(false);
+    } catch (err) {
+      console.warn('[FeedbackView] Failed to normalize pre-stored report:', err);
+    }
+  }, [sessionData?.report]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attempt to load finalized report from API on mount
   useEffect(() => {
@@ -3262,6 +3936,44 @@ export function FeedbackView() {
     setDismissedSuggestions(true);
   }, []);
 
+  const handleInlineEdit = useCallback((fieldPath: string, newValue: string) => {
+    if (!sessionId) return;
+    try {
+      const dataKey = `ifb_session_data_${sessionId}`;
+      const stored = JSON.parse(localStorage.getItem(dataKey) || '{}');
+      if (!stored.report) return;
+
+      if (!stored.report.user_edits) stored.report.user_edits = [];
+      stored.report.user_edits.push({
+        field_path: fieldPath,
+        edited_value: newValue,
+        edited_at: new Date().toISOString(),
+      });
+
+      const keys = fieldPath.split('.');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let obj: any = stored.report;
+      for (let i = 0; i < keys.length - 1; i++) {
+        obj = obj[keys[i]];
+        if (!obj) return;
+      }
+      obj[keys[keys.length - 1]] = newValue;
+
+      localStorage.setItem(dataKey, JSON.stringify(stored));
+
+      const normalized = normalizeApiReport(stored.report, {
+        name: stored.sessionName,
+        date: stored.date,
+        durationMs: (stored.elapsedSeconds || 0) * 1000,
+        mode: stored.mode,
+        participants: stored.participants,
+      });
+      setApiReport(normalized);
+    } catch (err) {
+      console.warn('[InlineEdit] Failed to save:', err);
+    }
+  }, [sessionId]);
+
   const handleClaimEdit = (claim: Claim, _person: PersonFeedback) => {
     setEditClaim(claim);
   };
@@ -3486,6 +4198,8 @@ export function FeedbackView() {
               onTranscriptToggle={report.transcript.length > 0 ? () => setTranscriptOpen(v => !v) : undefined}
               sessionMemos={sessionMemos}
               captionSource={apiReport?.captionSource}
+              sessionId={sessionId}
+              baseApiUrl={sessionData?.baseApiUrl}
             />
 
             {/* Draft / demo banner */}
@@ -3547,6 +4261,7 @@ export function FeedbackView() {
                     suggestedDimensions={!dismissedSuggestions ? report.overall.suggestedDimensions : undefined}
                     onAcceptSuggestions={handleAcceptSuggestions}
                     onDismissSuggestions={handleDismissSuggestions}
+                    onInlineEdit={handleInlineEdit}
                   />
               </motion.div>
             </section>
@@ -3557,6 +4272,18 @@ export function FeedbackView() {
                 <SectionStickyHeader icon={BookOpen} title="Session Notes" />
                 <motion.div variants={fadeInUp} custom={2}>
                   <StageMemosSection memos={sessionMemos} stages={sessionStages} notes={sessionNotes} stageArchives={sessionStageArchives} />
+                </motion.div>
+              </section>
+            )}
+
+            {/* ── Question-by-Question Analysis section ── */}
+            {report.overall.questionAnalysis && report.overall.questionAnalysis.length > 0 && (
+              <section id="questions" data-section className="pb-4">
+                <SectionStickyHeader icon={HelpCircle} title="Question-by-Question Analysis" />
+                <motion.div variants={fadeInUp} custom={2.5}>
+                  <Card className="p-5">
+                    <QuestionBreakdownSection questions={report.overall.questionAnalysis} transcript={report.transcript} />
+                  </Card>
                 </motion.div>
               </section>
             )}
@@ -3604,6 +4331,7 @@ export function FeedbackView() {
                     onEvidenceClick={handleEvidenceClick}
                     onNeedsEvidence={handleNeedsEvidence}
                     onFootnoteClick={handleFootnoteClick}
+                    onInlineEdit={handleInlineEdit}
                   />
                 </motion.div>
               </section>
@@ -3629,6 +4357,9 @@ export function FeedbackView() {
                 </motion.div>
               </section>
             )}
+
+            {/* Bottom spacer to prevent last section from being obscured */}
+            <div className="h-16" aria-hidden="true" />
 
           </motion.div>
         </div>
@@ -3660,6 +4391,7 @@ export function FeedbackView() {
                 }}
                 scrollToUtteranceId={scrollToUtteranceId}
                 highlightedUtteranceIds={highlightedUtteranceIds}
+                fillHeight
               />
             </div>
           </div>
