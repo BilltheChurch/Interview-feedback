@@ -24,7 +24,7 @@ def _get_shared_client(timeout: float) -> httpx.Client:
 
 @dataclass(slots=True)
 class DashScopeLLM:
-    api_key: str
+    api_key: str = field(repr=False)
     model_name: str
     timeout_ms: int
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -59,7 +59,7 @@ class DashScopeLLM:
                 len(system_prompt), len(user_prompt)
             )
             raise ValidationError(
-                f"dashscope report request failed: status={response.status_code} body={response.text[:500]}"
+                f"Report generation service temporarily unavailable (status={response.status_code})"
             )
 
         try:

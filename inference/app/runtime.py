@@ -63,7 +63,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
     )
 
     report_llm = DashScopeLLM(
-        api_key=settings.dashscope_api_key,
+        api_key=settings.dashscope_api_key.get_secret_value(),
         model_name=settings.report_model_name,
         timeout_ms=settings.report_timeout_ms,
     )

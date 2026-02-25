@@ -91,9 +91,9 @@ async def _warmup_whisper() -> None:
 @app.middleware("http")
 async def request_guard(request: Request, call_next):
     # Skip API key check for health endpoint (Docker health check, load balancers)
-    if settings.inference_api_key and request.url.path != "/health":
+    if settings.inference_api_key.get_secret_value() and request.url.path != "/health":
         incoming_key = request.headers.get("x-api-key", "")
-        if not hmac.compare_digest(incoming_key.encode(), settings.inference_api_key.encode()):
+        if not hmac.compare_digest(incoming_key.encode(), settings.inference_api_key.get_secret_value().encode()):
             raise UnauthorizedError("invalid x-api-key")
 
     if request.method in {"POST", "PUT", "PATCH"}:
@@ -163,8 +163,15 @@ async def handle_sv_backend_error(_: Request, exc: SVBackendError) -> JSONRespon
     return JSONResponse(status_code=500, content=ErrorResponse(detail=str(exc)).model_dump())
 
 
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
+@app.get("/health")
+async def health():
+    """Minimal health check — no auth required."""
+    return {"status": "ok", "app_name": settings.app_name}
+
+
+@app.get("/health/detailed", response_model=HealthResponse)
+async def health_detailed() -> HealthResponse:
+    """Detailed diagnostics — requires authentication."""
     sv_health = runtime.sv_backend.health()
     return HealthResponse(
         app_name=settings.app_name,

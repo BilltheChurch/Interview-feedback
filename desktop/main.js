@@ -456,8 +456,33 @@ function registerIpcHandlers() {
       throw new Error('api request url is required');
     }
 
+    // Security: validate URL against allowed base URLs to prevent SSRF
+    const allowedBaseUrls = [
+      process.env.WORKER_BASE_URL,
+      process.env.WORKER_BASE_URL_SECONDARY,
+      process.env.INFERENCE_BASE_URL,
+    ].filter(Boolean);
+
+    let urlAllowed = false;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        throw new Error(`Blocked protocol: ${parsed.protocol}`);
+      }
+      if (allowedBaseUrls.length === 0) {
+        urlAllowed = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+      } else {
+        urlAllowed = allowedBaseUrls.some(base => url.startsWith(base));
+      }
+    } catch (e) {
+      if (e.message?.startsWith('Blocked protocol')) throw e;
+      throw new Error('api:request blocked: invalid URL');
+    }
+    if (!urlAllowed) {
+      throw new Error('api:request blocked: URL not in allowlist');
+    }
+
     const headers = payload.headers && typeof payload.headers === 'object' ? { ...payload.headers } : {};
-    // Inject x-api-key when WORKER_API_KEY is set
     const apiKey = process.env.WORKER_API_KEY;
     if (apiKey && !headers['x-api-key']) {
       headers['x-api-key'] = apiKey;
@@ -996,50 +1021,6 @@ function registerIpcHandlers() {
     return { ok: true };
   });
 
-  // ── Export PDF IPC ──────────────────────────
-  // Uses a hidden offscreen BrowserWindow to render print-optimized HTML,
-  // so the main UI is never disturbed and PDF pagination is clean.
-  ipcMain.handle('export:printToPDF', async (_event, options) => {
-    if (!mainWindow) throw new Error('No main window');
-
-    const htmlContent = options?.html || '';
-    const defaultName = (options?.sessionName || 'feedback-report').replace(/[/\\?%*:|"<>]/g, '_');
-
-    // Ask where to save first, so user isn't waiting during render
-    const { filePath } = await dialog.showSaveDialog(mainWindow, {
-      title: 'Export PDF',
-      defaultPath: `${defaultName}.pdf`,
-      filters: [{ name: 'PDF', extensions: ['pdf'] }],
-    });
-    if (!filePath) return { success: false };
-
-    // Create hidden offscreen window for clean PDF rendering
-    const pdfWindow = new BrowserWindow({
-      width: 800,
-      height: 600,
-      show: false,
-      webPreferences: { offscreen: true },
-    });
-
-    try {
-      await pdfWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`);
-      // Wait for fonts and layout to settle
-      await new Promise(r => setTimeout(r, 500));
-
-      const pdfData = await pdfWindow.webContents.printToPDF({
-        pageSize: 'A4',
-        printBackground: true,
-        preferCSSPageSize: false,
-        margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
-      });
-
-      fs.writeFileSync(filePath, pdfData);
-      return { success: true, path: filePath };
-    } finally {
-      pdfWindow.destroy();
-    }
-  });
-
   // ── ACS Caption IPC ──────────────────────────
   ipcMain.handle('acs:getEnabled', () => {
     return !!process.env.ACS_CONNECTION_STRING && process.env.ACS_ENABLED === 'true';
@@ -1142,12 +1123,17 @@ app.whenReady().then(() => {
   });
 
   // MF-6: Content Security Policy — restrict resource loading in the renderer
+  // In development, 'unsafe-eval' is needed for Vite HMR / source maps.
+  // In production (packaged app), 'unsafe-eval' is removed for stricter security.
+  const scriptSrc = app.isPackaged
+    ? "script-src 'self'"
+    : "script-src 'self' 'unsafe-eval'";
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:;"
+          `default-src 'self'; ${scriptSrc}; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:;`
         ]
       }
     });

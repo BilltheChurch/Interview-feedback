@@ -1387,25 +1387,7 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     if (path === "/health" && request.method === "GET") {
-      const asrProvider = (env.ASR_PROVIDER ?? "funASR").toLowerCase();
-      const asrEnabled = parseBool(env.ASR_ENABLED, true) && (asrProvider === "local-whisper" || Boolean((env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim()));
-      const asrRealtimeEnabled = parseBool(env.ASR_REALTIME_ENABLED, true);
-      return jsonResponse({
-        status: "ok",
-        app: "interview-feedback-gateway",
-        durable_object: "MEETING_SESSION",
-        r2_bucket: "RESULT_BUCKET",
-        asr_enabled: asrEnabled,
-        asr_realtime_enabled: asrRealtimeEnabled,
-        asr_mode: asrRealtimeEnabled ? "realtime" : "windowed",
-        asr_model: env.ASR_MODEL ?? DASHSCOPE_DEFAULT_MODEL,
-        asr_window_seconds: parsePositiveInt(env.ASR_WINDOW_SECONDS, 10),
-        asr_hop_seconds: parsePositiveInt(env.ASR_HOP_SECONDS, 3),
-        inference_failover_enabled: parseBool(env.INFERENCE_FAILOVER_ENABLED, true),
-        inference_retry_max: parsePositiveInt(env.INFERENCE_RETRY_MAX, 2),
-        inference_circuit_open_ms: parsePositiveInt(env.INFERENCE_CIRCUIT_OPEN_MS, 15000),
-        stream_roles: STREAM_ROLES
-      });
+      return jsonResponse({ status: "ok", app: "interview-feedback-gateway" });
     }
 
     // ── Scheduling webhook placeholder (Phase 2: DualSync integration) ──

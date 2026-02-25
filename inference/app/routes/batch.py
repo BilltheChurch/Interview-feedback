@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -59,7 +60,7 @@ def _get_diarizer() -> PyannoteFullDiarizer:
         settings = get_settings()
         _diarizer = PyannoteFullDiarizer(
             device=settings.pyannote_device,
-            hf_token=settings.hf_token,
+            hf_token=settings.hf_token.get_secret_value(),
             model_id=settings.pyannote_model_id,
             embedding_model_id=settings.pyannote_embedding_model_id,
         )
@@ -81,9 +82,13 @@ async def _resolve_audio(audio_url: str) -> str:
     """
     # Local file path
     if not audio_url.startswith(("http://", "https://")):
-        if not Path(audio_url).exists():
-            raise HTTPException(status_code=400, detail=f"Local audio file not found: {audio_url}")
-        return audio_url
+        local_path = Path(audio_url).resolve()
+        allowed_dir = Path(os.environ.get("AUDIO_UPLOAD_DIR", "/tmp/audio")).resolve()
+        if not local_path.is_relative_to(allowed_dir):
+            raise HTTPException(status_code=400, detail="Local file path not in allowed directory")
+        if not local_path.exists():
+            raise HTTPException(status_code=400, detail="Local audio file not found")
+        return str(local_path)
 
     # Remote URL — download to temp file
     suffix = ".wav"
@@ -91,6 +96,17 @@ async def _resolve_audio(audio_url: str) -> str:
         ext = "." + audio_url.split("?")[0].rsplit(".", 1)[-1]
         if ext in (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".pcm"):
             suffix = ext
+
+    # Security: block internal/private network SSRF
+    from urllib.parse import urlparse
+    parsed_url = urlparse(audio_url)
+    if parsed_url.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs allowed")
+    hostname = parsed_url.hostname or ""
+    if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "[::1]") or \
+       hostname.startswith(("10.", "192.168.")) or \
+       (hostname.startswith("172.") and 16 <= int(hostname.split(".")[1]) <= 31 if hostname.count(".") >= 1 and hostname.split(".")[1].isdigit() else False):
+        raise HTTPException(status_code=400, detail="Internal URLs not allowed")
 
     try:
         async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S) as client:
