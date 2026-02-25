@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 
 import httpx
@@ -13,12 +14,16 @@ logger = logging.getLogger(__name__)
 # Module-level shared client for connection pooling across requests.
 # This avoids creating a new TCP connection + TLS handshake per LLM call.
 _shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
 
 
 def _get_shared_client(timeout: float) -> httpx.Client:
     global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.Client(timeout=timeout)
+    if _shared_client is not None and not _shared_client.is_closed:
+        return _shared_client
+    with _shared_client_lock:
+        if _shared_client is None or _shared_client.is_closed:
+            _shared_client = httpx.Client(timeout=timeout)
     return _shared_client
 
 
