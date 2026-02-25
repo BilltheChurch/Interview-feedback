@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
 from app.services.diarize_full import DiarizeResult, SpeakerSegment
@@ -185,7 +186,7 @@ def _tmp_audio(monkeypatch):
 def _no_auth():
     """Context manager to disable auth and rate limiting for test requests."""
     return patch("app.main.settings", **{
-        "inference_api_key": "",
+        "inference_api_key": SecretStr(""),
         "max_request_body_bytes": 50 * 1024 * 1024,
         "rate_limit_enabled": False,
     })

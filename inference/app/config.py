@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    inference_api_key: str = Field(default="", alias="INFERENCE_API_KEY")
+    inference_api_key: SecretStr = Field(default="", alias="INFERENCE_API_KEY")
     trust_proxy_headers: bool = Field(default=True, alias="TRUST_PROXY_HEADERS")
 
     sv_model_id: str = Field(
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     enrollment_ready_samples: int = Field(default=3, alias="ENROLLMENT_READY_SAMPLES")
     report_model_provider: Literal["dashscope"] = Field(default="dashscope", alias="REPORT_MODEL_PROVIDER")
     report_model_name: str = Field(default="qwen-plus", alias="REPORT_MODEL_NAME")
-    dashscope_api_key: str = Field(default="", alias="DASHSCOPE_API_KEY")
+    dashscope_api_key: SecretStr = Field(default="", alias="DASHSCOPE_API_KEY")
     report_timeout_ms: int = Field(default=45000, alias="REPORT_TIMEOUT_MS")
 
     audio_sr: int = Field(default=16000, alias="AUDIO_SR")
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
         default="pyannote/wespeaker-voxceleb-resnet34-LM", alias="PYANNOTE_EMBEDDING_MODEL_ID"
     )
     pyannote_device: str = Field(default="auto", alias="PYANNOTE_DEVICE")
-    hf_token: str = Field(default="", alias="HF_TOKEN")
+    hf_token: SecretStr = Field(default="", alias="HF_TOKEN")
 
 
 @lru_cache(maxsize=1)

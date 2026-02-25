@@ -60,7 +60,7 @@ def _get_diarizer() -> PyannoteFullDiarizer:
         settings = get_settings()
         _diarizer = PyannoteFullDiarizer(
             device=settings.pyannote_device,
-            hf_token=settings.hf_token,
+            hf_token=settings.hf_token.get_secret_value(),
             model_id=settings.pyannote_model_id,
             embedding_model_id=settings.pyannote_embedding_model_id,
         )

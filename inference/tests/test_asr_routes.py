@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
 
@@ -71,7 +72,7 @@ def _mock_whisper_transcriber(transcript: TranscriptResult | None = None) -> Mag
 def _no_auth():
     """Context manager to disable auth and rate limiting for test requests."""
     return patch("app.main.settings", **{
-        "inference_api_key": "",
+        "inference_api_key": SecretStr(""),
         "max_request_body_bytes": 50 * 1024 * 1024,
         "rate_limit_enabled": False,
     })
