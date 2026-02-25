@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { ChevronDown, ChevronRight, Sparkles, AlertTriangle, Lightbulb } from 'lucide-react';
 import { Chip } from './ui/Chip';
 
@@ -37,37 +37,26 @@ export function QuestionBreakdownSection({ questions, transcript }: Props) {
 
   const toggle = (i: number) => setExpandedIdx(prev => prev === i ? null : i);
 
-  // O(1) lookup map instead of O(n) find per utterance ID
-  const transcriptMap = useMemo(() => {
-    const map = new Map<string, TranscriptUtterance>();
-    for (const u of transcript ?? []) {
-      map.set(u.utterance_id, u);
-    }
-    return map;
-  }, [transcript]);
+  // Look up answer text from transcript by utterance IDs
+  const getAnswerText = (ids?: string[]): string | null => {
+    if (!ids?.length || !transcript?.length) return null;
+    const texts = ids
+      .map(id => transcript.find(u => u.utterance_id === id))
+      .filter(Boolean)
+      .map(u => u!.text);
+    return texts.length > 0 ? texts.join(' ') : null;
+  };
 
-  // Pre-compute answer text for each question (avoids duplicate calls)
-  const answerTexts = useMemo(() =>
-    questions.map(q => {
-      if (!q.answer_utterance_ids?.length || transcriptMap.size === 0) return null;
-      const texts = q.answer_utterance_ids
-        .map(id => transcriptMap.get(id))
-        .filter(Boolean)
-        .map(u => u!.text);
-      return texts.length > 0 ? texts.join(' ') : null;
-    }),
-  [questions, transcriptMap]);
-
-  const hasDetail = (q: QuestionAnalysisItem, answerText: string | null) =>
-    !!(q.scoring_rationale || q.answer_highlights?.length || q.answer_weaknesses?.length || q.suggested_better_answer || answerText);
+  const hasDetail = (q: QuestionAnalysisItem) =>
+    !!(q.scoring_rationale || q.answer_highlights?.length || q.answer_weaknesses?.length || q.suggested_better_answer || getAnswerText(q.answer_utterance_ids));
 
   return (
     <div className="space-y-3">
       {questions.map((q, i) => {
         const quality = QUALITY_CONFIG[q.answer_quality as keyof typeof QUALITY_CONFIG] || QUALITY_CONFIG.C;
         const expanded = expandedIdx === i;
-        const answerText = answerTexts[i];
-        const expandable = hasDetail(q, answerText);
+        const expandable = hasDetail(q);
+        const answerText = getAnswerText(q.answer_utterance_ids);
 
         return (
           <div key={i} className={`border border-border rounded-[--radius-card] overflow-hidden transition-shadow duration-200 ${expanded ? 'shadow-[--shadow-card-hover]' : ''}`}>
@@ -83,9 +72,9 @@ export function QuestionBreakdownSection({ questions, transcript }: Props) {
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-ink">{q.question_text}</p>
                 <p className="text-xs text-ink-secondary mt-1">{q.comment}</p>
-                {q.related_dimensions.length > 0 && (
+                {(q.related_dimensions?.length ?? 0) > 0 && (
                   <div className="flex flex-wrap gap-1 mt-1.5">
-                    {q.related_dimensions.map(d => (
+                    {(q.related_dimensions ?? []).map(d => (
                       <Chip key={d} className="text-xs">{d}</Chip>
                     ))}
                   </div>
