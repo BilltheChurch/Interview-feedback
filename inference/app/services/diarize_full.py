@@ -19,7 +19,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from app.services.device import DeviceType, detect_device
 
 logger = logging.getLogger(__name__)
 
@@ -45,30 +45,6 @@ class DiarizeResult:
     duration_ms: int
     processing_time_ms: int
     global_clustering_done: bool = True
-
-
-# ---------------------------------------------------------------------------
-# Device detection (shared with whisper_batch)
-# ---------------------------------------------------------------------------
-
-DeviceType = Literal["cuda", "rocm", "mps", "cpu"]
-
-
-def detect_device() -> DeviceType:
-    """Return the best available torch device for pyannote."""
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            # Check for ROCm (AMD) — torch.cuda works for ROCm too via HIP
-            if hasattr(torch.version, "hip") and torch.version.hip is not None:
-                return "rocm"
-            return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-    except ImportError:
-        pass
-    return "cpu"
 
 
 # ---------------------------------------------------------------------------
