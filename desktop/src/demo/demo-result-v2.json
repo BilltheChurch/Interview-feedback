@@ -1,0 +1,1101 @@
+{
+  "session": {
+    "session_id": "sess_1771209060856",
+    "finalized_at": "2026-02-16T02:42:02.413Z",
+    "tentative": true,
+    "unresolved_cluster_count": 0,
+    "diarization_backend": "cloud"
+  },
+  "transcript": [
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000652-mlokj9vm",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "嗯。",
+      "start_ms": 0,
+      "end_ms": 652000,
+      "duration_ms": 652000
+    },
+    {
+      "utterance_id": "sess_1771209060856-students-00000652-mlokjann",
+      "stream_role": "students",
+      "cluster_id": null,
+      "speaker_name": null,
+      "decision": "unknown",
+      "text": "你好小视。",
+      "start_ms": 0,
+      "end_ms": 652000,
+      "duration_ms": 652000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000015-mlok5j64",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "诶，hello hello喂喂喂，哦，OK 现在这个 interviewer 这一栏应该是在正常的工作了哈，然后嗯。",
+      "start_ms": 1000,
+      "end_ms": 15000,
+      "duration_ms": 14000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000031-mlok5vn9",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "我希望就是在 session 开始之后，speakers 在 session 的页面 speakers 和 speaker activity 这两个自动的展开，嗯，这两个草，这两个栏目自动展开，不用人手工去点击，好吧。",
+      "start_ms": 13000,
+      "end_ms": 31000,
+      "duration_ms": 18000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000046-mlok67fa",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "哦，喂，hello hello hello。呃，hello Dan，can you hear me？呃，so I'm I'm talking all the time，so let me know if you can hear me.",
+      "start_ms": 32000,
+      "end_ms": 46000,
+      "duration_ms": 14000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000051-mlok6b0n",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Ok，嗯。",
+      "start_ms": 46000,
+      "end_ms": 51000,
+      "duration_ms": 5000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000055-mlok6eer",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "I cannot hear you.",
+      "start_ms": 50000,
+      "end_ms": 55000,
+      "duration_ms": 5000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000082-mlok6z9q",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "So let me know if you have any technical issues, okay? Um, and I will try to help you with that if you do have any technical issues. All right, so because I was... um, yeah, I can see your faces and... um, I can see you're trying to speak, but I cannot hear you. And I guarantee you it's not my problem because you can hear me right? So yeah, you can type in the chatting.",
+      "start_ms": 54000,
+      "end_ms": 82000,
+      "duration_ms": 28000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000090-mlok759a",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Channel panel and try to see if we can communicate, and I will guide you some.",
+      "start_ms": 80000,
+      "end_ms": 90000,
+      "duration_ms": 10000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000095-mlok793r",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "practical advices on how to fix your technical problem.",
+      "start_ms": 89000,
+      "end_ms": 95000,
+      "duration_ms": 6000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000121-mlok7thm",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Okay. Right. Um, so I cannot, I can still not hear you. So maybe you can quit the meeting, right? And restart your application. So if you're using a desktop application, um, you might need, if you're using a Mac, you might need to agree and allow to the privacy settings for using your.",
+      "start_ms": 93000,
+      "end_ms": 121000,
+      "duration_ms": 28000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000134-mlok8359",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "microphone and speakers, yeah. So you may not, you might deny that or didn't allow that before you join the meeting. So yeah, that usually happens.",
+      "start_ms": 119000,
+      "end_ms": 134000,
+      "duration_ms": 15000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000155-mlok8jg0",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Right, so you can now quit the meeting and then restart your application. And yeah, quit that, quit application, quit Teams completely, and then click the same link you used to join this meeting. And yeah, check your settings allow any privacy settings any.",
+      "start_ms": 133000,
+      "end_ms": 155000,
+      "duration_ms": 22000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000168-mlok8tk9",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Notifications that pump out, and then you will be directed to the lobby again, right? So there you can check your devices, check your minds equipment again.",
+      "start_ms": 153000,
+      "end_ms": 168000,
+      "duration_ms": 15000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000171-mlok8vpr",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "okay.",
+      "start_ms": 167000,
+      "end_ms": 171000,
+      "duration_ms": 4000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000210-mlok9pzj",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Okay, yeah, so I'll wait for you, right.",
+      "start_ms": 204000,
+      "end_ms": 210000,
+      "duration_ms": 6000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000310-mlokbv3r",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "嗯经说。",
+      "start_ms": 301000,
+      "end_ms": 310000,
+      "duration_ms": 9000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000316-mlokc038",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "嗯。",
+      "start_ms": 310000,
+      "end_ms": 316000,
+      "duration_ms": 6000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000326-mlokc7my",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Okay, so yeah, and um.",
+      "start_ms": 319000,
+      "end_ms": 326000,
+      "duration_ms": 7000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000332-mlokcc6r",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "So I might have a problem where I just wanna.",
+      "start_ms": 325000,
+      "end_ms": 332000,
+      "duration_ms": 7000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000357-mlokcvjr",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "So what if I want to make free form notes in the middle, right? So I don't want to categorize every notes as mammals, right? So for example, I do have some free form notes in the middle, and then we... I have some new.",
+      "start_ms": 333000,
+      "end_ms": 357000,
+      "duration_ms": 24000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000362-mlokczgo",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "new uh memos that I think I could categorize.",
+      "start_ms": 355000,
+      "end_ms": 362000,
+      "duration_ms": 7000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000378-mlokdbuk",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Right, or does it? I do not need categories. Yeah, because free free form notes that will not categorized by our questions. Is that correct? And by by our let's say our interview flow.",
+      "start_ms": 360000,
+      "end_ms": 378000,
+      "duration_ms": 18000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000381-mlokddzh",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Is it correct.",
+      "start_ms": 377000,
+      "end_ms": 381000,
+      "duration_ms": 4000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000384-mlokdglz",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Yeah, so I have to think about that.",
+      "start_ms": 379000,
+      "end_ms": 384000,
+      "duration_ms": 5000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000421-mloke98z",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "我现在有一个另外的一个，也是关于 ux 体验上面的问题，你可以使用 brainstorm skills 我思考一下，就是因为现在呃我们的这个呃 session 页面呢记录的，如果不把它记录的笔记如果不把它 categorized 的话，它就会算作是 freeform 对不对？呃，但是就会出现一个什么样的情况呢？就是比如说我现在在 intro 的阶段，我记了一些笔记，然后把它们 categorized 到了某一个，比如说 categorized issue 然后我又开始记了一些笔记，然后我觉得这些笔记呢就是属于一些不是特别重要的，我想把它保留成 freeform.",
+      "start_ms": 383000,
+      "end_ms": 421000,
+      "duration_ms": 38000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000432-mlokehme",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "对不对？然后但是过了一会儿之后又出现了一个我觉得哎一个很强的evidence，我就把它记下来。而这个时候我又想单独把那个evidence呃。",
+      "start_ms": 419000,
+      "end_ms": 432000,
+      "duration_ms": 13000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000463-mlokf5sr",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "把单独把那一条笔记 categorize 到任何的一个呃 memos 类别当中，或者说当我切换到，比如说现在是 intro 阶段，我又切换到 Q1 question one 阶段，然后我又想记录一些新的表现了，对不对？呃，新的表现在这里，然后呢，当时这个在 intro 阶段的这个 freeform 我也想把它保留下来，但是我不想把它归类到任何一个这个 memos 类别当中，这样的话我就没办法，对不对？因为我不归类的话，相当于这个 freeform.",
+      "start_ms": 430000,
+      "end_ms": 463000,
+      "duration_ms": 33000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000478-mlokfh8e",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "这个editor它就会一直，就是我刚才写的这些内容，它就会一直在这，我就不知道把它放在哪，我也不可能把它删掉，也没有地方给我，就是让它保存，所以这是一个比较大的UX上面体验的问题哈，我们需要改进。",
+      "start_ms": 461000,
+      "end_ms": 478000,
+      "duration_ms": 17000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000536-mlokgqhb",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "嗯。",
+      "start_ms": 532000,
+      "end_ms": 536000,
+      "duration_ms": 4000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000567-mlokhe6j",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "Ok，所以呃我们现在 n session 来测试一下。",
+      "start_ms": 559000,
+      "end_ms": 567000,
+      "duration_ms": 8000
+    },
+    {
+      "utterance_id": "sess_1771209060856-teacher-00000576-mlokhl6t",
+      "stream_role": "teacher",
+      "cluster_id": "teacher",
+      "speaker_name": "Dan",
+      "decision": "auto",
+      "text": "然后比如说我现在现在在这这里记录一下啊，在U二。",
+      "start_ms": 568000,
+      "end_ms": 576000,
+      "duration_ms": 8000
+    }
+  ],
+  "speaker_logs": {
+    "source": "cloud",
+    "turns": [],
+    "clusters": [],
+    "speaker_map": [],
+    "updated_at": "2026-02-16T02:42:00.763Z"
+  },
+  "stats": [
+    {
+      "speaker_key": "Dan",
+      "speaker_name": "Dan",
+      "talk_time_ms": 1050000,
+      "turns": 31,
+      "silence_ms": 0,
+      "interruptions": 1,
+      "interrupted_by_others": 1
+    },
+    {
+      "speaker_key": "unknown",
+      "speaker_name": null,
+      "talk_time_ms": 652000,
+      "turns": 1,
+      "silence_ms": 0,
+      "interruptions": 1,
+      "interrupted_by_others": 1
+    }
+  ],
+  "memos": [],
+  "evidence": [
+    {
+      "evidence_id": "e_000001",
+      "type": "quote",
+      "time_range_ms": [
+        0,
+        652000
+      ],
+      "utterance_ids": [
+        "sess_1771209060856-teacher-00000652-mlokj9vm"
+      ],
+      "speaker": {
+        "cluster_id": "teacher",
+        "person_id": "Dan",
+        "display_name": "Dan"
+      },
+      "quote": "嗯。",
+      "confidence": 0.74,
+      "weak": false,
+      "weak_reason": null
+    },
+    {
+      "evidence_id": "e_000002",
+      "type": "quote",
+      "time_range_ms": [
+        0,
+        652000
+      ],
+      "utterance_ids": [
+        "sess_1771209060856-students-00000652-mlokjann"
+      ],
+      "speaker": {
+        "cluster_id": null,
+        "person_id": "unknown",
+        "display_name": "unknown"
+      },
+      "quote": "你好小视。",
+      "confidence": 0.74,
+      "weak": false,
+      "weak_reason": null
+    }
+  ],
+  "overall": {
+    "summary_sections": [
+      {
+        "topic": "Teacher Memos",
+        "bullets": [
+          "本场记录已生成，建议结合个人维度反馈查看。"
+        ],
+        "evidence_ids": [
+          "e_000001",
+          "e_000002"
+        ]
+      }
+    ],
+    "team_dynamics": {
+      "highlights": [
+        "展现了推动讨论与收敛结论的能力。",
+        "展现了推动讨论与收敛结论的能力。"
+      ],
+      "risks": [
+        "在主导节奏与听取他人之间的平衡仍可优化。",
+        "在主导节奏与听取他人之间的平衡仍可优化。"
+      ]
+    },
+    "recommendation": {
+      "decision": "tentative",
+      "confidence": 0.65,
+      "rationale": "候选人展现了良好的沟通能力和团队协作意识，但在结构化思维和独立推进方面仍需进一步验证。建议安排第二轮面试。",
+      "context_type": "hiring"
+    },
+    "interview_quality": {
+      "coverage_ratio": 0.75,
+      "follow_up_depth": 4,
+      "structure_score": 7.5,
+      "suggestions": "面试结构合理，但对候选人深层能力的追问不够充分，建议增加 situational 类问题。"
+    },
+    "question_analysis": [
+      {
+        "question_text": "Session 开始后 speakers 和 speaker activity 能否自动展开？",
+        "answer_utterance_ids": [
+          "sess_1771209060856-teacher-00000031-mlok5vn9"
+        ],
+        "answer_quality": "B",
+        "comment": "明确提出了 UX 改进需求，但未给出优先级判断或用户场景分析。",
+        "related_dimensions": [
+          "structure",
+          "initiative"
+        ],
+        "scoring_rationale": "候选人能够清晰描述当前 UX 痛点（需要手动点击展开 speakers 栏目），并直接提出了改进方向。但回答缺乏对该需求的优先级评估和影响范围分析，也未提供替代方案或实现成本的考量。作为产品讨论而言属于良好水平。",
+        "answer_highlights": [
+          "精准定位了 UX 摩擦点：session 开始后需手动展开关键栏目",
+          "提出了明确的改进方向：自动展开，减少人工操作"
+        ],
+        "answer_weaknesses": [
+          "未分析该改动对不同使用场景的影响（如单人 vs 多人 session）",
+          "缺少优先级判断和实现复杂度的评估"
+        ],
+        "suggested_better_answer": "建议在描述痛点后补充场景分析：'在群面场景中，面试官启动 session 后需要立即关注说话人动态，手动展开增加了认知负担。建议默认展开 speakers 和 activity 栏，同时保留折叠能力供个人模式使用。实现上这是一个低成本高回报的改动。'"
+      },
+      {
+        "question_text": "如果想在中途记录 freeform notes 而不归类，该怎么处理？",
+        "answer_utterance_ids": [
+          "sess_1771209060856-teacher-00000357-mlokcvjr",
+          "sess_1771209060856-teacher-00000362-mlokczgo",
+          "sess_1771209060856-teacher-00000378-mlokdbuk"
+        ],
+        "answer_quality": "B",
+        "comment": "深入描述了 freeform notes 的使用场景和痛点，但表达结构偏松散，多次自我修正。",
+        "related_dimensions": [
+          "logic",
+          "structure"
+        ],
+        "scoring_rationale": "候选人对 freeform notes 的需求有深刻理解，能够从实际使用场景出发描述问题（在记笔记的过程中出现不想归类的内容）。但叙述过程中多次停顿和自我修正（'right? So for example...' → 'new uh memos that I think I could categorize' → 'Right, or does it?'），反映出思路在表达前未充分整理。综合评为 B。",
+        "answer_highlights": [
+          "从实际工作流出发描述问题，体现了用户同理心",
+          "区分了 freeform 和 categorized 两种笔记类型的不同需求"
+        ],
+        "answer_weaknesses": [
+          "表达过程中多次自我修正，结构不够清晰",
+          "未明确提出解决方案，停留在问题描述层面",
+          "使用了较多填充词和重复表述（'right?', 'uh'）"
+        ],
+        "suggested_better_answer": "建议用「问题—影响—方案」框架重构：'目前的笔记系统要求所有内容都归类到 memo 类别中，但实际面试中经常出现临时观察和零散想法。这导致两个问题：一是强制归类打断记录节奏，二是未归类内容没有保存机制。建议增加一个 scratch pad 区域，支持后续整理和归类。'"
+      },
+      {
+        "question_text": "在不同面试阶段切换时，之前的 freeform 笔记如何保留？",
+        "answer_utterance_ids": [
+          "sess_1771209060856-teacher-00000421-mloke98z",
+          "sess_1771209060856-teacher-00000432-mlokehme",
+          "sess_1771209060856-teacher-00000463-mlokf5sr",
+          "sess_1771209060856-teacher-00000478-mlokfh8e"
+        ],
+        "answer_quality": "C",
+        "comment": "详细描述了跨阶段笔记管理的痛点，但叙述冗长且缺乏结构化总结，未提出可行方案。",
+        "related_dimensions": [
+          "structure",
+          "logic",
+          "initiative"
+        ],
+        "scoring_rationale": "候选人用了大量篇幅描述了一个复杂但重要的 UX 问题：在 intro 阶段记录的 freeform 笔记在切换到 Q1 阶段后无处安放。问题描述虽然全面，但叙述过于冗长（横跨 4 段发言），中间穿插了大量场景假设而缺乏清晰的逻辑递进。最终虽然得出了'这是一个比较大的 UX 体验问题'的结论，但未提出任何解决方向。综合评为 C。",
+        "answer_highlights": [
+          "准确识别了跨阶段笔记管理的核心矛盾：freeform 内容在阶段切换时缺乏归属"
+        ],
+        "answer_weaknesses": [
+          "叙述过于冗长，横跨 4 段发言才表达完一个观点",
+          "大量使用口头禅和重复表述（'对不对？'、'呃'、'就是'），影响表达效率",
+          "仅停留在问题描述层面，未提出任何解决方案或改进方向",
+          "缺乏结构化的问题框架，信息组织松散"
+        ],
+        "suggested_better_answer": "建议精简表达并附带解决思路：'目前存在一个关键的 UX 问题：当面试官在 intro 阶段记录了 freeform 笔记后切换到 Q1，这些内容无法保存也无法归类，处于悬浮状态。这会导致面试官丢失有价值的观察记录。建议方案有三：一是引入全局 scratch pad，二是支持笔记的延后归类，三是在阶段切换时自动保存为该阶段的附注。'"
+      }
+    ]
+  },
+  "per_person": [
+    {
+      "person_key": "Dan",
+      "display_name": "Dan",
+      "dimensions": [
+        {
+          "dimension": "leadership",
+          "strengths": [
+            {
+              "claim_id": "c_Dan_leadership_01",
+              "text": "展现了推动讨论与收敛结论的能力。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_Dan_leadership_02",
+              "text": "在主导节奏与听取他人之间的平衡仍可优化。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_Dan_leadership_03",
+              "text": "下一次先明确分工，再在关键节点推动决策。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "collaboration",
+          "strengths": [
+            {
+              "claim_id": "c_Dan_collaboration_01",
+              "text": "能回应同伴观点并保持讨论连贯。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_Dan_collaboration_02",
+              "text": "对他人观点的复述与确认不足时会影响协作清晰度。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_Dan_collaboration_03",
+              "text": "增加对同伴观点的确认性回应，再提出自己的补充。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "logic",
+          "strengths": [
+            {
+              "claim_id": "c_Dan_logic_01",
+              "text": "能围绕问题给出有因果关系的分析。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_Dan_logic_02",
+              "text": "部分结论在证据与推理链衔接上不够充分。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_Dan_logic_03",
+              "text": "按“结论-依据-验证”三步法组织表达。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "structure",
+          "strengths": [
+            {
+              "claim_id": "c_Dan_structure_01",
+              "text": "回答具备阶段性结构，信息传递较清晰。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_Dan_structure_02",
+              "text": "在高压讨论中结构容易被打断而出现跳跃。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_Dan_structure_03",
+              "text": "先给出框架提纲，再逐段展开并做小结。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "initiative",
+          "strengths": [
+            {
+              "claim_id": "c_Dan_initiative_01",
+              "text": "具备主动推进讨论与提出下一步的意识。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_Dan_initiative_02",
+              "text": "主动发起时机偶尔偏晚，影响整体推进效率。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_Dan_initiative_03",
+              "text": "在识别卡点后尽早提出可执行的下一步建议。",
+              "evidence_refs": [
+                "e_000001"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "strengths": [
+          "展现了推动讨论与收敛结论的能力。",
+          "能回应同伴观点并保持讨论连贯。",
+          "能围绕问题给出有因果关系的分析。"
+        ],
+        "risks": [
+          "在主导节奏与听取他人之间的平衡仍可优化。",
+          "对他人观点的复述与确认不足时会影响协作清晰度。",
+          "部分结论在证据与推理链衔接上不够充分。"
+        ],
+        "actions": [
+          "下一次先明确分工，再在关键节点推动决策。",
+          "增加对同伴观点的确认性回应，再提出自己的补充。",
+          "按“结论-依据-验证”三步法组织表达。"
+        ]
+      }
+    },
+    {
+      "person_key": "unknown",
+      "display_name": "unknown",
+      "dimensions": [
+        {
+          "dimension": "leadership",
+          "strengths": [
+            {
+              "claim_id": "c_unknown_leadership_01",
+              "text": "展现了推动讨论与收敛结论的能力。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_unknown_leadership_02",
+              "text": "在主导节奏与听取他人之间的平衡仍可优化。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_unknown_leadership_03",
+              "text": "下一次先明确分工，再在关键节点推动决策。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "collaboration",
+          "strengths": [
+            {
+              "claim_id": "c_unknown_collaboration_01",
+              "text": "能回应同伴观点并保持讨论连贯。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_unknown_collaboration_02",
+              "text": "对他人观点的复述与确认不足时会影响协作清晰度。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_unknown_collaboration_03",
+              "text": "增加对同伴观点的确认性回应，再提出自己的补充。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "logic",
+          "strengths": [
+            {
+              "claim_id": "c_unknown_logic_01",
+              "text": "能围绕问题给出有因果关系的分析。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_unknown_logic_02",
+              "text": "部分结论在证据与推理链衔接上不够充分。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_unknown_logic_03",
+              "text": "按“结论-依据-验证”三步法组织表达。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "structure",
+          "strengths": [
+            {
+              "claim_id": "c_unknown_structure_01",
+              "text": "回答具备阶段性结构，信息传递较清晰。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_unknown_structure_02",
+              "text": "在高压讨论中结构容易被打断而出现跳跃。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_unknown_structure_03",
+              "text": "先给出框架提纲，再逐段展开并做小结。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        },
+        {
+          "dimension": "initiative",
+          "strengths": [
+            {
+              "claim_id": "c_unknown_initiative_01",
+              "text": "具备主动推进讨论与提出下一步的意识。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.74
+            }
+          ],
+          "risks": [
+            {
+              "claim_id": "c_unknown_initiative_02",
+              "text": "主动发起时机偶尔偏晚，影响整体推进效率。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.7
+            }
+          ],
+          "actions": [
+            {
+              "claim_id": "c_unknown_initiative_03",
+              "text": "在识别卡点后尽早提出可执行的下一步建议。",
+              "evidence_refs": [
+                "e_000002"
+              ],
+              "confidence": 0.72
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "strengths": [
+          "展现了推动讨论与收敛结论的能力。",
+          "能回应同伴观点并保持讨论连贯。",
+          "能围绕问题给出有因果关系的分析。"
+        ],
+        "risks": [
+          "在主导节奏与听取他人之间的平衡仍可优化。",
+          "对他人观点的复述与确认不足时会影响协作清晰度。",
+          "部分结论在证据与推理链衔接上不够充分。"
+        ],
+        "actions": [
+          "下一次先明确分工，再在关键节点推动决策。",
+          "增加对同伴观点的确认性回应，再提出自己的补充。",
+          "按“结论-依据-验证”三步法组织表达。"
+        ]
+      }
+    }
+  ],
+  "quality": {
+    "generated_at": "2026-02-16T02:42:02.413Z",
+    "build_ms": 1099,
+    "validation_ms": 0,
+    "claim_count": 30,
+    "invalid_claim_count": 0,
+    "needs_evidence_count": 0,
+    "report_source": "memo_first_fallback",
+    "report_model": null,
+    "report_degraded": true,
+    "report_error": "analysis_synthesize failed: primary#1 status=530 status=530 body=error code: 1033 | primary#2 status=530 status=530 body=error code: 1033 | primary#3 status=530 status=530 body=error code: 1033"
+  },
+  "trace": {
+    "finalize_job_id": "fv2_d45e51c0-4c1b-49d5-bcab-00f78eb3c71e",
+    "model_versions": {
+      "asr": "fun-asr-realtime-2025-11-07",
+      "analysis_events_path": "/analysis/events",
+      "analysis_report_path": "/analysis/report",
+      "analysis_synthesize_path": "/analysis/synthesize",
+      "summary_mode": "memo_first_with_llm_polish"
+    },
+    "thresholds": {
+      "sv_t_low": 0.45,
+      "sv_t_high": 0.7,
+      "tentative": true,
+      "unresolved_cluster_count": 0,
+      "diarization_backend": "cloud",
+      "finalize_timeout_ms": 180000,
+      "feedback_assemble_budget_ms": 1200,
+      "feedback_events_budget_ms": 1200,
+      "feedback_report_budget_ms": 4500,
+      "feedback_validate_budget_ms": 600,
+      "feedback_total_budget_ms": 8000
+    },
+    "unknown_ratio": 1,
+    "backend_timeline": [
+      {
+        "ts": "2026-02-16T02:42:00.769Z",
+        "endpoint": "analysis_events",
+        "backend": "primary",
+        "outcome": "failed",
+        "detail": "status=530 body=error code: 1033",
+        "attempt": 1
+      },
+      {
+        "ts": "2026-02-16T02:42:00.951Z",
+        "endpoint": "analysis_events",
+        "backend": "primary",
+        "outcome": "failed",
+        "detail": "status=530 body=error code: 1033",
+        "attempt": 2
+      },
+      {
+        "ts": "2026-02-16T02:42:01.314Z",
+        "endpoint": "analysis_events",
+        "backend": "primary",
+        "outcome": "failed",
+        "detail": "status=530 body=error code: 1033",
+        "attempt": 3
+      }
+    ],
+    "quality_gate_snapshot": {
+      "finalize_success_target": 0.995,
+      "students_unknown_ratio_target": 0.1,
+      "sv_top1_target": 0.9,
+      "echo_reduction_target": 0.8,
+      "observed_unknown_ratio": 1,
+      "observed_students_turns": 1,
+      "observed_students_unknown": 1,
+      "observed_echo_suppressed_chunks": 0,
+      "observed_echo_recent_rate": 0,
+      "observed_echo_leak_rate": 0,
+      "observed_suppression_false_positive_rate": 0
+    },
+    "report_pipeline": {
+      "mode": "memo_first_with_llm_polish",
+      "source": "memo_first_fallback",
+      "llm_attempted": true,
+      "llm_success": false,
+      "llm_elapsed_ms": 1099,
+      "blocking_reason": "analysis/synthesize failed: analysis_synthesize failed: primary#1 status=530 status=530 body=error code: 1033 | primary#2 status=530 status=530 body=error code: 1033 | primary#3 status=530 status=530 body=error code: 1033, analysis/report fallback also failed: analysis_report failed: primary#1 status=530 status=530 body=error code: 1033 | primary#2 status=530 status=530 body=error code: 1033 | primary#3 status=530 status=530 body=error code: 1033"
+    },
+    "quality_gate_failures": [
+      "unknown_ratio 100.0% > 10%",
+      "analysis/synthesize failed: analysis_synthesize failed: primary#1 status=530 status=530 body=error code: 1033 | primary#2 status=530 status=530 body=error code: 1033 | primary#3 status=530 status=530 body=error code: 1033, analysis/report fallback also failed: analysis_report failed: primary#1 status=530 status=530 body=error code: 1033 | primary#2 status=530 status=530 body=error code: 1033 | primary#3 status=530 status=530 body=error code: 1033",
+      "students_unknown_ratio gate failed: observed=1.0000 target<=0.10"
+    ],
+    "generated_at": "2026-02-16T02:42:02.413Z"
+  },
+  "improvements": {
+    "overall": {
+      "summary": "Dan 在本次面试中展现了较强的推动讨论与收敛结论的能力，但在主导节奏与倾听他人之间仍需更好平衡。建议在表达时更主动地确认同伴观点，并采用结构化框架提升逻辑清晰度，同时在高压情境下保持表达的连贯性。",
+      "key_points": [
+        "加强倾听与确认他人观点的回应",
+        "使用“结论-依据-验证”三步法强化逻辑推理",
+        "在关键节点前先明确分工并给出框架提纲"
+      ]
+    },
+    "dimensions": [
+      {
+        "dimension": "leadership",
+        "advice": "在主导讨论节奏的同时，应更主动地邀请和确认他人意见，避免单向推进导致协作感减弱。",
+        "framework": "PREP 框架（Point-Reason-Example-Point）：先明确立场，再解释原因，举例说明，最后重申观点，增强对话双向性。",
+        "example_response": "I see your point about the freeform notes being hard to manage. Let me summarize: you're suggesting we need a way to preserve unstructured thoughts without forcing categorization, right? That makes sense—especially when evidence emerges mid-flow. So let’s explore that as a potential UX improvement."
+      },
+      {
+        "dimension": "collaboration",
+        "advice": "在回应他人观点时，应增加复述与确认性语言，以确保理解一致并促进协作清晰度。",
+        "framework": "Active Listening + Confirmation Loop：重复对方核心观点 + 用提问或总结确认理解，如‘So what I’m hearing is…’。",
+        "example_response": "So what I’m hearing is that you’re concerned about losing context when switching between stages and wanting to keep some notes as freeform—without having to categorize them immediately. Is that accurate?"
+      },
+      {
+        "dimension": "logic",
+        "advice": "在提出结论前，应系统性地呈现“结论-依据-验证”链条，使推理更具说服力。",
+        "framework": "结论-依据-验证（C-I-V）三步法：先说结论，再列出支持依据，最后通过反问或假设验证其合理性。",
+        "example_response": "My conclusion is that we should allow persistent freeform notes outside of categories. The reason is that users often capture insights in real time before they’re ready to classify. To validate this, imagine if someone finds a strong piece of evidence during intro—wouldn’t it be disruptive to force immediate categorization?"
+      },
+      {
+        "dimension": "structure",
+        "advice": "在高压或复杂讨论中，应提前给出表达框架，防止信息跳跃或丢失重点。",
+        "framework": "金字塔原理（Pyramid Principle）：先抛出核心观点，再分层展开，每段小结，保持逻辑递进。",
+        "example_response": "Let me structure my thoughts: First, the core issue is that current UX forces premature categorization. Second, this disrupts workflow during dynamic sessions. Third, we could solve this by introducing a ‘draft zone’ for freeform notes. I’ll now expand on each point."
+      },
+      {
+        "dimension": "initiative",
+        "advice": "应在识别卡点后尽早提出可执行的下一步建议，避免被动等待或拖延推进时机。",
+        "framework": "SBI 模型（Situation-Behavior-Impact）：描述现状→指出行为问题→强调影响，自然引出行动建议。",
+        "example_response": "Right now, we’re stuck because we can’t hear each other. The situation is clear: technical issues are blocking communication. The behavior—waiting passively—is delaying progress. My impact assessment is that we risk losing valuable discussion time. So here’s a next step: let’s try restarting the app together now."
+      }
+    ],
+    "claims": [
+      {
+        "claim_id": "c_Dan_leadership_02",
+        "advice": "在主导讨论时，应主动平衡话语权，避免长时间独白，适时引入他人视角。",
+        "suggested_wording": "I’d love to hear your take on this—what do you think about keeping some notes freeform?",
+        "before_after": {
+          "before": "Okay, so yeah, and um. So I might have a problem where I just wanna.",
+          "after": "Okay, so I’ve been thinking about a potential issue here—what if we want to keep some notes freeform without forcing categorization? What’s your perspective on that?"
+        }
+      },
+      {
+        "claim_id": "c_Dan_collaboration_02",
+        "advice": "在回应他人观点时，应先复述并确认其内容，再进行补充，避免误解或断章取义。",
+        "suggested_wording": "So if I understand correctly, you’re saying that the current system doesn’t allow us to preserve unstructured notes across different phases—right?",
+        "before_after": {
+          "before": "呃，但是就会出现一个什么样的情况呢？就是比如说我现在在 intro 的阶段，我记了一些笔记，然后把它们 categorized 到了某一个，比如说 categorized issue 然后我又开始记了一些笔记，然后我觉得这些笔记呢就是属于一些不是特别重要的，我想把它保留成 freeform.",
+          "after": "So if I understand correctly, you’re worried that once you categorize notes in one phase, you lose the ability to keep other notes as freeform later—even if they’re still relevant. Is that right?"
+        }
+      },
+      {
+        "claim_id": "c_Dan_logic_02",
+        "advice": "在得出结论前，应明确展示证据与推理之间的衔接，避免跳跃式判断。",
+        "suggested_wording": "The key insight here is that users need flexibility. Why? Because insights often emerge unpredictably. And how do we know this works? Imagine trying to reorganize notes after the session—it would be chaotic.",
+        "before_after": {
+          "before": "所以这是一个比较大的UX上面体验的问题哈，我们需要改进。",
+          "after": "So this is a significant UX issue because it breaks the natural flow of note-taking. Users capture ideas in real time, but the system forces classification too early. That leads to frustration—and ultimately, lost insights."
+        }
+      },
+      {
+        "claim_id": "c_Dan_structure_02",
+        "advice": "在高压讨论中，应先给出表达框架，再逐段展开，防止信息跳跃。",
+        "suggested_wording": "Let me break this down into three parts: first, the current limitation; second, why it matters; third, a possible solution.",
+        "before_after": {
+          "before": "嗯。Ok，所以呃我们现在 n session 来测试一下。然后比如说我现在现在在这这里记录一下啊，在U二。",
+          "after": "Let me outline my approach: first, I’ll test the current behavior in the session. Then I’ll document the issue with freeform notes. Finally, I’ll propose a UX fix. Let’s start with testing."
+        }
+      },
+      {
+        "claim_id": "c_Dan_initiative_02",
+        "advice": "在识别卡点后应立即提出可执行的下一步建议，避免延迟推进。",
+        "suggested_wording": "Since we’re having audio issues, let’s try restarting the app together now—this could resolve the microphone access problem.",
+        "before_after": {
+          "before": "Right, so you can now quit the meeting and then restart your application.",
+          "after": "Given the audio issue, let’s try a quick restart together—quit Teams completely, then rejoin using the same link. This usually fixes privacy permission problems."
+        }
+      }
+    ]
+  }
+}
