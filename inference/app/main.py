@@ -66,7 +66,7 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 app.include_router(asr_router)
 app.include_router(batch_router)
 
-_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 
 @app.on_event("startup")
