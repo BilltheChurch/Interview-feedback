@@ -11,10 +11,13 @@ from app.schemas import (
     DimensionClaim,
     DimensionFeedback,
     DimensionPreset,
+    InterviewQuality,
     KeyFinding,
     OverallFeedback,
     PersonFeedbackItem,
     PersonSummary,
+    QuestionAnalysis,
+    Recommendation,
     ReportQualityMeta,
     SuggestedDimension,
     SummarySection,
@@ -431,7 +434,27 @@ class ReportSynthesizer:
             "23. 优先使用 tier_1 证据（面试者发言）。tier_3（面试官评价性发言）仅作为补充佐证。\n"
             "24. 生成 `overall.narrative` 作为围绕 `session_context.position_title` 的连贯段落，不要使用要点列表。\n"
             "25. 如果某个预设维度无法评估（证据完全不足），设置 `not_applicable: true` 和 `score: 5`。\n"
-            "26. 如果面试内容暗示需要预设之外的维度，输出 `suggested_dimensions`。\n\n"
+            "26. 如果面试内容暗示需要预设之外的维度，输出 `suggested_dimensions`。\n"
+            "27. 在 overall 中生成 `recommendation`：基于所有维度的综合表现给出录用建议。\n"
+            "    - decision: 'recommend'（推荐）/ 'tentative'（待定）/ 'not_recommend'（不推荐）\n"
+            "    - confidence: 0.0-1.0 推荐置信度\n"
+            "    - rationale: 一句话推荐理由（中文）\n"
+            "    - context_type: 'hiring'（招聘）或 'admission'（录取）\n"
+            "28. 在 overall 中生成 `question_analysis`：对面试官的每个问题做深度分析（微型诊断）。\n"
+            "    - question_text: 面试官的原始问题\n"
+            "    - answer_utterance_ids: 候选人回答的 utterance_id 列表\n"
+            "    - answer_quality: A（优秀）/ B（良好）/ C（一般）/ D（较差）\n"
+            "    - comment: 回答质量简评（中文，1-2句）\n"
+            "    - related_dimensions: 该问题关联的评估维度 key 列表\n"
+            "    - scoring_rationale: 评分理由（中文，2-3句，解释为什么给这个评级）\n"
+            "    - answer_highlights: 回答中的亮点列表（中文，每条1句，引用候选人的具体表述或行为）\n"
+            "    - answer_weaknesses: 回答中的不足列表（中文，每条1句，指出具体缺陷）\n"
+            "    - suggested_better_answer: 改进方向建议（中文，2-3句，描述一个更优回答应该如何展开）\n"
+            "29. 在 overall 中生成 `interview_quality`：评估面试本身的质量。\n"
+            "    - coverage_ratio: 被有效探查的维度数/总维度数 (0-1)\n"
+            "    - follow_up_depth: 面试官有效追问次数\n"
+            "    - structure_score: 0-10 面试结构化程度\n"
+            "    - suggestions: 对面试官的建议（中文，1-2句）\n\n"
             "OUTPUT FORMAT: Strict JSON matching the output_contract.\n"
             f"LANGUAGE: {locale_hint} — use professional, concise language.\n"
         )
@@ -523,7 +546,7 @@ class ReportSynthesizer:
         # Get dimension presets
         dim_presets = _get_dimension_presets_dicts(req)
 
-        # Build output contract (v2 with scores and narrative)
+        # Build output contract (v2 with scores and narrative + v3 enrichment)
         output_contract = {
             "overall": {
                 "narrative": "string — cohesive 2-4 sentence paragraph, NO [e_XXXXX] references",
@@ -544,6 +567,31 @@ class ReportSynthesizer:
                         "replaces": "string|null",
                     }
                 ],
+                "recommendation": {
+                    "decision": "recommend / tentative / not_recommend",
+                    "confidence": 0.85,
+                    "rationale": "一句话推荐理由（中文）",
+                    "context_type": "hiring",
+                },
+                "question_analysis": [
+                    {
+                        "question_text": "面试官的原始问题",
+                        "answer_utterance_ids": ["回答的utterance id列表"],
+                        "answer_quality": "A/B/C/D",
+                        "comment": "回答质量简评（中文，1-2句）",
+                        "related_dimensions": ["关联的维度key"],
+                        "scoring_rationale": "评分理由（中文，2-3句）",
+                        "answer_highlights": ["亮点1：引用候选人具体表述", "亮点2"],
+                        "answer_weaknesses": ["不足1：具体缺陷描述", "不足2"],
+                        "suggested_better_answer": "改进方向建议（中文，2-3句）",
+                    }
+                ],
+                "interview_quality": {
+                    "coverage_ratio": "被有效探查的维度数/总维度数 (0-1)",
+                    "follow_up_depth": "面试官有效追问次数 (int)",
+                    "structure_score": "0-10",
+                    "suggestions": "对面试官的建议（中文，1-2句）",
+                },
             },
             "per_person": [
                 {
@@ -756,6 +804,84 @@ class ReportSynthesizer:
                 replaces=sd.get("replaces"),
             ))
 
+        # --- v3 enrichment fields (optional) ---
+        recommendation = None
+        rec_raw = overall_raw.get("recommendation")
+        if isinstance(rec_raw, dict) and rec_raw.get("decision"):
+            rec_decision = str(rec_raw.get("decision", "")).strip()
+            if rec_decision in ("recommend", "tentative", "not_recommend"):
+                try:
+                    rec_conf = float(rec_raw.get("confidence", 0.0))
+                    rec_conf = max(0.0, min(1.0, rec_conf))
+                except (TypeError, ValueError):
+                    rec_conf = 0.0
+                recommendation = Recommendation(
+                    decision=rec_decision,
+                    confidence=rec_conf,
+                    rationale=str(rec_raw.get("rationale", "")).strip(),
+                    context_type=str(rec_raw.get("context_type", "hiring")).strip(),
+                )
+
+        question_analysis = None
+        qa_raw = overall_raw.get("question_analysis")
+        if isinstance(qa_raw, list) and qa_raw:
+            question_analysis = []
+            for qa in qa_raw:
+                if not isinstance(qa, dict):
+                    continue
+                q_text = str(qa.get("question_text", "")).strip()
+                if not q_text:
+                    continue
+                answer_ids = [str(uid).strip() for uid in qa.get("answer_utterance_ids", []) if str(uid).strip()]
+                quality = str(qa.get("answer_quality", "")).strip().upper()
+                if quality not in ("A", "B", "C", "D"):
+                    quality = "C"  # Default for unparseable quality grades
+                comment = str(qa.get("comment", "")).strip()
+                related_dims = [str(d).strip() for d in qa.get("related_dimensions", []) if str(d).strip()]
+                scoring_rationale = str(qa.get("scoring_rationale", "")).strip()
+                answer_highlights = [str(h).strip() for h in qa.get("answer_highlights", []) if str(h).strip()]
+                answer_weaknesses = [str(w).strip() for w in qa.get("answer_weaknesses", []) if str(w).strip()]
+                suggested_better_answer = str(qa.get("suggested_better_answer", "")).strip()
+                question_analysis.append(QuestionAnalysis(
+                    question_text=q_text,
+                    answer_utterance_ids=answer_ids,
+                    answer_quality=quality,
+                    comment=comment,
+                    related_dimensions=related_dims,
+                    scoring_rationale=scoring_rationale,
+                    answer_highlights=answer_highlights,
+                    answer_weaknesses=answer_weaknesses,
+                    suggested_better_answer=suggested_better_answer,
+                ))
+            if not question_analysis:
+                question_analysis = None
+
+        interview_quality = None
+        iq_raw = overall_raw.get("interview_quality")
+        if isinstance(iq_raw, dict):
+            try:
+                cov = float(iq_raw.get("coverage_ratio", 0.0))
+                cov = max(0.0, min(1.0, cov))
+            except (TypeError, ValueError):
+                cov = 0.0
+            try:
+                fud = int(iq_raw.get("follow_up_depth", 0))
+                fud = max(0, fud)
+            except (TypeError, ValueError):
+                fud = 0
+            try:
+                ss = float(iq_raw.get("structure_score", 0.0))
+                ss = max(0.0, min(10.0, ss))
+            except (TypeError, ValueError):
+                ss = 0.0
+            suggestions = str(iq_raw.get("suggestions", "")).strip()
+            interview_quality = InterviewQuality(
+                coverage_ratio=cov,
+                follow_up_depth=fud,
+                structure_score=ss,
+                suggestions=suggestions,
+            )
+
         # --- Legacy fields (backward compat) ---
         summary_sections = []
         for section in overall_raw.get("summary_sections", []):
@@ -796,6 +922,9 @@ class ReportSynthesizer:
             narrative_evidence_refs=narrative_evidence_refs[:10],
             key_findings=key_findings[:10],
             suggested_dimensions=suggested_dimensions[:5],
+            recommendation=recommendation,
+            question_analysis=question_analysis,
+            interview_quality=interview_quality,
             summary_sections=summary_sections[:6],
             team_dynamics=TeamDynamics(highlights=highlights[:6], risks=risks[:6]),
         )
