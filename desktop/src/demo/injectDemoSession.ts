@@ -8,6 +8,14 @@
  */
 import demoResultV2 from './demo-result-v2.json';
 import weiYixinResultV2 from './wei-yixin-result-v2.json';
+import type { StoredSessionRecord } from '../types/stored-session';
+
+/** Minimal shape for reading per_person and transcript from demo JSON. */
+interface DemoResultV2 {
+  per_person?: Array<{ display_name?: string }>;
+  transcript?: Array<{ end_ms?: number }>;
+  [key: string]: unknown;
+}
 
 const DEMO_SESSION_ID = 'demo_session_full';
 const WEI_YIXIN_UPGRADE_KEY = 'ifb_wei_yixin_upgraded_v8';
@@ -23,10 +31,11 @@ function injectStandaloneDemo(): void {
     if (existing) return;
   } catch { /* continue */ }
 
-  const persons = (demoResultV2 as any).per_person || [];
-  const participants = persons.map((p: any) => p.display_name || 'Unknown');
-  const lastUtterance = (demoResultV2 as any).transcript?.slice(-1)[0];
-  const durationSec = lastUtterance ? Math.round(lastUtterance.end_ms / 1000) : 600;
+  const typedDemo = demoResultV2 as DemoResultV2;
+  const persons = typedDemo.per_person || [];
+  const participants = persons.map((p) => p.display_name || 'Unknown');
+  const lastUtterance = typedDemo.transcript?.slice(-1)[0];
+  const durationSec = lastUtterance?.end_ms ? Math.round(lastUtterance.end_ms / 1000) : 600;
 
   const sessionRecord = {
     id: DEMO_SESSION_ID,
@@ -40,7 +49,7 @@ function injectStandaloneDemo(): void {
 
   try {
     const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
-    if (!sessions.some((s: any) => s.id === DEMO_SESSION_ID)) {
+    if (!sessions.some((s: StoredSessionRecord) => s.id === DEMO_SESSION_ID)) {
       sessions.unshift(sessionRecord);
       localStorage.setItem('ifb_sessions', JSON.stringify(sessions));
     }
@@ -78,8 +87,8 @@ function upgradeWeiYixinSession(): void {
   } catch { /* continue */ }
 
   try {
-    const sessions: any[] = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
-    const weiYixin = sessions.find((s: any) =>
+    const sessions: StoredSessionRecord[] = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
+    const weiYixin = sessions.find((s: StoredSessionRecord) =>
       typeof s.name === 'string' &&
       (s.name.toLowerCase().includes('wei yixin') || s.name.includes('魏一新'))
     );
@@ -88,7 +97,7 @@ function upgradeWeiYixinSession(): void {
     const sessionId = weiYixin.id;
     const dataKey = `ifb_session_data_${sessionId}`;
 
-    let sessionData: any = {};
+    let sessionData: Record<string, unknown> = {};
     try {
       const stored = localStorage.getItem(dataKey);
       if (stored) sessionData = JSON.parse(stored);
@@ -103,7 +112,7 @@ function upgradeWeiYixinSession(): void {
     localStorage.setItem(dataKey, JSON.stringify(sessionData));
 
     // Mark session as finalized
-    const updated = sessions.map((s: any) =>
+    const updated = sessions.map((s: StoredSessionRecord) =>
       s.id === sessionId ? { ...s, status: 'finalized' } : s
     );
     localStorage.setItem('ifb_sessions', JSON.stringify(updated));

@@ -6,6 +6,7 @@ import { audioService } from '../services/AudioService';
 import { wsService } from '../services/WebSocketService';
 import { timerService } from '../services/TimerService';
 import { acsCaptionService } from '../services/ACSCaptionService';
+import type { StoredSessionRecord } from '../types/stored-session';
 
 export function useSessionOrchestrator() {
   const navigate = useNavigate();
@@ -15,14 +16,14 @@ export function useSessionOrchestrator() {
     try {
       const sessions = JSON.parse(localStorage.getItem('ifb_sessions') || '[]');
       const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-      const fresh = sessions.filter((s: any) => {
-        const created = new Date(s.date).getTime();
+      const fresh = sessions.filter((s: StoredSessionRecord) => {
+        const created = new Date(s.date || '').getTime();
         return !isNaN(created) && created > thirtyDaysAgo;
       });
       if (fresh.length < sessions.length) {
         // Remove stale session data entries
-        const freshIds = new Set(fresh.map((s: any) => s.id));
-        sessions.forEach((s: any) => {
+        const freshIds = new Set(fresh.map((s: StoredSessionRecord) => s.id));
+        sessions.forEach((s: StoredSessionRecord) => {
           if (!freshIds.has(s.id)) {
             localStorage.removeItem(`ifb_session_data_${s.id}`);
           }
