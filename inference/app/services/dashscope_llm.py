@@ -59,7 +59,7 @@ class DashScopeLLM:
                 len(system_prompt), len(user_prompt)
             )
             raise ValidationError(
-                f"dashscope report request failed: status={response.status_code} body={response.text[:500]}"
+                f"Report generation service temporarily unavailable (status={response.status_code})"
             )
 
         try:
