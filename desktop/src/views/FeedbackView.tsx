@@ -1813,35 +1813,46 @@ function FeedbackHeader({
 }) {
   const [copiedText, setCopiedText] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [exporting, setExporting] = useState<string | null>(null);
 
   const handleCopyText = useCallback(async () => {
-    const text = buildFullMarkdown(report, sessionNotes, sessionMemos);
+    setExporting('copy');
     try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // Clipboard API may fail in Electron -- fall back to execCommand
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
+      const text = buildFullMarkdown(report, sessionNotes, sessionMemos);
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Clipboard API may fail in Electron -- fall back to execCommand
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedText(true);
+      setTimeout(() => setCopiedText(false), 2000);
+    } finally {
+      setExporting(null);
     }
-    setCopiedText(true);
-    setTimeout(() => setCopiedText(false), 2000);
   }, [report, sessionNotes, sessionMemos]);
 
   const handleExportMarkdown = useCallback(() => {
-    const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
-    const blob = new Blob([md], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${report.session_name.replace(/\s+/g, '_')}_feedback.md`;
-    a.click();
-    URL.revokeObjectURL(url);
+    setExporting('markdown');
+    try {
+      const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${report.session_name.replace(/\s+/g, '_')}_feedback.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(null);
+    }
   }, [report, sessionNotes, sessionMemos]);
 
   const handleRegenerate = (mode?: 'full' | 'report-only') => {
@@ -1857,23 +1868,24 @@ function FeedbackHeader({
       return;
     }
 
-    const blocks: Array<{ type: string; text: { type: string; text: string } }> = [
-      { type: 'header', text: { type: 'plain_text', text: `Interview Report: ${report.session_name}` } },
-      { type: 'section', text: { type: 'mrkdwn', text: `*Date:* ${report.date} | *Duration:* ${report.durationLabel || '\u2014'} | *Mode:* ${report.mode}` } },
-    ];
-
-    if (report.overall.recommendation) {
-      const rec = report.overall.recommendation;
-      const label = rec.decision === 'recommend' ? 'RECOMMEND' : rec.decision === 'tentative' ? 'TENTATIVE' : 'NOT RECOMMEND';
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${label}* \u2014 ${rec.rationale}` } });
-    }
-
-    for (const person of report.persons) {
-      const scores = person.dimensions.map(d => `${d.label_zh || d.dimension}: ${d.score ?? '\u2014'}`).join(' | ');
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${person.person_name}:* ${scores}` } });
-    }
-
+    setExporting('slack');
     try {
+      const blocks: Array<{ type: string; text: { type: string; text: string } }> = [
+        { type: 'header', text: { type: 'plain_text', text: `Interview Report: ${report.session_name}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*Date:* ${report.date} | *Duration:* ${report.durationLabel || '\u2014'} | *Mode:* ${report.mode}` } },
+      ];
+
+      if (report.overall.recommendation) {
+        const rec = report.overall.recommendation;
+        const label = rec.decision === 'recommend' ? 'RECOMMEND' : rec.decision === 'tentative' ? 'TENTATIVE' : 'NOT RECOMMEND';
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${label}* \u2014 ${rec.rationale}` } });
+      }
+
+      for (const person of report.persons) {
+        const scores = person.dimensions.map(d => `${d.label_zh || d.dimension}: ${d.score ?? '\u2014'}`).join(' | ');
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${person.person_name}:* ${scores}` } });
+      }
+
       await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1881,6 +1893,8 @@ function FeedbackHeader({
       });
     } catch (err) {
       console.warn('Slack export failed:', err);
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -1921,31 +1935,37 @@ function FeedbackHeader({
         </div>
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <Button variant="secondary" size="sm" onClick={handleCopyText} className="transition-all duration-200">
+        <Button variant="secondary" size="sm" onClick={handleCopyText} disabled={!!exporting} className="transition-all duration-200">
           {copiedText ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-          {copiedText ? 'Copied' : 'Copy Text'}
+          {exporting === 'copy' ? 'Exporting\u2026' : copiedText ? 'Copied' : 'Copy Text'}
         </Button>
-        <Button variant="secondary" size="sm" onClick={handleExportMarkdown} className="transition-all duration-200">
+        <Button variant="secondary" size="sm" onClick={handleExportMarkdown} disabled={!!exporting} className="transition-all duration-200">
           <FileText className="w-3.5 h-3.5" />
-          Export Markdown
+          {exporting === 'markdown' ? 'Exporting\u2026' : 'Export Markdown'}
         </Button>
-        <Button variant="secondary" size="sm" onClick={() => {
-          const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
-          const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+        <Button variant="secondary" size="sm" disabled={!!exporting} onClick={() => {
+          setExporting('docx');
+          try {
+            const md = buildFullMarkdown(report, sessionNotes, sessionMemos);
+            const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
 <head><meta charset="utf-8"><style>body{font-family:Calibri,sans-serif;font-size:11pt;line-height:1.5}h1{font-size:18pt;color:#0D6A63}h2{font-size:14pt;color:#1A2B33;border-bottom:1px solid #E0D9CE;padding-bottom:4pt}h3{font-size:12pt;color:#566A77}table{border-collapse:collapse;width:100%}td,th{border:1px solid #E0D9CE;padding:4pt 8pt;font-size:10pt}th{background:#F6F2EA}blockquote{border-left:3px solid #0D6A63;padding-left:8pt;color:#566A77;margin:8pt 0}</style></head>
 <body>${markdownToSimpleHtml(md)}</body></html>`;
-          const blob = new Blob([html], { type: 'application/vnd.ms-word' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${report.session_name.replace(/[/\\?%*:|"<>\s]+/g, '_')}_feedback.doc`;
-          a.click();
-          URL.revokeObjectURL(url);
+            const blob = new Blob([html], { type: 'application/vnd.ms-word' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${report.session_name.replace(/[/\\?%*:|"<>\s]+/g, '_')}_feedback.doc`;
+            a.click();
+            URL.revokeObjectURL(url);
+          } finally {
+            setExporting(null);
+          }
         }} className="transition-all duration-200">
           <Download className="w-3.5 h-3.5" />
-          Export DOCX
+          {exporting === 'docx' ? 'Exporting\u2026' : 'Export DOCX'}
         </Button>
-        <Button variant="secondary" size="sm" onClick={async () => {
+        <Button variant="secondary" size="sm" disabled={!!exporting} onClick={async () => {
+          setExporting('pdf');
           try {
             const html = buildPrintHtml(report, sessionNotes, sessionMemos);
             const result = await window.desktopAPI.exportPDF({
@@ -1957,14 +1977,16 @@ function FeedbackHeader({
             }
           } catch (err) {
             console.warn('PDF export failed:', err);
+          } finally {
+            setExporting(null);
           }
         }} className="transition-all duration-200">
           <FileText className="w-3.5 h-3.5" />
-          Export PDF
+          {exporting === 'pdf' ? 'Exporting\u2026' : 'Export PDF'}
         </Button>
-        <Button variant="secondary" size="sm" onClick={handleExportSlack} className="transition-all duration-200">
+        <Button variant="secondary" size="sm" disabled={!!exporting} onClick={handleExportSlack} className="transition-all duration-200">
           <MessageSquare className="w-3.5 h-3.5" />
-          Share to Slack
+          {exporting === 'slack' ? 'Exporting\u2026' : 'Share to Slack'}
         </Button>
         <div className="w-px h-5 bg-border mx-1" />
         {onTranscriptToggle && (
