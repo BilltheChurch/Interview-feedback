@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -13,12 +15,16 @@ logger = logging.getLogger(__name__)
 # Module-level shared client for connection pooling across requests.
 # This avoids creating a new TCP connection + TLS handshake per LLM call.
 _shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
 
 
 def _get_shared_client(timeout: float) -> httpx.Client:
     global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.Client(timeout=timeout)
+    if _shared_client is not None and not _shared_client.is_closed:
+        return _shared_client
+    with _shared_client_lock:
+        if _shared_client is None or _shared_client.is_closed:
+            _shared_client = httpx.Client(timeout=timeout)
     return _shared_client
 
 
@@ -50,9 +56,36 @@ class DashScopeLLM:
 
         timeout_seconds = max(self.timeout_ms, 1000) / 1000
         client = _get_shared_client(timeout_seconds)
-        response = client.post(self.base_url, headers=self._headers(), json=payload)
 
-        if response.status_code >= 400:
+        retryable_codes = {429, 502, 503}
+        max_retries = 2
+        last_status = 0
+        last_body = ""
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.post(self.base_url, headers=self._headers(), json=payload)
+            except httpx.TimeoutException:
+                if attempt < max_retries:
+                    time.sleep(min(2 ** attempt * 0.5, 5.0))
+                    continue
+                raise ValidationError("Report generation service timed out after retries")
+
+            last_status = response.status_code
+            last_body = response.text[:500]
+
+            if response.status_code < 400:
+                break
+
+            if response.status_code in retryable_codes and attempt < max_retries:
+                logger.warning(
+                    "dashscope %s retryable error: status=%s attempt=%d/%d",
+                    self.model_name, response.status_code, attempt + 1, max_retries + 1
+                )
+                time.sleep(min(2 ** attempt * 0.5, 5.0))
+                continue
+
+            # Non-retryable error or exhausted retries
             logger.error(
                 "dashscope %s failed: status=%s body=%s prompt_len=sys:%d+user:%d",
                 self.model_name, response.status_code, response.text[:500],

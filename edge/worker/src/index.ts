@@ -1415,7 +1415,8 @@ export default {
         sessionId = safeSessionId(rawSessionId);
         streamRole = parseStreamRole(rawRole, "mixed");
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("ws-ingest-v2 session/role parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       return proxyWebSocketToDO(request, env, sessionId, streamRole);
@@ -1435,7 +1436,8 @@ export default {
       try {
         sessionId = safeSessionId(rawSessionId);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("ws-ingest session parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       return proxyWebSocketToDO(request, env, sessionId, "mixed");
@@ -1448,7 +1450,8 @@ export default {
       try {
         sessionId = safeSessionId(rawSessionId);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("enrollment session parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       const action = `enrollment-${enrollAction}`;
@@ -1474,7 +1477,8 @@ export default {
       try {
         sessionId = safeSessionId(rawSessionId);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("finalize-status session parse error:", error);
+        return badRequest("Request processing failed");
       }
       if (request.method !== "GET") {
         return jsonResponse({ detail: "method not allowed" }, 405);
@@ -1489,7 +1493,8 @@ export default {
       try {
         sessionId = safeSessionId(rawSessionId);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("tier2-status session parse error:", error);
+        return badRequest("Request processing failed");
       }
       if (request.method !== "GET") {
         return jsonResponse({ detail: "method not allowed" }, 405);
@@ -1540,7 +1545,8 @@ export default {
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      return badRequest((error as Error).message);
+      console.error("session action parse error:", error);
+      return badRequest("Request processing failed");
     }
 
     if (action === "resolve" && request.method !== "POST") {
@@ -1766,7 +1772,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const run = this.mutationQueue.then(fn);
     this.mutationQueue = run.then(
       () => undefined,
-      () => undefined
+      (err) => {
+        console.error("enqueueMutation: queued operation failed:", err);
+        return undefined;
+      }
     );
     return run;
   }
@@ -4731,6 +4740,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
     let finalizeBackendUsed: FinalizeV2Status["backend_used"] = "primary";
     let finalizeDegraded = false;
 
+    // Global timeout guard — abort all operations if finalization exceeds budget
+    const globalTimeoutMs = this.finalizeTimeoutMs();
+    const abortController = new AbortController();
+    const globalTimer = setTimeout(() => {
+      abortController.abort(new Error(`Finalization exceeded global timeout of ${globalTimeoutMs}ms`));
+    }, globalTimeoutMs);
+
     // Rehydrate captionSource from DO storage in case DO was evicted
     if (this.captionSource === "none") {
       const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
@@ -4771,6 +4787,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
           this.captionBuffer = stored;
           console.log(`[finalize-v2] restored ${stored.length} captions from DO storage`);
         }
+      }
+
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
       }
 
       // ── report-only mode: skip audio stages, reload existing transcript from R2 ──
@@ -5112,6 +5132,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         finalizeDegraded = true;
       }
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "replay_gap", progress: 30 });
       await this.ensureFinalizeJobActive(jobId);
       try {
@@ -5129,6 +5153,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.refreshAsrStreamMetrics(sessionId, "teacher");
       await this.refreshAsrStreamMetrics(sessionId, "students");
       } // end if (!useCaptions) — drain/replay/close
+
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
 
       // ── Windowed ASR for local-whisper (drain/replay only applies to FunASR realtime) ──
       // When using local-whisper, audio is NOT streamed to a realtime ASR WebSocket during
@@ -5479,6 +5507,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await this.storeSpeakerLogs(speakerLogs);
       } // end if/else useCaptions reconcile
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
       const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
 
@@ -5525,6 +5557,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         finalizeDegraded = true;
       }
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 70 });
       await this.ensureFinalizeJobActive(jobId);
       const eventsPayload = {
@@ -5552,6 +5588,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         degraded: finalizeDegraded,
         backend_used: finalizeBackendUsed
       });
+
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
 
       await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
       await this.ensureFinalizeJobActive(jobId);
@@ -5782,6 +5822,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         unknownRatio: computeUnknownRatio(transcript),
       });
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
       await this.ensureFinalizeJobActive(jobId);
       const finalizedAt = this.currentIsoTs();
@@ -5936,6 +5980,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       cache.ready = cache.quality_gate_passed;
       await this.storeFeedbackCache(cache);
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, {
         status: "succeeded",
         stage: "persist",
@@ -5995,6 +6043,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         });
       }
     } finally {
+      clearTimeout(globalTimer);
       await this.setFinalizeLock(false);
     }
   }
@@ -6815,7 +6864,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(headerRole, "mixed");
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("ingest-ws stream role parse error:", error);
+        return badRequest("Request processing failed");
       }
       return this.handleWebSocketRequest(request, sessionId, streamRole);
     }
@@ -6896,7 +6946,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<SessionConfigRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("config request parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       return this.enqueueMutation(async () => {
@@ -6990,7 +7041,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<EnrollmentStartRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("enrollment-start request parse error:", error);
+        return badRequest("Request processing failed");
       }
       return this.enqueueMutation(async () => {
         const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
@@ -7075,7 +7127,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<typeof payload>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("enrollment-profiles request parse error:", error);
+        return badRequest("Request processing failed");
       }
       if (!Array.isArray(payload.participant_profiles) || payload.participant_profiles.length === 0) {
         return badRequest("participant_profiles must be a non-empty array");
@@ -7129,7 +7182,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<Record<string, unknown>>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("memos request parse error:", error);
+        return badRequest("Request processing failed");
       }
       return this.enqueueMutation(async () => {
         const nowMs = Date.now();
@@ -7139,7 +7193,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         try {
           item = parseMemoPayload(payload, { memoId, createdAtMs: nowMs });
         } catch (error) {
-          return badRequest((error as Error).message);
+          console.error("memos payload parse error:", error);
+          return badRequest("Request processing failed");
         }
         memos.push(item);
         await this.storeMemos(memos);
@@ -7228,7 +7283,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<FeedbackRegenerateClaimRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("feedback-regenerate-claim request parse error:", error);
+        return badRequest("Request processing failed");
       }
       const personKey = String(payload.person_key || "").trim();
       const claimType = payload.claim_type;
@@ -7385,7 +7441,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<FeedbackClaimEvidenceRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("feedback-claim-evidence request parse error:", error);
+        return badRequest("Request processing failed");
       }
       const personKey = String(payload.person_key || "").trim();
       const claimType = payload.claim_type;
@@ -7515,7 +7572,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<Record<string, unknown>>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("speaker-logs request parse error:", error);
+        return badRequest("Request processing failed");
       }
       return this.enqueueMutation(async () => {
         const now = this.currentIsoTs();
@@ -7524,7 +7582,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         try {
           parsed = parseSpeakerLogsPayload(payload, now);
         } catch (error) {
-          return badRequest((error as Error).message);
+          console.error("speaker-logs payload parse error:", error);
+          return badRequest("Request processing failed");
         }
         const merged = mergeSpeakerLogs(current, parsed);
         await this.storeSpeakerLogs(merged);
@@ -7583,7 +7642,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<ClusterMapRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("cluster-map request parse error:", error);
+        return badRequest("Request processing failed");
       }
       const streamRole = parseStreamRole(payload.stream_role ?? "students", "students");
       if (streamRole !== "students") {
@@ -7719,7 +7779,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         try {
           filteredRole = parseStreamRole(streamRoleRaw, "mixed");
         } catch (error) {
-          return badRequest((error as Error).message);
+          console.error("events stream role parse error:", error);
+          return badRequest("Request processing failed");
         }
       }
       const urlLimit = Number(url.searchParams.get("limit") ?? "100");
@@ -7746,7 +7807,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("utterances stream role parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       const view = String(url.searchParams.get("view") ?? "raw").trim().toLowerCase();
@@ -7790,7 +7852,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("asr-run stream role parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       const queryMax = Number(url.searchParams.get("max_windows") ?? "0");
@@ -7808,7 +7871,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("asr-reset stream role parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       return this.enqueueMutation(async () => {
@@ -7882,7 +7946,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("resolve stream role parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       const idempotencyKey = request.headers.get("x-idempotency-key")?.trim() ?? "";
@@ -7898,7 +7963,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<ResolveRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("resolve request parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       if (!payload?.audio?.content_b64 || !payload?.audio?.format) {
@@ -7924,7 +7990,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
           resolveWarnings = resolveCall.warnings;
           resolveTimeline = resolveCall.timeline;
         } catch (error) {
-          return jsonResponse({ detail: `inference request failed: ${(error as Error).message}` }, 502);
+          console.error(`inference resolve failed session=${sessionId}:`, error);
+          return jsonResponse({ detail: "Speaker resolution temporarily unavailable" }, 502);
         }
 
         const mergedState = normalizeSessionState({
@@ -7976,7 +8043,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<FinalizeRequest>(request);
       } catch (error) {
-        return badRequest((error as Error).message);
+        console.error("finalize request parse error:", error);
+        return badRequest("Request processing failed");
       }
 
       const version = String(url.searchParams.get("version") ?? "v1").trim().toLowerCase();
