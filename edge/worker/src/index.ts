@@ -682,6 +682,11 @@ function getErrorMessage(err: unknown): string {
   return String(err);
 }
 
+/** Calculate total transcript duration from the last utterance's end_ms. */
+function calcTranscriptDurationMs(transcript: Array<{ end_ms: number }>): number {
+  return transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+}
+
 function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(payload), {
     status,
@@ -4893,7 +4898,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 75 });
           await this.ensureFinalizeJobActive(jobId);
 
-          const audioDurationMs = transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+          const audioDurationMs = calcTranscriptDurationMs(transcript);
           const statsObservations = generateStatsObservations(stats, audioDurationMs);
           const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats });
           let finalOverall = memoFirstReport.overall;
@@ -5541,7 +5546,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       evidence = [...evidence, ...enrichedEvidence];
 
       // ── Generate stats observations for LLM context ──
-      const audioDurationMs = transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
+      const audioDurationMs = calcTranscriptDurationMs(transcript);
       const statsObservations = generateStatsObservations(stats, audioDurationMs);
 
       // Keep legacy evidence + memo-first as fallback baseline
@@ -6353,7 +6358,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       evidence = [...evidence, ...tier2EnrichedEvidence];
 
       // ── Generate stats observations for LLM context ──
-      const tier2AudioDurationMs = finalTranscript.length > 0 ? Math.max(...finalTranscript.map(u => u.end_ms)) : 0;
+      const tier2AudioDurationMs = calcTranscriptDurationMs(finalTranscript);
       const tier2StatsObservations = generateStatsObservations(mergedStats, tier2AudioDurationMs);
 
       const locale = getSessionLocale(state, this.env);
