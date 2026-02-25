@@ -1,3 +1,5 @@
+import DOMPurify from 'dompurify';
+
 /**
  * Sanitize user input before sending over IPC or WebSocket.
  * Strips control characters and trims whitespace.
@@ -55,18 +57,5 @@ export function escapeHtml(str: string): string {
  * Used for rendering TipTap notes from localStorage.
  */
 export function sanitizeHtml(html: string): string {
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  // Remove dangerous elements
-  for (const tag of ['script', 'iframe', 'object', 'embed', 'form', 'style']) {
-    doc.querySelectorAll(tag).forEach(el => el.remove());
-  }
-  // Remove dangerous attributes
-  doc.querySelectorAll('*').forEach(el => {
-    for (const attr of Array.from(el.attributes)) {
-      if (attr.name.startsWith('on') || attr.value.trim().toLowerCase().startsWith('javascript:')) {
-        el.removeAttribute(attr.name);
-      }
-    }
-  });
-  return doc.body.innerHTML;
+  return DOMPurify.sanitize(html);
 }
