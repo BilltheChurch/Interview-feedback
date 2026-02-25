@@ -4737,6 +4737,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
     let finalizeBackendUsed: FinalizeV2Status["backend_used"] = "primary";
     let finalizeDegraded = false;
 
+    // Global timeout guard — abort all operations if finalization exceeds budget
+    const globalTimeoutMs = this.finalizeTimeoutMs();
+    const abortController = new AbortController();
+    const globalTimer = setTimeout(() => {
+      abortController.abort(new Error(`Finalization exceeded global timeout of ${globalTimeoutMs}ms`));
+    }, globalTimeoutMs);
+
     // Rehydrate captionSource from DO storage in case DO was evicted
     if (this.captionSource === "none") {
       const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
@@ -4777,6 +4784,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
           this.captionBuffer = stored;
           console.log(`[finalize-v2] restored ${stored.length} captions from DO storage`);
         }
+      }
+
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
       }
 
       // ── report-only mode: skip audio stages, reload existing transcript from R2 ──
@@ -5118,6 +5129,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         finalizeDegraded = true;
       }
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "replay_gap", progress: 30 });
       await this.ensureFinalizeJobActive(jobId);
       try {
@@ -5135,6 +5150,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.refreshAsrStreamMetrics(sessionId, "teacher");
       await this.refreshAsrStreamMetrics(sessionId, "students");
       } // end if (!useCaptions) — drain/replay/close
+
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
 
       // ── Windowed ASR for local-whisper (drain/replay only applies to FunASR realtime) ──
       // When using local-whisper, audio is NOT streamed to a realtime ASR WebSocket during
@@ -5485,6 +5504,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await this.storeSpeakerLogs(speakerLogs);
       } // end if/else useCaptions reconcile
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
       const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
 
@@ -5531,6 +5554,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         finalizeDegraded = true;
       }
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 70 });
       await this.ensureFinalizeJobActive(jobId);
       const eventsPayload = {
@@ -5558,6 +5585,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         degraded: finalizeDegraded,
         backend_used: finalizeBackendUsed
       });
+
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
 
       await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
       await this.ensureFinalizeJobActive(jobId);
@@ -5788,6 +5819,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         unknownRatio: computeUnknownRatio(transcript),
       });
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
       await this.ensureFinalizeJobActive(jobId);
       const finalizedAt = this.currentIsoTs();
@@ -5942,6 +5977,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       cache.ready = cache.quality_gate_passed;
       await this.storeFeedbackCache(cache);
 
+      if (abortController.signal.aborted) {
+        throw new Error("Finalization aborted: global timeout exceeded");
+      }
+
       await this.updateFinalizeV2Status(jobId, {
         status: "succeeded",
         stage: "persist",
@@ -6001,6 +6040,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         });
       }
     } finally {
+      clearTimeout(globalTimer);
       await this.setFinalizeLock(false);
     }
   }
