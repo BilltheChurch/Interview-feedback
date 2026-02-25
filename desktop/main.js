@@ -1013,6 +1013,63 @@ function registerIpcHandlers() {
       return { ok: false, error: err.message };
     }
   });
+
+  // ── Export PDF ────────────────────────────────
+  // Uses a hidden offscreen BrowserWindow to render print-optimized HTML,
+  // so the main UI is never disturbed and PDF pagination is clean.
+  ipcMain.handle('export:printToPDF', async (_event, options) => {
+    if (!mainWindow) throw new Error('No main window');
+
+    const htmlContent = options?.html || '';
+    const defaultName = (options?.sessionName || 'feedback-report').replace(/[/\\?%*:|"<>]/g, '_');
+
+    // Ask where to save first, so user isn't waiting during render
+    const { filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export PDF',
+      defaultPath: `${defaultName}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (!filePath) return { success: false };
+
+    // Write HTML to temp file (avoids Chromium 2MB data-URL limit, especially for CJK)
+    const tmpHtmlPath = path.join(app.getPath('temp'), `ifb-pdf-export-${Date.now()}.html`);
+    fs.writeFileSync(tmpHtmlPath, htmlContent, 'utf-8');
+
+    // Create hidden offscreen window with explicit security hardening
+    const pdfWindow = new BrowserWindow({
+      width: 800,
+      height: 600,
+      show: false,
+      webPreferences: {
+        offscreen: true,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+      },
+    });
+
+    try {
+      await pdfWindow.loadFile(tmpHtmlPath);
+      // Wait for fonts to be ready (replaces fragile fixed 500ms timeout)
+      await pdfWindow.webContents.executeJavaScript(
+        'document.fonts.ready.then(() => true)'
+      );
+
+      const pdfData = await pdfWindow.webContents.printToPDF({
+        pageSize: 'A4',
+        printBackground: true,
+        preferCSSPageSize: false,
+        margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+      });
+
+      fs.writeFileSync(filePath, pdfData);
+      return { success: true, path: filePath };
+    } finally {
+      pdfWindow.destroy();
+      try { fs.unlinkSync(tmpHtmlPath); } catch { /* temp file cleanup best-effort */ }
+    }
+  });
 }
 
 app.whenReady().then(() => {
