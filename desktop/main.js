@@ -456,8 +456,33 @@ function registerIpcHandlers() {
       throw new Error('api request url is required');
     }
 
+    // Security: validate URL against allowed base URLs to prevent SSRF
+    const allowedBaseUrls = [
+      process.env.WORKER_BASE_URL,
+      process.env.WORKER_BASE_URL_SECONDARY,
+      process.env.INFERENCE_BASE_URL,
+    ].filter(Boolean);
+
+    let urlAllowed = false;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        throw new Error(`Blocked protocol: ${parsed.protocol}`);
+      }
+      if (allowedBaseUrls.length === 0) {
+        urlAllowed = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+      } else {
+        urlAllowed = allowedBaseUrls.some(base => url.startsWith(base));
+      }
+    } catch (e) {
+      if (e.message?.startsWith('Blocked protocol')) throw e;
+      throw new Error('api:request blocked: invalid URL');
+    }
+    if (!urlAllowed) {
+      throw new Error('api:request blocked: URL not in allowlist');
+    }
+
     const headers = payload.headers && typeof payload.headers === 'object' ? { ...payload.headers } : {};
-    // Inject x-api-key when WORKER_API_KEY is set
     const apiKey = process.env.WORKER_API_KEY;
     if (apiKey && !headers['x-api-key']) {
       headers['x-api-key'] = apiKey;
