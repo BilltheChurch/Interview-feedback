@@ -163,8 +163,15 @@ async def handle_sv_backend_error(_: Request, exc: SVBackendError) -> JSONRespon
     return JSONResponse(status_code=500, content=ErrorResponse(detail=str(exc)).model_dump())
 
 
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
+@app.get("/health")
+async def health():
+    """Minimal health check — no auth required."""
+    return {"status": "ok", "app_name": settings.app_name}
+
+
+@app.get("/health/detailed", response_model=HealthResponse)
+async def health_detailed() -> HealthResponse:
+    """Detailed diagnostics — requires authentication."""
     sv_health = runtime.sv_backend.health()
     return HealthResponse(
         app_name=settings.app_name,
