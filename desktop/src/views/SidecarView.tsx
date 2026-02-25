@@ -30,6 +30,7 @@ import { useSessionStore } from '../stores/sessionStore';
 import type { MemoType, StageArchive, AcsStatus } from '../stores/sessionStore';
 import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
 import { CaptionPanel } from '../components/CaptionPanel';
+import { sanitizeHtml } from '../lib/sanitize';
 
 /* ─── Types ─────────────────────────────────── */
 
@@ -684,7 +685,7 @@ function StageTimelineEntry({
               {archive.freeformHtml ? (
                 <div
                   className="text-sm text-ink-secondary bg-surface/50 rounded-lg px-2.5 py-1.5 leading-relaxed prose prose-sm max-w-none memo-highlight-view"
-                  dangerouslySetInnerHTML={{ __html: archive.freeformHtml }}
+                  dangerouslySetInnerHTML={{ __html: sanitizeHtml(archive.freeformHtml) }}
                 />
               ) : archive.freeformText.trim() ? (
                 <p className="text-sm text-ink-secondary bg-surface/50 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap leading-relaxed">
