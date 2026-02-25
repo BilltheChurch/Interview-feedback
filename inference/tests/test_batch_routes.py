@@ -5,6 +5,7 @@ Tests use FastAPI TestClient with mocked Whisper and pyannote services.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -170,13 +171,15 @@ def test_merge_transcript_diarization():
 
 
 @pytest.fixture()
-def _tmp_audio():
-    """Create a temp audio file for testing."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(b"\x00" * 1000)
-        path = f.name
-    yield path
-    Path(path).unlink(missing_ok=True)
+def _tmp_audio(monkeypatch):
+    """Create a temp audio file for testing inside the allowed directory."""
+    tmp_dir = tempfile.mkdtemp()
+    monkeypatch.setenv("AUDIO_UPLOAD_DIR", tmp_dir)
+    audio_path = Path(tmp_dir) / "test_audio.wav"
+    audio_path.write_bytes(b"\x00" * 1000)
+    yield str(audio_path)
+    audio_path.unlink(missing_ok=True)
+    Path(tmp_dir).rmdir()
 
 
 def _no_auth():
@@ -273,18 +276,34 @@ def test_batch_process_endpoint(_tmp_audio: str):
     assert data["diarization_time_ms"] >= 0
 
 
-def test_batch_transcribe_file_not_found():
+def test_batch_transcribe_file_not_found(monkeypatch, tmp_path):
     """Test that a missing local file returns 400."""
+    monkeypatch.setenv("AUDIO_UPLOAD_DIR", str(tmp_path))
     from app.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
     with _no_auth():
         resp = client.post(
             "/batch/transcribe",
-            json={"audio_url": "/nonexistent/audio.wav"},
+            json={"audio_url": str(tmp_path / "nonexistent.wav")},
         )
     assert resp.status_code == 400
     assert "not found" in resp.json()["detail"]
+
+
+def test_batch_transcribe_path_traversal_blocked(monkeypatch, tmp_path):
+    """Test that path traversal outside allowed directory is blocked."""
+    monkeypatch.setenv("AUDIO_UPLOAD_DIR", str(tmp_path / "allowed"))
+    from app.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with _no_auth():
+        resp = client.post(
+            "/batch/transcribe",
+            json={"audio_url": "/etc/passwd"},
+        )
+    assert resp.status_code == 400
+    assert "not in allowed directory" in resp.json()["detail"]
 
 
 def test_batch_transcribe_422_for_empty_body():
