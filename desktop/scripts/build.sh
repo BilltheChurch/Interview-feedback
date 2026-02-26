@@ -8,6 +8,12 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
+# Backup existing .env if present
+if [ -f .env ]; then
+  cp .env .env.dev-backup
+  echo "Backed up .env → .env.dev-backup"
+fi
+
 # Select .env variant
 if [ "$VARIANT" = "production" ]; then
   echo "Building COMMERCIAL variant..."
@@ -19,6 +25,15 @@ else
   echo "Usage: build.sh [opensource|production] [arm64|x64]"
   exit 1
 fi
+
+# Restore .env after build completes (or on error)
+restore_env() {
+  if [ -f .env.dev-backup ]; then
+    mv .env.dev-backup .env
+    echo "Restored .env from backup"
+  fi
+}
+trap restore_env EXIT
 
 # Build React app
 echo "Building React app..."
