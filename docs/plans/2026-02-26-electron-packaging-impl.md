@@ -779,13 +779,20 @@ Expected: GitHub Actions builds both DMGs, creates draft Release.
 
 ## Summary
 
-| Task | Component | Change |
-|------|-----------|--------|
-| 1 | build config | Create entitlements.mac.plist |
-| 2 | build config | Update electron-builder.yml (split arch, icon, .env resource) |
-| 3 | main.js | Fix .env loading for packaged app |
-| 4 | audioPipeline.js | Fix ffmpeg/ffprobe path for packaged app |
-| 5 | env config | Create .env.opensource + .env.production |
-| 6 | package.json | Add build scripts + build.sh |
-| 7 | CI/CD | GitHub Actions release workflow |
-| 8 | sidecar | On-demand pyannote-rs download |
+| Task | Component | Change | Status |
+|------|-----------|--------|--------|
+| 1 | build config | Create entitlements.mac.plist | ✅ Done |
+| 2 | build config | Update electron-builder.yml (split arch, icon, .env resource) | ✅ Done |
+| 3 | main.js | Fix .env loading for packaged app | ✅ Done |
+| 4 | audioPipeline.js | Fix ffmpeg/ffprobe path for packaged app | ✅ Done |
+| 5 | env config | Create .env.opensource + .env.production | ✅ Done |
+| 6 | package.json | Add build scripts + build.sh | ✅ Done |
+| 7 | CI/CD | GitHub Actions release workflow | ✅ Done |
+| 8 | sidecar | On-demand pyannote-rs download | ✅ Done |
+
+## Implementation Notes (2026-02-26)
+
+- **Build verified:** Both `Chorus-0.1.0-arm64.dmg` (304MB) and `Chorus-0.1.0-x64.dmg` (312MB) built successfully
+- **Code signing:** Auto-signed with local Apple Development certificate (notarization skipped as configured)
+- **Fix applied:** Moved `electron` from `dependencies` to `devDependencies` (electron-builder requirement)
+- **Pre-existing issue:** `dompurify` missing from node_modules required `npm install` before build; not related to packaging changes
