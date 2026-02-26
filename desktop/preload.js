@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   diarizationStop: () => ipcRenderer.invoke('diarization:stop'),
   diarizationGetStatus: () => ipcRenderer.invoke('diarization:getStatus'),
   diarizationPushChunk: (payload) => ipcRenderer.invoke('diarization:pushChunk', payload),
+  diarizationDownload: () => ipcRenderer.invoke('diarization:download'),
+  onDiarizationDownloadProgress: (callback) => {
+    ipcRenderer.on('diarization:download-progress', (_event, data) => callback(data));
+  },
   attachToTeams: () => ipcRenderer.invoke('window:attachToTeams'),
   detachFromTeams: () => ipcRenderer.invoke('window:detachFromTeams'),
   getAttachStatus: () => ipcRenderer.invoke('window:getAttachStatus'),

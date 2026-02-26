@@ -15,6 +15,92 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const https = require('node:https');
+const { pipeline } = require('node:stream/promises');
+const { createWriteStream } = require('node:fs');
+
+const SIDECAR_VERSION = 'v0.1.0';
+const SIDECAR_BASE_URL = `https://github.com/BilltheChurch/Interview-feedback/releases/download/${SIDECAR_VERSION}`;
+
+function getSidecarDir() {
+  try {
+    const { app } = require('electron');
+    return path.join(app.getPath('userData'), 'bin');
+  } catch {
+    return path.join(require('node:os').homedir(), '.chorus', 'bin');
+  }
+}
+
+function getSidecarBinaryPath() {
+  return path.join(getSidecarDir(), 'pyannote-rs');
+}
+
+function getSidecarModelsDir() {
+  return path.join(getSidecarDir(), 'models');
+}
+
+async function downloadFile(url, destPath, onProgress) {
+  const dir = path.dirname(destPath);
+  await fs.promises.mkdir(dir, { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, { headers: { 'User-Agent': 'Chorus-Desktop' } }, (response) => {
+      // Follow redirects (GitHub releases redirect to S3)
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        return downloadFile(response.headers.location, destPath, onProgress).then(resolve, reject);
+      }
+      if (response.statusCode !== 200) {
+        return reject(new Error(`Download failed: HTTP ${response.statusCode}`));
+      }
+
+      const totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+      let downloadedBytes = 0;
+      const fileStream = createWriteStream(destPath);
+
+      response.on('data', (chunk) => {
+        downloadedBytes += chunk.length;
+        if (onProgress && totalBytes > 0) {
+          onProgress(downloadedBytes / totalBytes);
+        }
+      });
+
+      pipeline(response, fileStream).then(resolve, reject);
+    });
+    request.on('error', reject);
+  });
+}
+
+async function ensureSidecarAvailable(log, onProgress) {
+  const binaryPath = getSidecarBinaryPath();
+  if (fs.existsSync(binaryPath)) {
+    return binaryPath;
+  }
+
+  const modelsDir = getSidecarModelsDir();
+  const arch = process.arch; // arm64 or x64
+
+  log(`[sidecar] downloading pyannote-rs for ${arch}...`);
+
+  // Download binary
+  const binaryUrl = `${SIDECAR_BASE_URL}/pyannote-rs-${arch}`;
+  await downloadFile(binaryUrl, binaryPath, (p) => onProgress?.('binary', p));
+  await fs.promises.chmod(binaryPath, 0o755);
+
+  // Download models
+  const models = ['segmentation-3.0.onnx', 'wespeaker_en_voxceleb_CAM++.onnx'];
+  for (const model of models) {
+    const modelPath = path.join(modelsDir, model);
+    if (!fs.existsSync(modelPath)) {
+      log(`[sidecar] downloading model ${model}...`);
+      const modelUrl = `${SIDECAR_BASE_URL}/${model}`;
+      await downloadFile(modelUrl, modelPath, (p) => onProgress?.(`model:${model}`, p));
+    }
+  }
+
+  log(`[sidecar] download complete: ${binaryPath}`);
+  return binaryPath;
+}
+
 function createDiarizationSidecar({ appRoot, log }) {
   const state = {
     process: null,
@@ -69,12 +155,28 @@ function createDiarizationSidecar({ appRoot, log }) {
       state.restartTimer = null;
     }
 
-    const binaryPath =
+    // Resolve binary: explicit path > env var > user data dir > bundled fallback
+    let binaryPath =
       options.binaryPath ||
       process.env.PYANNOTE_RS_BIN ||
-      path.join(appRoot, 'bin', 'pyannote-rs');
-    if (!fs.existsSync(binaryPath)) {
-      throw new Error(`pyannote sidecar binary not found: ${binaryPath}`);
+      null;
+
+    if (!binaryPath) {
+      // Check user data directory first (on-demand downloaded)
+      const userDataPath = getSidecarBinaryPath();
+      if (fs.existsSync(userDataPath)) {
+        binaryPath = userDataPath;
+      } else {
+        // Check bundled path (dev mode)
+        const bundledPath = path.join(appRoot, 'bin', 'pyannote-rs');
+        if (fs.existsSync(bundledPath)) {
+          binaryPath = bundledPath;
+        } else {
+          throw new Error(
+            'pyannote-rs binary not found. Use diarizationSidecar.download() to install it.'
+          );
+        }
+      }
     }
 
     state.host = typeof options.host === 'string' && options.host ? options.host : '127.0.0.1';
@@ -255,7 +357,8 @@ function createDiarizationSidecar({ appRoot, log }) {
     stop,
     status,
     health,
-    pushWindow
+    pushWindow,
+    download: (onProgress) => ensureSidecarAvailable(log, onProgress)
   };
 }
 
