@@ -76,7 +76,7 @@ def test_constructor_defaults():
     with patch("app.services.diarize_full.detect_device", return_value="cpu"):
         d = PyannoteFullDiarizer(hf_token="hf_test")
         assert d.device == "cpu"
-        assert d.model_id == "pyannote/speaker-diarization-3.1"
+        assert d.model_id == "pyannote/speaker-diarization-community-1"
 
 
 def test_constructor_explicit_device():
@@ -343,3 +343,77 @@ def test_diarize_result_dataclass():
 def test_speaker_segment_defaults():
     s = SpeakerSegment(id="seg_0000", speaker_id="S0", start_ms=0, end_ms=100)
     assert s.confidence == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Schema correctness tests
+# ---------------------------------------------------------------------------
+
+
+class TestDiarizeResultSchema:
+    def test_result_has_required_fields(self):
+        result = DiarizeResult(
+            segments=[
+                SpeakerSegment(id="seg_0000", speaker_id="SPEAKER_00", start_ms=0, end_ms=5000),
+                SpeakerSegment(id="seg_0001", speaker_id="SPEAKER_01", start_ms=5000, end_ms=10000),
+            ],
+            embeddings={"SPEAKER_00": [0.1] * 256, "SPEAKER_01": [0.2] * 256},
+            num_speakers=2,
+            duration_ms=10000,
+            processing_time_ms=500,
+        )
+        assert len(result.segments) == 2
+        assert len(result.embeddings) == 2
+        assert result.num_speakers == 2
+        assert result.segments[0].speaker_id == "SPEAKER_00"
+
+    def test_segment_fields(self):
+        seg = SpeakerSegment(id="seg_0", speaker_id="SPEAKER_00", start_ms=100, end_ms=5000, confidence=0.95)
+        assert seg.id == "seg_0"
+        assert seg.speaker_id == "SPEAKER_00"
+        assert seg.start_ms == 100
+        assert seg.end_ms == 5000
+        assert seg.confidence == 0.95
+
+    def test_empty_segments(self):
+        result = DiarizeResult(
+            segments=[],
+            embeddings={},
+            num_speakers=0,
+            duration_ms=0,
+            processing_time_ms=100,
+        )
+        assert len(result.segments) == 0
+        assert result.num_speakers == 0
+
+    def test_global_clustering_done_default(self):
+        result = DiarizeResult(
+            segments=[], embeddings={}, num_speakers=0, duration_ms=0, processing_time_ms=0,
+        )
+        assert result.global_clustering_done is True
+
+
+class TestDiarizerInit:
+    def test_default_model_is_community_1(self):
+        d = PyannoteFullDiarizer(hf_token="test_token")
+        assert "community-1" in d._model_id
+
+    def test_custom_model_id(self):
+        d = PyannoteFullDiarizer(model_id="pyannote/speaker-diarization-3.1", hf_token="test")
+        assert d._model_id == "pyannote/speaker-diarization-3.1"
+
+    def test_missing_hf_token_stored(self):
+        d = PyannoteFullDiarizer(hf_token="")
+        assert d._hf_token == ""
+
+    def test_device_auto_detection(self):
+        d = PyannoteFullDiarizer(hf_token="test")
+        # Should detect a valid device type
+        assert d._device in ("cpu", "cuda", "mps", "rocm")
+
+
+class TestDiarizerFileNotFound:
+    def test_diarize_nonexistent_file(self):
+        d = PyannoteFullDiarizer(hf_token="test_token")
+        with pytest.raises(FileNotFoundError):
+            d.diarize("/nonexistent/path/audio.wav")

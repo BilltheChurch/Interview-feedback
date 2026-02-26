@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     rate_limit_requests: int = Field(default=60, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
 
-    enable_diarization: bool = Field(default=False, alias="ENABLE_DIARIZATION")
+    enable_diarization: bool = Field(default=True, alias="ENABLE_DIARIZATION")
     segmenter_backend: Literal["vad", "diarization"] = Field(default="vad", alias="SEGMENTER_BACKEND")
     modelscope_cache: str = Field(default="~/.cache/modelscope", alias="MODELSCOPE_CACHE")
     sv_device: str = Field(default="auto", alias="SV_DEVICE")
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     whisper_model_size: str = Field(default="large-v3", alias="WHISPER_MODEL_SIZE")
     whisper_device: str = Field(default="auto", alias="WHISPER_DEVICE")
     pyannote_model_id: str = Field(
-        default="pyannote/speaker-diarization-3.1", alias="PYANNOTE_MODEL_ID"
+        default="pyannote/speaker-diarization-community-1", alias="PYANNOTE_MODEL_ID"
     )
     pyannote_embedding_model_id: str = Field(
         default="pyannote/wespeaker-voxceleb-resnet34-LM", alias="PYANNOTE_EMBEDDING_MODEL_ID"

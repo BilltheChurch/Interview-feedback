@@ -78,8 +78,53 @@ _DOWNLOAD_TIMEOUT_S = 120
 async def _resolve_audio(audio_url: str) -> str:
     """Download audio from URL to a temp file, or return local path if it exists.
 
+    Supports:
+      - Local file paths (within AUDIO_UPLOAD_DIR)
+      - http:// / https:// remote URLs
+      - data:audio/...;base64,... data URIs (used by Edge Worker Tier 2)
+
     Returns the path to the audio file on disk.
     """
+    # Data URI — decode base64 inline audio (sent by Edge Worker Tier 2)
+    if audio_url.startswith("data:"):
+        import base64 as _b64
+
+        # Format: data:<mime>;base64,<payload>
+        try:
+            header, payload = audio_url.split(",", 1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Malformed data URI: missing comma separator")
+
+        if ";base64" not in header:
+            raise HTTPException(status_code=400, detail="Only base64-encoded data URIs are supported")
+
+        # Determine file extension from MIME type
+        mime = header.split(":")[1].split(";")[0] if ":" in header else ""
+        ext_map = {
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/wave": ".wav",
+            "audio/mp3": ".mp3",
+            "audio/mpeg": ".mp3",
+            "audio/flac": ".flac",
+            "audio/ogg": ".ogg",
+            "audio/pcm": ".pcm",
+        }
+        suffix = ext_map.get(mime, ".wav")
+
+        try:
+            raw = _b64.b64decode(payload)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Failed to decode base64 audio data")
+
+        if len(raw) > _MAX_AUDIO_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Audio data too large")
+
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(raw)
+        tmp.close()
+        return tmp.name
+
     # Local file path
     if not audio_url.startswith(("http://", "https://")):
         local_path = Path(audio_url).resolve()

@@ -1,10 +1,10 @@
 """Pyannote.audio full-pipeline diarization service.
 
-Runs the complete pyannote/speaker-diarization-3.1 pipeline on a full audio
+Runs the complete pyannote/speaker-diarization-community-1 pipeline on a full audio
 file, producing globally consistent speaker segments and optional embeddings.
 
 Requires:
-  - pyannote.audio >= 3.1
+  - pyannote.audio >= 4.0.0
   - A HuggingFace token with accepted pyannote model licenses
   - torch (CUDA, MPS, or CPU)
 
@@ -55,7 +55,7 @@ class DiarizeResult:
 class PyannoteFullDiarizer:
     """Full-file speaker diarization using pyannote.audio.
 
-    Loads the ``pyannote/speaker-diarization-3.1`` pipeline (or a custom
+    Loads the ``pyannote/speaker-diarization-community-1`` pipeline (or a custom
     model ID) and runs it on a complete audio file.
 
     Usage::
@@ -68,7 +68,7 @@ class PyannoteFullDiarizer:
         self,
         device: str = "auto",
         hf_token: str | None = None,
-        model_id: str = "pyannote/speaker-diarization-3.1",
+        model_id: str = "pyannote/speaker-diarization-community-1",
         embedding_model_id: str = "pyannote/wespeaker-voxceleb-resnet34-LM",
     ) -> None:
         self._device: DeviceType = detect_device() if device == "auto" else device  # type: ignore[assignment]
@@ -100,7 +100,7 @@ class PyannoteFullDiarizer:
             raise RuntimeError(
                 "HuggingFace token required for pyannote.audio. "
                 "Set HF_TOKEN environment variable or pass hf_token to constructor. "
-                "You must also accept the model license at https://huggingface.co/pyannote/speaker-diarization-3.1"
+                "You must also accept the model license at https://huggingface.co/pyannote/speaker-diarization-community-1"
             )
 
         from pyannote.audio import Pipeline
@@ -117,9 +117,10 @@ class PyannoteFullDiarizer:
             # ROCm uses torch.cuda API via HIP — "cuda" device works for both
             self._pipeline.to(torch.device("cuda"))
         elif self._device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            # pyannote 3.1 has limited MPS support — some ops may fall back to CPU
+            # pyannote community-1 has limited MPS support — some ops may fall back to CPU
             try:
                 self._pipeline.to(torch.device("mps"))
+                logger.info("Pyannote pipeline successfully transferred to MPS device")
             except RuntimeError:
                 logger.warning("MPS transfer failed for pyannote, falling back to CPU")
                 self._pipeline.to(torch.device("cpu"))
