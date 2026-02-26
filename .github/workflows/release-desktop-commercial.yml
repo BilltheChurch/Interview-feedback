@@ -41,8 +41,8 @@ jobs:
         run: |
           cp .env.production .env
           echo "GOOGLE_CALENDAR_CLIENT_SECRET=${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}" >> .env
-        env:
-          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+          echo "ACS_CONNECTION_STRING=${{ secrets.ACS_CONNECTION_STRING }}" >> .env
+          echo "ACS_ENABLED=true" >> .env
 
       - name: Build React app
         run: npx vite build

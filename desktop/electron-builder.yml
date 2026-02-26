@@ -60,9 +60,13 @@ extraResources:
     to: ffmpeg-static
     filter:
       - "**/*"
-  - from: node_modules/ffprobe-static
-    to: ffprobe-static
+  - from: node_modules/ffprobe-static/bin/darwin
+    to: ffprobe-static/bin/darwin
     filter:
       - "**/*"
+  - from: node_modules/ffprobe-static/index.js
+    to: ffprobe-static/index.js
+  - from: node_modules/ffprobe-static/package.json
+    to: ffprobe-static/package.json
   - from: .env
     to: .env
