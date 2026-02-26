@@ -5,7 +5,7 @@
   "main": "main.js",
   "private": true,
   "author": "Interview Feedback Team",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "dev": "electron .",
     "start": "electron .",
@@ -19,6 +19,10 @@
     "test:watch": "vitest",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
+    "dist:arm64": "scripts/build.sh opensource arm64",
+    "dist:x64": "scripts/build.sh opensource x64",
+    "dist:all": "scripts/build.sh opensource",
+    "dist:commercial": "scripts/build.sh production",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {

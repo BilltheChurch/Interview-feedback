@@ -1,6 +1,6 @@
-appId: com.interviewfeedback.desktop
-productName: Interview Feedback
-copyright: Copyright © 2026 Interview Feedback Team
+appId: com.frontierace.chorus
+productName: Chorus
+copyright: Copyright © 2026 FrontierAce
 
 directories:
   output: release
@@ -20,20 +20,26 @@ files:
   - "!playwright*"
   - "!tsconfig*"
   - "!vite.config*"
+  - "!bin/**/*"
 
 mac:
   category: public.app-category.productivity
-  target:
-    - target: dmg
-      arch:
-        - universal
+  icon: build/icons/icon.icns
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   notarize: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: dmg
+      arch:
+        - x64
 
 dmg:
+  artifactName: "${productName}-${version}-${arch}.dmg"
   contents:
     - x: 130
       y: 220
@@ -45,7 +51,7 @@ dmg:
 asar: true
 
 protocols:
-  - name: Interview Feedback
+  - name: Chorus
     schemes:
       - interviewfeedback
 
@@ -58,3 +64,5 @@ extraResources:
     to: ffprobe-static
     filter:
       - "**/*"
+  - from: .env
+    to: .env

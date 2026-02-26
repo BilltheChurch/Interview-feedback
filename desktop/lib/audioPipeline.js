@@ -2,8 +2,26 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const ffmpegPath = require('ffmpeg-static');
-const ffprobePath = require('ffprobe-static').path;
+const { app } = require('electron');
+
+function resolveFFmpegPath() {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'ffmpeg-static', 'ffmpeg');
+  }
+  return require('ffmpeg-static');
+}
+
+function resolveFFprobePath() {
+  if (app.isPackaged) {
+    const base = path.join(process.resourcesPath, 'ffprobe-static', 'bin');
+    // ffprobe-static stores binary in bin/{platform}/{arch}/ffprobe
+    return path.join(base, process.platform, process.arch, 'ffprobe');
+  }
+  return require('ffprobe-static').path;
+}
+
+const ffmpegPath = resolveFFmpegPath();
+const ffprobePath = resolveFFprobePath();
 
 const TARGET_SAMPLE_RATE = 16000;
 const TARGET_CHANNELS = 1;

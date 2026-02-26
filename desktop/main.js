@@ -1,7 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell, session, screen } = require('electron');
+const envPath = app.isPackaged
+  ? path.join(process.resourcesPath, '.env')
+  : path.join(__dirname, '.env');
+require('dotenv').config({ path: envPath });
 
 const {
   finalizeRecording,
@@ -817,6 +820,17 @@ function registerIpcHandlers() {
       diarized,
       upload
     };
+  });
+
+  ipcMain.handle('diarization:download', async (_event) => {
+    try {
+      const binaryPath = await sidecar.download((stage, progress) => {
+        mainWindow?.webContents.send('diarization:download-progress', { stage, progress });
+      });
+      return { success: true, path: binaryPath };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
   });
 
   ipcMain.handle('capture:clear-preferred-source', async () => {
