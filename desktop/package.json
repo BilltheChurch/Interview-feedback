@@ -4,7 +4,11 @@
   "description": "Electron desktop self-check for Interview Feedback Phase 1",
   "main": "main.js",
   "private": true,
-  "author": "Interview Feedback Team",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BilltheChurch/Interview-feedback.git"
+  },
+  "author": "FrontierAce",
   "license": "MIT",
   "scripts": {
     "dev": "electron .",

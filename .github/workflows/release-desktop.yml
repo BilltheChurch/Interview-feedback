@@ -42,9 +42,7 @@ jobs:
         run: npx vite build
 
       - name: Build Electron DMG
-        run: npx electron-builder --mac --${{ matrix.arch }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
 
       - name: List build output
         run: ls -lh release/*.dmg
