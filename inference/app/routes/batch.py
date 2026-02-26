@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -228,15 +228,15 @@ class BatchProcessResponse(BaseModel):
 
 
 @router.post("/transcribe", response_model=BatchTranscribeResponse)
-async def batch_transcribe(req: BatchTranscribeRequest) -> BatchTranscribeResponse:
-    """Batch transcribe an audio file using Whisper."""
+async def batch_transcribe(req: BatchTranscribeRequest, request: Request) -> BatchTranscribeResponse:
+    """Batch transcribe an audio file using the configured ASR backend."""
     audio_path = await _resolve_audio(req.audio_url)
     is_temp = audio_path != req.audio_url
 
     try:
-        whisper = _get_whisper()
+        asr = request.app.state.runtime.asr_backend
         result: TranscriptResult = await asyncio.to_thread(
-            whisper.transcribe, audio_path, language=req.language
+            asr.transcribe, audio_path, language=req.language
         )
 
         utterances = [
@@ -317,10 +317,10 @@ async def batch_diarize(req: BatchDiarizeRequest) -> BatchDiarizeResponse:
 
 
 @router.post("/process", response_model=BatchProcessResponse)
-async def batch_process(req: BatchProcessRequest) -> BatchProcessResponse:
+async def batch_process(req: BatchProcessRequest, request: Request) -> BatchProcessResponse:
     """Combined batch processing: transcribe + diarize + merge.
 
-    Downloads the audio once, runs Whisper transcription and pyannote
+    Downloads the audio once, runs ASR transcription and pyannote
     diarization in parallel, then merges the results by aligning
     utterances to speaker segments.
     """
@@ -328,12 +328,12 @@ async def batch_process(req: BatchProcessRequest) -> BatchProcessResponse:
     is_temp = audio_path != req.audio_url
 
     try:
-        whisper = _get_whisper()
+        asr = request.app.state.runtime.asr_backend
         diarizer = _get_diarizer()
 
         # Run transcription and diarization in parallel
         transcript_result, diarize_result = await asyncio.gather(
-            asyncio.to_thread(whisper.transcribe, audio_path, language=req.language),
+            asyncio.to_thread(asr.transcribe, audio_path, language=req.language),
             asyncio.to_thread(
                 diarizer.diarize,
                 audio_path,

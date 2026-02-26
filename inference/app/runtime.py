@@ -14,7 +14,27 @@ from app.services.report_generator import ReportGenerator
 from app.services.improvement_generator import ImprovementGenerator
 from app.services.report_synthesizer import ReportSynthesizer
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
+from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 from app.services.sv import ModelScopeSVBackend
+from app.services.whisper_batch import WhisperBatchTranscriber
+
+# ASR backend union type (duck typing — both have transcribe, transcribe_pcm, device, backend, model_size)
+ASRBackend = SenseVoiceTranscriber | WhisperBatchTranscriber
+
+
+def build_asr_backend(settings: Settings) -> ASRBackend:
+    """Factory: create ASR backend based on settings.asr_backend."""
+    if settings.asr_backend == "sensevoice":
+        return SenseVoiceTranscriber(
+            model_id=settings.sensevoice_model_id,
+            device=settings.sensevoice_device,
+            cache_dir=settings.modelscope_cache,
+        )
+    else:
+        return WhisperBatchTranscriber(
+            model_size=settings.whisper_model_size,
+            device=settings.whisper_device,
+        )
 
 
 @dataclass(slots=True)
@@ -22,6 +42,7 @@ class AppRuntime:
     settings: Settings
     orchestrator: InferenceOrchestrator
     sv_backend: ModelScopeSVBackend
+    asr_backend: ASRBackend
     events_analyzer: EventsAnalyzer
     report_generator: ReportGenerator
     report_synthesizer: ReportSynthesizer
@@ -62,6 +83,8 @@ def build_runtime(settings: Settings) -> AppRuntime:
         ),
     )
 
+    asr = build_asr_backend(settings)
+
     report_llm = DashScopeLLM(
         api_key=settings.dashscope_api_key.get_secret_value(),
         model_name=settings.report_model_name,
@@ -71,6 +94,7 @@ def build_runtime(settings: Settings) -> AppRuntime:
         settings=settings,
         orchestrator=orchestrator,
         sv_backend=sv_backend,
+        asr_backend=asr,
         events_analyzer=EventsAnalyzer(),
         report_generator=ReportGenerator(llm=report_llm),
         report_synthesizer=ReportSynthesizer(llm=report_llm),

@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     vad_min_speech_ms: int = Field(default=300, alias="VAD_MIN_SPEECH_MS")
     vad_min_silence_ms: int = Field(default=250, alias="VAD_MIN_SILENCE_MS")
 
+    # ASR backend selection
+    asr_backend: Literal["sensevoice", "whisper", "whisper-cpp"] = Field(
+        default="sensevoice", alias="ASR_BACKEND"
+    )
+    sensevoice_model_id: str = Field(
+        default="iic/SenseVoiceSmall", alias="SENSEVOICE_MODEL_ID"
+    )
+    sensevoice_device: str = Field(default="auto", alias="SENSEVOICE_DEVICE")
+
     # Tier 2 batch processing
     whisper_model_size: str = Field(default="large-v3", alias="WHISPER_MODEL_SIZE")
     whisper_device: str = Field(default="auto", alias="WHISPER_DEVICE")

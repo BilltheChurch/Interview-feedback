@@ -65,6 +65,7 @@ rate_limiter = (
     else None
 )
 app = FastAPI(title=settings.app_name, version="0.1.0")
+app.state.runtime = runtime
 app.include_router(asr_router)
 app.include_router(batch_router)
 
@@ -78,16 +79,13 @@ async def _expand_thread_pool() -> None:
 
 
 @app.on_event("startup")
-async def _warmup_whisper() -> None:
-    """Pre-load the Whisper model at startup so the first ASR request doesn't block for minutes."""
+async def _warmup_asr() -> None:
+    """Log ASR backend info at startup. Model is lazy-loaded on first transcribe call."""
     try:
-        from app.routes.asr import _get_whisper
-
-        logger.info("Warming up Whisper model (this may take a few minutes on first run)...")
-        whisper = await asyncio.to_thread(_get_whisper)
-        logger.info("Whisper model ready: device=%s, backend=%s", whisper.device, whisper.backend)
+        asr = runtime.asr_backend
+        logger.info("ASR backend ready: backend=%s, device=%s, model=%s", asr.backend, asr.device, asr.model_size)
     except Exception as exc:
-        logger.warning("Whisper warm-up failed (will retry on first request): %s", exc)
+        logger.warning("ASR backend info unavailable: %s", exc)
 
 
 @app.middleware("http")

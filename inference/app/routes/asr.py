@@ -1,7 +1,7 @@
-"""Real-time ASR endpoint for per-window Whisper transcription.
+"""Real-time ASR endpoint for per-window transcription.
 
 Called by the Edge Worker for each audio window during recording.
-Replaces cloud FunASR with local GPU-accelerated Whisper.
+Supports configurable ASR backends (SenseVoice, Whisper) via runtime.
 """
 
 from __future__ import annotations
@@ -10,38 +10,14 @@ import asyncio
 import base64
 import binascii
 import logging
-import time
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
-from app.services.whisper_batch import (
-    WhisperBatchTranscriber,
-    TranscriptResult,
-)
+from app.services.whisper_batch import TranscriptResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/asr", tags=["asr"])
-
-# ---------------------------------------------------------------------------
-# Lazy service singleton (initialized on first request)
-# ---------------------------------------------------------------------------
-
-_whisper: WhisperBatchTranscriber | None = None
-
-
-def _get_whisper() -> WhisperBatchTranscriber:
-    global _whisper
-    if _whisper is None:
-        settings = get_settings()
-        _whisper = WhisperBatchTranscriber(
-            model_size=settings.whisper_model_size,
-            device=settings.whisper_device,
-        )
-    return _whisper
-
 
 # ---------------------------------------------------------------------------
 # Request / Response schemas
@@ -182,24 +158,24 @@ async def transcribe_window(
         sr = sample_rate
         lang = language
 
-    whisper = _get_whisper()
+    asr = request.app.state.runtime.asr_backend
     result: TranscriptResult = await asyncio.to_thread(
-        whisper.transcribe_pcm, pcm_data, sr, lang
+        asr.transcribe_pcm, pcm_data, sr, lang
     )
 
-    return _map_result(result, device=whisper.device)
+    return _map_result(result, device=asr.device)
 
 
 @router.get("/status", response_model=AsrStatusResponse)
-async def asr_status() -> AsrStatusResponse:
-    """Report Whisper ASR availability and configuration."""
+async def asr_status(request: Request) -> AsrStatusResponse:
+    """Report ASR backend availability and configuration."""
     try:
-        whisper = _get_whisper()
+        asr = request.app.state.runtime.asr_backend
         return AsrStatusResponse(
             available=True,
-            device=whisper.device,
-            backend=whisper.backend,
-            model=whisper.model_size,
+            device=asr.device,
+            backend=asr.backend,
+            model=asr.model_size,
         )
     except Exception as exc:
         logger.warning("ASR status check failed: %s", exc)

@@ -202,7 +202,7 @@ def test_batch_transcribe_endpoint(_tmp_audio: str):
     from app.main import app
 
     client = TestClient(app, raise_server_exceptions=False)
-    with _no_auth(), patch("app.routes.batch._get_whisper", return_value=mock_transcriber):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_transcriber)):
         resp = client.post(
             "/batch/transcribe",
             json={"audio_url": _tmp_audio, "language": "en", "model": "large-v3"},
@@ -258,7 +258,7 @@ def test_batch_process_endpoint(_tmp_audio: str):
     client = TestClient(app, raise_server_exceptions=False)
     with (
         _no_auth(),
-        patch("app.routes.batch._get_whisper", return_value=mock_transcriber),
+        patch.object(app.state, "runtime", MagicMock(asr_backend=mock_transcriber)),
         patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
     ):
         resp = client.post(
