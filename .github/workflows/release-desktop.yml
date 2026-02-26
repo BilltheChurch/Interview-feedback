@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Copy open-source env
+      - name: Prepare env
         run: cp .env.opensource .env
 
       - name: Build React app

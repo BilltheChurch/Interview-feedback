@@ -1,0 +1,63 @@
+name: Release Desktop (Commercial)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0)'
+        required: true
+
+concurrency:
+  group: release-commercial-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    name: Build Commercial DMG (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: [arm64, x64]
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare commercial env
+        run: |
+          cp .env.production .env
+          echo "GOOGLE_CALENDAR_CLIENT_SECRET=${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}" >> .env
+        env:
+          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+
+      - name: Build React app
+        run: npx vite build
+
+      - name: Build Electron DMG
+        run: npx electron-builder --mac --${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List build output
+        run: ls -lh release/*.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: commercial-dmg-${{ matrix.arch }}
+          path: desktop/release/*.dmg
+          retention-days: 30
