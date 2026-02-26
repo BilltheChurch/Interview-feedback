@@ -1,0 +1,103 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    name: Build macOS DMG (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: [arm64, x64]
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Copy open-source env
+        run: cp .env.opensource .env
+
+      - name: Build React app
+        run: npx vite build
+
+      - name: Build Electron DMG
+        run: npx electron-builder --mac --${{ matrix.arch }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List build output
+        run: ls -lh release/*.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: desktop/release/*.dmg
+          retention-days: 30
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-dmg
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download arm64 DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: dmg-arm64
+          path: release/
+
+      - name: Download x64 DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: dmg-x64
+          path: release/
+
+      - name: List release assets
+        run: ls -lh release/
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release/*.dmg
+          body: |
+            ## Installation (macOS)
+
+            1. Download the `.dmg` for your chip:
+               - **Apple Silicon** (M1/M2/M3/M4): `Chorus-${{ github.ref_name }}-arm64.dmg`
+               - **Intel**: `Chorus-${{ github.ref_name }}-x64.dmg`
+            2. Open the `.dmg` and drag **Chorus** to Applications
+            3. First launch: right-click the app → **Open** → click **Open** in the dialog
+               _(required because the app is not yet code-signed)_
+            4. Configure your backend URL in **Settings**
+
+            > This is an open-source build. To use Chorus, you need a running
+            > [Edge Worker](https://github.com/BilltheChurch/Interview-feedback/tree/main/edge/worker)
+            > and [Inference Service](https://github.com/BilltheChurch/Interview-feedback/tree/main/inference).
