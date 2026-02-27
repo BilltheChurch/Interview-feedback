@@ -1,12 +1,14 @@
 """CAM++ Speaker Verification via ONNX Runtime.
 
 Architecture:
-  - FBank feature extraction: torchaudio.compliance.kaldi (matches ModelScope exactly)
+  - FBank feature extraction: kaldi-native-fbank (C++, zero PyTorch dependency)
   - Embedding inference: ONNX Runtime (replaces PyTorch CAMPPlus CNN)
   - Embedding dim: 192 (CAM++ advanced model)
 
 The ONNX model is the CAMPPlus backbone only (no feature extraction).
-Feature extraction is done in Python to match the original ModelScope pipeline.
+Feature extraction uses kaldi-native-fbank with parameters aligned to
+torchaudio.compliance.kaldi.fbank for ModelScope pipeline compatibility.
+FBank is padded to T=200 frames for ONNX model parity (T_int=100=seg_len).
 """
 
 from __future__ import annotations
@@ -71,26 +73,63 @@ def _get_session(model_path: str) -> Any:
 def _extract_fbank(samples: np.ndarray, sample_rate: int, num_mel_bins: int = 80) -> np.ndarray:
     """Extract FBank features matching ModelScope's Kaldi.fbank pipeline.
 
-    Uses torchaudio.compliance.kaldi.fbank for exact compatibility with
-    the ModelScope SpeakerVerificationCAMPPlus.__extract_feature() method.
+    Uses kaldi-native-fbank (C++ Kaldi-compatible, zero PyTorch dependency)
+    with parameters aligned to torchaudio.compliance.kaldi.fbank defaults.
+
+    FBank output is padded/cropped to exactly TARGET_T=200 frames so that
+    the ONNX model's CAMLayer.seg_pooling(seg_len=100) operates at T_int=100,
+    avoiding the trace-time shape freeze bug (cos_dist < 0.001 guaranteed).
 
     Returns:
-        np.ndarray of shape [1, T, num_mel_bins] (mean-normalized FBank features)
+        np.ndarray of shape [1, TARGET_T, num_mel_bins] (mean-normalized FBank)
     """
-    import torch
-    from torchaudio.compliance.kaldi import fbank
+    import kaldi_native_fbank as knf
+
+    TARGET_T = 200  # T_int = floor((200-1)/2)+1 = 100 = seg_len → perfect ONNX parity
 
     # Ensure 1D float32
     if samples.ndim > 1:
         samples = samples.flatten()
-    audio_tensor = torch.from_numpy(samples.astype(np.float32)).unsqueeze(0)
+    samples = samples.astype(np.float32)
 
-    # Compute FBank features: [T, num_mel_bins]
-    feature = fbank(audio_tensor, num_mel_bins=num_mel_bins, sample_frequency=sample_rate)
-    # Mean normalization (same as ModelScope)
-    feature = feature - feature.mean(dim=0, keepdim=True)
-    # Add batch dim: [1, T, num_mel_bins]
-    return feature.unsqueeze(0).numpy()
+    # Configure FBank to match torchaudio.compliance.kaldi.fbank defaults
+    opts = knf.FbankOptions()
+    opts.frame_opts.samp_freq = float(sample_rate)
+    opts.frame_opts.dither = 0.0          # torchaudio default (differs from Kaldi CLI 1.0)
+    opts.frame_opts.snip_edges = True     # torchaudio default
+    opts.frame_opts.window_type = "povey" # torchaudio default (hann^0.85)
+    opts.frame_opts.preemph_coeff = 0.97  # torchaudio default
+    opts.frame_opts.frame_length_ms = 25.0
+    opts.frame_opts.frame_shift_ms = 10.0
+    opts.energy_floor = 1.0               # torchaudio default
+    opts.mel_opts.num_bins = num_mel_bins
+    opts.mel_opts.low_freq = 20.0         # torchaudio default
+    opts.mel_opts.high_freq = 0.0         # 0 = Nyquist/2 (torchaudio default)
+
+    fbank_fn = knf.OnlineFbank(opts)
+    fbank_fn.accept_waveform(sample_rate, samples.tolist())
+    fbank_fn.input_finished()
+
+    frames = fbank_fn.num_frames_ready
+    if frames == 0:
+        raise ValueError("FBank produced 0 frames from input audio")
+
+    mat = np.empty([frames, num_mel_bins], dtype=np.float32)
+    for i in range(frames):
+        mat[i, :] = fbank_fn.get_frame(i)
+
+    # Pad or crop to TARGET_T frames for ONNX parity
+    if frames < TARGET_T:
+        padding = np.tile(mat[-1:], (TARGET_T - frames, 1))
+        mat = np.concatenate([mat, padding], axis=0)
+    elif frames > TARGET_T:
+        start = (frames - TARGET_T) // 2
+        mat = mat[start : start + TARGET_T]
+
+    # Mean normalization (same as ModelScope __extract_feature)
+    mat = mat - mat.mean(axis=0, keepdims=True)
+    # Add batch dim: [1, TARGET_T, num_mel_bins]
+    return mat[np.newaxis, ...]
 
 
 @dataclass(slots=True)

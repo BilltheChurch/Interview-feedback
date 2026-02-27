@@ -22,3 +22,4 @@ pyannote.audio>=4.0.0
 # ONNX Runtime backends (Phase 3 — torch-free inference)
 sherpa-onnx>=1.10.0
 onnxruntime>=1.17.0
+kaldi-native-fbank>=1.22.0

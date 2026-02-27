@@ -20,44 +20,53 @@ from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestam
 
 logger = logging.getLogger(__name__)
 
-_recognizer: Any = None
+_recognizers: dict[str, Any] = {}
 _recognizer_lock = threading.Lock()
 
 
-def _get_recognizer(model_dir: str) -> Any:
-    """Lazy-load SenseVoice ONNX recognizer (thread-safe singleton)."""
-    global _recognizer
-    if _recognizer is not None:
-        return _recognizer
+def _get_recognizer(model_dir: str, language: str = "auto") -> Any:
+    """Lazy-load SenseVoice ONNX recognizer per language (thread-safe cache).
+
+    sherpa-onnx sets the language at recognizer construction time (not per-stream),
+    so we maintain a cache keyed by (model_dir, language) to support per-call switching.
+    """
+    cache_key = f"{model_dir}:{language}"
+    if cache_key in _recognizers:
+        return _recognizers[cache_key]
 
     with _recognizer_lock:
-        if _recognizer is not None:
-            return _recognizer
+        if cache_key in _recognizers:
+            return _recognizers[cache_key]
 
         import sherpa_onnx
 
-        model_path = os.path.join(model_dir, "model.onnx")
+        # Prefer INT8 quantized model (2x faster, same output quality)
+        model_int8 = os.path.join(model_dir, "model.int8.onnx")
+        model_fp32 = os.path.join(model_dir, "model.onnx")
+        model_path = model_int8 if os.path.exists(model_int8) else model_fp32
         tokens_path = os.path.join(model_dir, "tokens.txt")
 
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"ONNX model not found: {model_path}")
+            raise FileNotFoundError(f"ONNX model not found: {model_fp32}")
         if not os.path.exists(tokens_path):
             raise FileNotFoundError(f"Tokens file not found: {tokens_path}")
 
-        logger.info("Loading SenseVoice ONNX model from %s", model_dir)
+        logger.info("Loading SenseVoice ONNX model from %s (language=%s)", model_dir, language)
         start = time.perf_counter()
 
-        _recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
             model=model_path,
             tokens=tokens_path,
             use_itn=True,
             num_threads=4,
             debug=False,
+            language=language,
         )
 
         load_time = time.perf_counter() - start
-        logger.info("SenseVoice ONNX model loaded in %.2fs", load_time)
-        return _recognizer
+        logger.info("SenseVoice ONNX model loaded in %.2fs (language=%s)", load_time, language)
+        _recognizers[cache_key] = recognizer
+        return recognizer
 
 
 class SenseVoiceOnnxTranscriber:
@@ -105,7 +114,7 @@ class SenseVoiceOnnxTranscriber:
 
     def transcribe(self, audio_path: str, language: str = "auto") -> TranscriptResult:
         """Transcribe an audio file. Returns TranscriptResult (same schema as PyTorch version)."""
-        recognizer = _get_recognizer(self._model_dir)
+        recognizer = _get_recognizer(self._model_dir, language=language)
         start = time.perf_counter()
 
         samples, sample_rate = self._read_wave(audio_path)
