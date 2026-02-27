@@ -1,7 +1,10 @@
-"""Real-time ASR endpoint for per-window transcription.
+"""Real-time ASR endpoint for per-window and streaming transcription.
 
 Called by the Edge Worker for each audio window during recording.
 Supports configurable ASR backends (SenseVoice, Whisper) via runtime.
+
+Streaming endpoint (/asr/stream) uses WebSocket for real-time transcription
+via sherpa-onnx OnlineRecognizer (Paraformer trilingual).
 """
 
 from __future__ import annotations
@@ -9,15 +12,21 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
+import struct
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from app.services.whisper_batch import TranscriptResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/asr", tags=["asr"])
+
+# Lazy-init streaming service (only when first WebSocket connects)
+_streaming_service = None
+_streaming_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Request / Response schemas
@@ -185,3 +194,129 @@ async def asr_status(request: Request) -> AsrStatusResponse:
             backend="unknown",
             model="unknown",
         )
+
+
+# ---------------------------------------------------------------------------
+# Streaming ASR via WebSocket
+# ---------------------------------------------------------------------------
+
+
+async def _get_streaming_service():
+    """Lazy-init the streaming ASR service."""
+    global _streaming_service
+    if _streaming_service is not None:
+        return _streaming_service
+
+    async with _streaming_lock:
+        if _streaming_service is not None:
+            return _streaming_service
+
+        from app.services.streaming_asr import StreamingASRService
+
+        svc = StreamingASRService()
+        if not svc.available:
+            logger.warning("Streaming ASR model not found — /asr/stream will be unavailable")
+            return None
+        _streaming_service = svc
+        return svc
+
+
+@router.websocket("/stream")
+async def asr_stream(websocket: WebSocket):
+    """WebSocket endpoint for real-time streaming ASR.
+
+    Protocol:
+        1. Client connects, sends JSON: {"type": "start", "session_id": "xxx"}
+        2. Client sends binary frames (raw PCM16 @ 16kHz mono, 1-second chunks)
+        3. Server sends JSON: {"type": "partial"|"final", "text": "...", "segment_id": N}
+        4. Client sends JSON: {"type": "stop"} to end session
+
+    Replaces FunASR DashScope WebSocket — runs locally with zero latency.
+    """
+    await websocket.accept()
+
+    svc = await _get_streaming_service()
+    if svc is None:
+        await websocket.send_json({
+            "type": "error",
+            "detail": "Streaming ASR model not available. Download the paraformer model first.",
+        })
+        await websocket.close(code=1011)
+        return
+
+    session = None
+    session_id = None
+
+    try:
+        # Wait for start message
+        start_msg = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+        if start_msg.get("type") != "start":
+            await websocket.send_json({"type": "error", "detail": "Expected {type: 'start'}"})
+            await websocket.close(code=1002)
+            return
+
+        session_id = start_msg.get("session_id", "unknown")
+        sample_rate = start_msg.get("sample_rate", 16000)
+
+        session = await asyncio.to_thread(svc.create_session, session_id)
+
+        await websocket.send_json({
+            "type": "ready",
+            "session_id": session_id,
+            "provider": svc.provider,
+        })
+
+        logger.info("Streaming ASR session started: %s", session_id)
+
+        # Main loop: receive audio, send results
+        while True:
+            message = await websocket.receive()
+
+            if "text" in message:
+                # JSON control message
+                data = json.loads(message["text"])
+                if data.get("type") == "stop":
+                    logger.info("Streaming ASR session stopped by client: %s", session_id)
+                    break
+                continue
+
+            if "bytes" in message:
+                # Binary PCM16 audio data
+                pcm_bytes = message["bytes"]
+                if len(pcm_bytes) == 0:
+                    continue
+
+                # Convert PCM16 bytes to float32 samples
+                n_samples = len(pcm_bytes) // 2
+                pcm16 = struct.unpack(f"<{n_samples}h", pcm_bytes)
+                samples = [s / 32768.0 for s in pcm16]
+
+                # Feed to recognizer (CPU-bound, offload to thread)
+                results = await asyncio.to_thread(
+                    session.feed_pcm, samples, sample_rate
+                )
+
+                # Send results back
+                for r in results:
+                    await websocket.send_json({
+                        "type": "final" if r.is_final else "partial",
+                        "text": r.text,
+                        "segment_id": r.segment_id,
+                        "end_ms": r.end_ms,
+                        "is_final": r.is_final,
+                    })
+
+    except WebSocketDisconnect:
+        logger.info("Streaming ASR client disconnected: %s", session_id)
+    except asyncio.TimeoutError:
+        logger.warning("Streaming ASR timeout waiting for start message")
+        await websocket.close(code=1008)
+    except Exception:
+        logger.exception("Streaming ASR error for session %s", session_id)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        if session_id:
+            svc.close_session(session_id)

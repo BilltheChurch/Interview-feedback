@@ -38,6 +38,8 @@ from app.schemas import (
     AnalysisReportRequest,
     AnalysisReportResponse,
     MergeCheckpointsRequest,
+    ModelStatus,
+    ModelsStatusResponse,
     RegenerateClaimRequest,
     RegenerateClaimResponse,
     HealthResponse,
@@ -193,6 +195,80 @@ async def health_detailed() -> HealthResponse:
             pyannote_device=settings.pyannote_device,
             whisper_model_size=settings.whisper_model_size,
         ),
+    )
+
+
+@app.get("/models/status", response_model=ModelsStatusResponse)
+async def models_status() -> ModelsStatusResponse:
+    """Report readiness of all required ML models.
+
+    Desktop app can poll this before starting a session to verify
+    all models are downloaded and available.
+    """
+    import os
+    from pathlib import Path
+
+    s = settings
+
+    def _check_dir(name: str, path_str: str, required: bool = True) -> ModelStatus:
+        path = Path(os.path.expanduser(path_str))
+        exists = path.exists()
+        size = 0
+        if exists:
+            if path.is_dir():
+                size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+            else:
+                size = path.stat().st_size
+        return ModelStatus(
+            name=name,
+            required=required,
+            exists=exists,
+            size_bytes=size,
+            path=str(path),
+        )
+
+    models: list[ModelStatus] = []
+
+    # ASR models
+    if s.asr_backend == "sensevoice-onnx":
+        m = _check_dir("sensevoice-onnx", s.asr_onnx_model_path)
+        m.loaded = bool(runtime.asr_backend and runtime.asr_backend.backend == "sensevoice-onnx")
+        m.provider = getattr(runtime.asr_backend, "device", "unknown")
+        models.append(m)
+
+    # Moonshine (English fallback)
+    moonshine_path = os.environ.get(
+        "MOONSHINE_MODEL_PATH",
+        "~/.cache/moonshine-onnx/sherpa-onnx-moonshine-base-en-int8",
+    )
+    models.append(_check_dir("moonshine-onnx", moonshine_path, required=False))
+
+    # SV model
+    if s.sv_backend == "onnx":
+        m = _check_dir("campplus-onnx", s.sv_onnx_model_path)
+        m.loaded = True  # loaded at startup
+        m.provider = getattr(runtime.sv_backend, "device", "unknown")
+        models.append(m)
+
+    # Diarization (pyannote — optional, Tier 2 only)
+    if s.enable_diarization:
+        # pyannote models are managed by HuggingFace hub, path is dynamic
+        models.append(ModelStatus(
+            name="pyannote-diarization",
+            required=False,
+            exists=True,  # validated at GATE 2
+            loaded=False,  # lazy-loaded on first diarize call
+            provider="pyannote",
+            path="~/.cache/huggingface/hub (managed by HF)",
+        ))
+
+    total_size = sum(m.size_bytes for m in models)
+    all_ready = all(m.exists for m in models if m.required)
+
+    return ModelsStatusResponse(
+        all_ready=all_ready,
+        models=models,
+        total_size_bytes=total_size,
     )
 
 

@@ -23,12 +23,34 @@ _recognizer: Any | None = None
 _recognizer_lock = threading.Lock()
 
 
+def _detect_onnx_provider() -> str:
+    """Auto-detect the best ONNX Runtime execution provider.
+
+    Priority: CoreML (Apple Silicon) > CUDA (NVIDIA) > CPU.
+    """
+    try:
+        import onnxruntime as ort
+
+        available = ort.get_available_providers()
+        if "CoreMLExecutionProvider" in available:
+            return "coreml"
+        if "CUDAExecutionProvider" in available:
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
+
+
+_onnx_provider: str | None = None
+
+
 def _get_recognizer(model_dir: str) -> Any:
     """Lazy-load Moonshine ONNX recognizer (thread-safe singleton).
 
     Unlike SenseVoice, Moonshine is English-only so no per-language cache needed.
+    Auto-selects CoreML on Apple Silicon for hardware acceleration.
     """
-    global _recognizer
+    global _recognizer, _onnx_provider
     if _recognizer is not None:
         return _recognizer
 
@@ -62,7 +84,12 @@ def _get_recognizer(model_dir: str) -> Any:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Moonshine ONNX {name} not found: {path}")
 
-        logger.info("Loading Moonshine ONNX model from %s", model_dir)
+        _onnx_provider = _detect_onnx_provider()
+        logger.info(
+            "Loading Moonshine ONNX model from %s (provider=%s)",
+            model_dir,
+            _onnx_provider,
+        )
         start = time.perf_counter()
 
         rec = sherpa_onnx.OfflineRecognizer.from_moonshine(
@@ -73,10 +100,11 @@ def _get_recognizer(model_dir: str) -> Any:
             tokens=tokens_path,
             num_threads=4,
             debug=False,
+            provider=_onnx_provider,
         )
 
         load_time = time.perf_counter() - start
-        logger.info("Moonshine ONNX model loaded in %.2fs", load_time)
+        logger.info("Moonshine ONNX model loaded in %.2fs (provider=%s)", load_time, _onnx_provider)
         _recognizer = rec
         return rec
 
@@ -96,7 +124,7 @@ class MoonshineOnnxTranscriber:
 
     @property
     def device(self) -> str:
-        return "onnx-cpu"
+        return f"onnx-{_onnx_provider or 'cpu'}"
 
     @property
     def backend(self) -> str:

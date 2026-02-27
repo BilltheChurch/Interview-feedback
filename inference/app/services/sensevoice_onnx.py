@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 
 _recognizers: dict[str, Any] = {}
 _recognizer_lock = threading.Lock()
+_onnx_provider: str | None = None
+
+
+def _detect_onnx_provider() -> str:
+    """Auto-detect the best ONNX Runtime execution provider.
+
+    Priority: CoreML (Apple Silicon) > CUDA (NVIDIA) > CPU.
+    """
+    try:
+        import onnxruntime as ort
+
+        available = ort.get_available_providers()
+        if "CoreMLExecutionProvider" in available:
+            return "coreml"
+        if "CUDAExecutionProvider" in available:
+            return "cuda"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 def _get_recognizer(model_dir: str, language: str = "auto") -> Any:
@@ -29,7 +48,9 @@ def _get_recognizer(model_dir: str, language: str = "auto") -> Any:
 
     sherpa-onnx sets the language at recognizer construction time (not per-stream),
     so we maintain a cache keyed by (model_dir, language) to support per-call switching.
+    Auto-selects CoreML on Apple Silicon for hardware acceleration.
     """
+    global _onnx_provider
     cache_key = f"{model_dir}:{language}"
     if cache_key in _recognizers:
         return _recognizers[cache_key]
@@ -51,7 +72,13 @@ def _get_recognizer(model_dir: str, language: str = "auto") -> Any:
         if not os.path.exists(tokens_path):
             raise FileNotFoundError(f"Tokens file not found: {tokens_path}")
 
-        logger.info("Loading SenseVoice ONNX model from %s (language=%s)", model_dir, language)
+        if _onnx_provider is None:
+            _onnx_provider = _detect_onnx_provider()
+
+        logger.info(
+            "Loading SenseVoice ONNX model from %s (language=%s, provider=%s)",
+            model_dir, language, _onnx_provider,
+        )
         start = time.perf_counter()
 
         recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
@@ -61,10 +88,14 @@ def _get_recognizer(model_dir: str, language: str = "auto") -> Any:
             num_threads=4,
             debug=False,
             language=language,
+            provider=_onnx_provider,
         )
 
         load_time = time.perf_counter() - start
-        logger.info("SenseVoice ONNX model loaded in %.2fs (language=%s)", load_time, language)
+        logger.info(
+            "SenseVoice ONNX model loaded in %.2fs (language=%s, provider=%s)",
+            load_time, language, _onnx_provider,
+        )
         _recognizers[cache_key] = recognizer
         return recognizer
 
@@ -84,7 +115,7 @@ class SenseVoiceOnnxTranscriber:
 
     @property
     def device(self) -> str:
-        return "onnx-cpu"
+        return f"onnx-{_onnx_provider or 'cpu'}"
 
     @property
     def backend(self) -> str:

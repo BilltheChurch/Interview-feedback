@@ -149,6 +149,24 @@ class DeviceInfo(BaseModel):
     whisper_model_size: str = "large-v3"
 
 
+class ModelStatus(BaseModel):
+    """Status of a single ML model required by the inference service."""
+    name: str
+    required: bool = True
+    exists: bool = False
+    size_bytes: int = 0
+    loaded: bool = False
+    provider: str = ""
+    path: str = ""
+
+
+class ModelsStatusResponse(BaseModel):
+    """Aggregate model readiness report."""
+    all_ready: bool = False
+    models: list[ModelStatus] = Field(default_factory=list)
+    total_size_bytes: int = 0
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     app_name: str
