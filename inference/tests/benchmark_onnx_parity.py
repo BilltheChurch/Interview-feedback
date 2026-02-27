@@ -160,6 +160,7 @@ def check_no_torch_import() -> dict:
     onnx_files = [
         Path("app/services/sensevoice_onnx.py"),
         Path("app/services/sv_onnx.py"),
+        Path("app/services/moonshine_onnx.py"),
     ]
 
     results = {}
