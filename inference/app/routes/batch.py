@@ -20,6 +20,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.schemas import (
+    MergedUtteranceOut as _SharedMergedUtteranceOut,
+    WordTimestampOut as _SharedWordTimestampOut,
+)
 from app.services.whisper_batch import (
     WhisperBatchTranscriber,
     TranscriptResult,
@@ -180,11 +184,9 @@ class BatchTranscribeRequest(BaseModel):
     model: str = Field(default="large-v3", description="Whisper model size")
 
 
-class WordTimestampOut(BaseModel):
-    word: str
-    start_ms: int
-    end_ms: int
-    confidence: float = 1.0
+# Re-export shared schemas (defined in app.schemas for cross-module use)
+WordTimestampOut = _SharedWordTimestampOut
+MergedUtteranceOut = _SharedMergedUtteranceOut
 
 
 class UtteranceOut(BaseModel):
@@ -237,17 +239,6 @@ class BatchProcessRequest(BaseModel):
     max_speakers: int | None = None
     language: str = Field(default="auto", description="Language code or 'auto'")
     model: str = Field(default="large-v3", description="Whisper model size")
-
-
-class MergedUtteranceOut(BaseModel):
-    id: str
-    speaker: str
-    text: str
-    start_ms: int
-    end_ms: int
-    words: list[WordTimestampOut] = Field(default_factory=list)
-    language: str = ""
-    confidence: float = 1.0
 
 
 class SpeakerStatsOut(BaseModel):
