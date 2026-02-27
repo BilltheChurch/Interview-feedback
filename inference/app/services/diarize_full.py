@@ -108,7 +108,7 @@ class PyannoteFullDiarizer:
         logger.info("Loading pyannote pipeline: %s ...", self._model_id)
         self._pipeline = Pipeline.from_pretrained(
             self._model_id,
-            use_auth_token=self._hf_token,
+            token=self._hf_token,
         )
 
         import torch
@@ -144,7 +144,7 @@ class PyannoteFullDiarizer:
             logger.info("Loading embedding model: %s ...", self._embedding_model_id)
             self._embedding_model = Inference(
                 self._embedding_model_id,
-                use_auth_token=self._hf_token,
+                token=self._hf_token,
                 window="whole",
             )
 
@@ -197,7 +197,13 @@ class PyannoteFullDiarizer:
                 kwargs["max_speakers"] = max_speakers
 
         logger.info("Running pyannote diarization on %s (kwargs=%s)", audio_path, kwargs)
-        diarization = self._pipeline(audio_path, **kwargs)
+        raw_output = self._pipeline(audio_path, **kwargs)
+
+        # pyannote 4.x returns DiarizeOutput; extract the Annotation
+        if hasattr(raw_output, "speaker_diarization"):
+            diarization = raw_output.speaker_diarization
+        else:
+            diarization = raw_output
 
         # Convert pyannote Annotation to our segment format
         segments: list[SpeakerSegment] = []
@@ -212,11 +218,23 @@ class PyannoteFullDiarizer:
                 )
             )
 
-        # Extract speaker embeddings (centroids) if embedding model available
+        # Extract speaker embeddings
         embeddings: dict[str, list[float]] = {}
-        self._ensure_embedding_model()
-        if self._embedding_model is not None:
-            embeddings = self._extract_speaker_embeddings(audio_path, diarization)
+
+        # pyannote 4.x: DiarizeOutput includes speaker_embeddings directly
+        if hasattr(raw_output, "speaker_embeddings") and raw_output.speaker_embeddings is not None:
+            import numpy as np
+
+            emb_array = raw_output.speaker_embeddings  # shape: (num_speakers, dim)
+            unique_speakers = sorted(set(s.speaker_id for s in segments))
+            for i, spk in enumerate(unique_speakers):
+                if i < len(emb_array):
+                    embeddings[spk] = emb_array[i].tolist()
+        else:
+            # Fallback: use separate embedding model (pyannote <4.x)
+            self._ensure_embedding_model()
+            if self._embedding_model is not None:
+                embeddings = self._extract_speaker_embeddings(audio_path, diarization)
 
         # Estimate duration from last segment or from audio
         duration_ms = segments[-1].end_ms if segments else 0
