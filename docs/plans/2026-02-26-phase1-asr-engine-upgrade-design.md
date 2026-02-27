@@ -1,7 +1,7 @@
 # Phase 1: ASR 引擎升级 — SenseVoice-Small 替换 faster-whisper
 
 **Date:** 2026-02-26
-**Status:** Draft
+**Status:** Completed
 **Phase:** 1 of 3
 **Gate:** [GATE 1 — 主控文档](./2026-02-26-backend-pipeline-master-design.md#gate-1-asr-引擎基准测试)
 **前置条件:** Task 0（测试音频准备）完成

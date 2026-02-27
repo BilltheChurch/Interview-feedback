@@ -1,7 +1,7 @@
 # Phase 3: ONNX 统一运行时 — 面向 Tauri/SwiftUI 迁移的推理层重构
 
 **Date:** 2026-02-26
-**Status:** Draft
+**Status:** Completed
 **Phase:** 3 of 3
 **Gate:** [GATE 3 — 主控文档](./2026-02-26-backend-pipeline-master-design.md#gate-3-onnx-运行时验证)
 **前置条件:** GATE 1 + GATE 2 全部通过

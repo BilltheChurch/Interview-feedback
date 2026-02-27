@@ -1,7 +1,7 @@
 # Phase 2: 说话人分段管线接入 — pyannote SD 接入 Tier 2 Finalization
 
 **Date:** 2026-02-26
-**Status:** Draft
+**Status:** Completed
 **Phase:** 2 of 3
 **Gate:** [GATE 2 — 主控文档](./2026-02-26-backend-pipeline-master-design.md#gate-2-tier-2-说话人分段-e2e)
 **前置条件:** GATE 1 通过（SenseVoice ASR 基准测试达标）
