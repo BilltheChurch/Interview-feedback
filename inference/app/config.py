@@ -86,6 +86,24 @@ class Settings(BaseSettings):
     pyannote_device: str = Field(default="auto", alias="PYANNOTE_DEVICE")
     hf_token: SecretStr = Field(default="", alias="HF_TOKEN")
 
+    # Incremental processing
+    incremental_interval_ms: int = Field(default=180_000, alias="INCREMENTAL_INTERVAL_MS")
+    incremental_overlap_ms: int = Field(default=30_000, alias="INCREMENTAL_OVERLAP_MS")
+    incremental_cumulative_threshold: int = Field(
+        default=2, alias="INCREMENTAL_CUMULATIVE_THRESHOLD",
+        description="First N increments use cumulative mode (audio from 0..end)",
+    )
+    incremental_analysis_interval: int = Field(
+        default=2, alias="INCREMENTAL_ANALYSIS_INTERVAL",
+        description="Run LLM checkpoint analysis every N increments",
+    )
+    incremental_speaker_match_threshold: float = Field(
+        default=0.60, alias="INCREMENTAL_SPEAKER_MATCH_THRESHOLD",
+    )
+    incremental_max_sessions: int = Field(
+        default=10, alias="INCREMENTAL_MAX_SESSIONS",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -484,3 +484,30 @@ export interface ImprovementReport {
   dimensions: DimensionImprovement[];
   claims: ClaimImprovement[];
 }
+
+// ── Incremental Processing Types ──────────────────────────────────────────
+
+export type IncrementalStatusState = "idle" | "recording" | "processing" | "finalizing" | "succeeded" | "failed";
+
+export interface IncrementalStatus {
+  enabled: boolean;
+  status: IncrementalStatusState;
+  increments_completed: number;
+  increments_failed: number;
+  last_processed_ms: number;
+  speakers_detected: number;
+  stable_speaker_map: boolean;
+  checkpoints_completed: number;
+  started_at: string | null;
+  last_increment_at: string | null;
+  error: string | null;
+  warnings: string[];
+}
+
+export interface IncrementalSpeakerProfile {
+  speaker_id: string;
+  centroid: number[];      // 256-dim
+  total_speech_ms: number;
+  display_name: string | null;
+  first_seen_increment: number;
+}

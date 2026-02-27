@@ -14,6 +14,7 @@ interface DesktopAPI {
   finalizeV2(payload: { baseUrl: string; sessionId: string; metadata?: Record<string, unknown>; mode?: 'full' | 'report-only' }): Promise<unknown>;
   getFinalizeStatus(payload: { baseUrl: string; sessionId: string; jobId?: string }): Promise<unknown>;
   getTier2Status(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
+  getIncrementalStatus(payload: { baseUrl: string; sessionId: string }): Promise<IncrementalStatusResponse>;
   getResultV2(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
   getFeedbackReady(payload: { baseUrl: string; sessionId: string }): Promise<unknown>;
   openFeedback(payload: { baseUrl: string; sessionId: string; body?: Record<string, unknown> }): Promise<unknown>;
@@ -108,6 +109,22 @@ interface DesktopAPI {
   // ── DualSync Integration (预留接口，Phase 2 实现) ──
   // getUpcomingGroupSessions?(): Promise<GroupSession[]>;
   // importGroupSession?(sessionId: string): Promise<SessionImport>;
+}
+
+/** Incremental processing status from Worker */
+export interface IncrementalStatusResponse {
+  enabled: boolean;
+  status: 'idle' | 'recording' | 'processing' | 'finalizing' | 'succeeded' | 'failed';
+  increments_completed: number;
+  increments_failed: number;
+  last_processed_ms: number;
+  speakers_detected: number;
+  stable_speaker_map: boolean;
+  checkpoints_completed: number;
+  started_at: string | null;
+  last_increment_at: string | null;
+  error: string | null;
+  warnings: string[];
 }
 
 /** DualSync group session (Phase 2 integration) */

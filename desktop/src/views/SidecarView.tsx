@@ -143,6 +143,58 @@ function AcsStatusBadge({ status, captionCount }: { status: AcsStatus; captionCo
   );
 }
 
+/* ─── Incremental Processing Badge ─────────── */
+
+type IncrementalBadgeStatus = 'idle' | 'recording' | 'processing' | 'finalizing' | 'succeeded' | 'failed';
+
+function IncrementalStatusBadge({
+  status,
+  speakersDetected,
+  incrementsCompleted,
+  stableSpeakerMap,
+}: {
+  status: IncrementalBadgeStatus;
+  speakersDetected: number;
+  incrementsCompleted: number;
+  stableSpeakerMap: boolean;
+}) {
+  if (status === 'idle') return null;
+
+  const isProcessing = status === 'processing';
+  const color = status === 'failed' ? 'text-red-600 bg-red-50'
+    : stableSpeakerMap ? 'text-emerald-600 bg-emerald-50'
+    : 'text-blue-600 bg-blue-50';
+  const dotColor = status === 'failed' ? 'bg-red-400'
+    : stableSpeakerMap ? 'bg-emerald-400'
+    : 'bg-blue-400';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.8 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${color} select-none`}
+      title={
+        isProcessing ? `Processing increment ${incrementsCompleted + 1}...`
+        : stableSpeakerMap ? `${speakersDetected} speakers identified (stable)`
+        : `${speakersDetected} speakers detected`
+      }
+    >
+      <span className="relative flex h-2 w-2">
+        {isProcessing && (
+          <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${dotColor}`} />
+        )}
+        <span className={`relative inline-flex rounded-full h-2 w-2 ${dotColor}`} />
+      </span>
+      <AudioLines className="w-3 h-3" />
+      {speakersDetected > 0 && (
+        <span className="tabular-nums">{speakersDetected}</span>
+      )}
+      {stableSpeakerMap && <Check className="w-3 h-3" />}
+      {status === 'failed' && <X className="w-3 h-3" />}
+    </motion.div>
+  );
+}
+
 /* ─── SidecarHeader (with audio heartbeat) ──── */
 
 function SidecarHeader({
@@ -153,6 +205,7 @@ function SidecarHeader({
   stages,
   acsStatus,
   acsCaptionCount,
+  incrementalStatus,
   onEndSession,
 }: {
   elapsed: number;
@@ -162,6 +215,12 @@ function SidecarHeader({
   stages: string[];
   acsStatus: AcsStatus;
   acsCaptionCount: number;
+  incrementalStatus?: {
+    status: IncrementalBadgeStatus;
+    speakersDetected: number;
+    incrementsCompleted: number;
+    stableSpeakerMap: boolean;
+  };
   onEndSession: () => void;
 }) {
   return (
@@ -179,6 +238,11 @@ function SidecarHeader({
         <div className="shrink-0">
           <AcsStatusBadge status={acsStatus} captionCount={acsCaptionCount} />
         </div>
+        {incrementalStatus && incrementalStatus.status !== 'idle' && (
+          <div className="shrink-0">
+            <IncrementalStatusBadge {...incrementalStatus} />
+          </div>
+        )}
       </div>
 
       {/* Center: timer + compact stage */}
@@ -992,6 +1056,45 @@ export function SidecarView() {
       : []),
   ];
 
+  const baseApiUrl = useSessionStore((s) => s.baseApiUrl);
+
+  // ── Incremental processing status polling ──
+  const [incrementalStatus, setIncrementalStatus] = useState<{
+    status: IncrementalBadgeStatus;
+    speakersDetected: number;
+    incrementsCompleted: number;
+    stableSpeakerMap: boolean;
+  } | undefined>(undefined);
+
+  useEffect(() => {
+    if (!baseApiUrl || !storeSessionId) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const result = await window.desktopAPI.getIncrementalStatus({
+          baseUrl: baseApiUrl,
+          sessionId: storeSessionId,
+        });
+        if (cancelled) return;
+        if (result && result.enabled) {
+          setIncrementalStatus({
+            status: result.status,
+            speakersDetected: result.speakers_detected,
+            incrementsCompleted: result.increments_completed,
+            stableSpeakerMap: result.stable_speaker_map,
+          });
+        }
+      } catch {
+        // Incremental status not available — ignore silently
+      }
+    };
+
+    const timer = setInterval(poll, 5000);
+    poll(); // Initial check
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [baseApiUrl, storeSessionId]);
+
   // ── UI-only local state ──
   const [notes, setNotes] = useState('');
   const [plainText, setPlainText] = useState('');
@@ -1280,6 +1383,7 @@ export function SidecarView() {
         stages={stages}
         acsStatus={acsStatus}
         acsCaptionCount={acsCaptionCount}
+        incrementalStatus={incrementalStatus}
         onEndSession={handleEndSession}
       />
 

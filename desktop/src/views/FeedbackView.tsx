@@ -3914,79 +3914,142 @@ export function FeedbackView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, sessionData?.baseApiUrl, isDemo]);
 
-  // ── Tier 2 polling: starts after finalizeStatus becomes 'final' ──
+  // ── Post-finalization polling: incremental-first, then Tier 2 fallback ──
   useEffect(() => {
     if (finalizeStatus !== 'final' || !sessionId || !sessionData?.baseApiUrl || isDemo) return;
 
     let cancelled = false;
     const baseUrl = sessionData.baseApiUrl;
 
-    const checkTier2 = async () => {
+    // Helper: poll Tier 2 status (legacy path)
+    const startTier2Poll = () => {
+      const checkTier2 = async () => {
+        try {
+          const result = await window.desktopAPI.getTier2Status({
+            baseUrl,
+            sessionId: sessionId!,
+          });
+          if (cancelled) return;
+          const data = result as Record<string, unknown>;
+          if (!data || typeof data !== 'object') return;
+
+          const tier2Status = data.status as string;
+          const tier2Enabled = Boolean(data.enabled);
+          const progress = typeof data.progress === 'number' ? data.progress : 0;
+
+          if (!tier2Enabled || tier2Status === 'idle') {
+            if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+            return;
+          }
+
+          setTier2Progress(progress);
+
+          if (tier2Status === 'succeeded') {
+            if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+            try {
+              const freshResult = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as OpenFeedbackResult | null;
+              if (!cancelled && freshResult?.report) {
+                const normalized = normalizeApiReport(freshResult.report, {
+                  name: sessionData?.sessionName,
+                  date: sessionData?.date,
+                  durationMs: (sessionData?.elapsedSeconds || 0) * 1000,
+                  mode: sessionData?.mode,
+                  participants: sessionData?.participants,
+                });
+                setApiReport(normalized);
+                setFinalizeStatus('tier2_ready');
+              }
+            } catch {
+              // Keep tier1 report if fetch fails
+            }
+            return;
+          }
+
+          if (tier2Status === 'failed') {
+            if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+            return;
+          }
+
+          if (finalizeStatus === 'final') {
+            setFinalizeStatus('tier2_running');
+          }
+        } catch {
+          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+        }
+      };
+
+      tier2PollRef.current = setInterval(checkTier2, 5000);
+      checkTier2();
+    };
+
+    // First, check if incremental processing is active
+    const tryIncrementalFirst = async () => {
       try {
-        const result = await window.desktopAPI.getTier2Status({
+        const incStatus = await window.desktopAPI.getIncrementalStatus({
           baseUrl,
           sessionId: sessionId!,
         });
         if (cancelled) return;
-        const data = result as Record<string, unknown>;
-        if (!data || typeof data !== 'object') return;
 
-        const tier2Status = data.status as string;
-        const tier2Enabled = Boolean(data.enabled);
-        const progress = typeof data.progress === 'number' ? data.progress : 0;
-
-        if (!tier2Enabled || tier2Status === 'idle') {
-          // Tier 2 not active — stop polling
-          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
-          return;
-        }
-
-        setTier2Progress(progress);
-
-        if (tier2Status === 'succeeded') {
-          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
-          // Fetch the enhanced report
-          try {
-            const freshResult = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as OpenFeedbackResult | null;
-            if (!cancelled && freshResult?.report) {
-              const normalized = normalizeApiReport(freshResult.report, {
-                name: sessionData?.sessionName,
-                date: sessionData?.date,
-                durationMs: (sessionData?.elapsedSeconds || 0) * 1000,
-                mode: sessionData?.mode,
-                participants: sessionData?.participants,
+        if (incStatus && incStatus.enabled && incStatus.increments_completed > 0) {
+          // Incremental is active — poll incremental status
+          const checkIncremental = async () => {
+            try {
+              const result = await window.desktopAPI.getIncrementalStatus({
+                baseUrl,
+                sessionId: sessionId!,
               });
-              setApiReport(normalized);
-              setFinalizeStatus('tier2_ready');
+              if (cancelled) return;
+
+              if (result.status === 'succeeded') {
+                if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+                try {
+                  const freshResult = await window.desktopAPI.openFeedback({ baseUrl, sessionId: sessionId! }) as OpenFeedbackResult | null;
+                  if (!cancelled && freshResult?.report) {
+                    const normalized = normalizeApiReport(freshResult.report, {
+                      name: sessionData?.sessionName,
+                      date: sessionData?.date,
+                      durationMs: (sessionData?.elapsedSeconds || 0) * 1000,
+                      mode: sessionData?.mode,
+                      participants: sessionData?.participants,
+                    });
+                    setApiReport(normalized);
+                    setFinalizeStatus('tier2_ready');
+                  }
+                } catch { /* keep current report */ }
+                return;
+              }
+
+              if (result.status === 'failed') {
+                if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+                // Incremental failed — fall back to Tier 2
+                startTier2Poll();
+                return;
+              }
+
+              // Still finalizing
+              setFinalizeStatus('tier2_running');
+            } catch {
+              if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+              startTier2Poll();
             }
-          } catch {
-            // Keep tier1 report if fetch fails
-          }
-          return;
-        }
+          };
 
-        if (tier2Status === 'failed') {
-          if (tier2PollRef.current) clearInterval(tier2PollRef.current);
-          // Tier 2 failed — keep tier1 report, no user-facing error
+          tier2PollRef.current = setInterval(checkIncremental, 3000);
+          checkIncremental();
           return;
-        }
-
-        // Still running
-        if (finalizeStatus === 'final') {
-          setFinalizeStatus('tier2_running');
         }
       } catch {
-        // Tier 2 status endpoint not available — stop silently
-        if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+        // Incremental status not available — fall through to Tier 2
       }
+
+      // Fall back to Tier 2 polling
+      if (!cancelled) startTier2Poll();
     };
 
-    // Small delay before first check (tier2 needs 2s to schedule)
+    // Small delay before first check
     const startDelay = setTimeout(() => {
-      if (!cancelled) {
-        tier2PollRef.current = setInterval(checkTier2, 5000);
-        checkTier2();
-      }
+      if (!cancelled) tryIncrementalFirst();
     }, 3000);
 
     return () => {

@@ -60,6 +60,8 @@ import type {
   CheckpointRequestPayload,
   CheckpointResult,
   FinalizeV2Status,
+  IncrementalStatus,
+  IncrementalSpeakerProfile,
   MemoItem,
   MemoSpeakerBinding,
   MergeCheckpointsRequestPayload,
@@ -77,6 +79,18 @@ import type {
   ImprovementReport,
   SessionContextMeta
 } from "./types_v2";
+import {
+  createDefaultIncrementalStatus,
+  shouldScheduleIncremental,
+  buildProcessChunkPayload,
+  buildFinalizePayload,
+  parseProcessChunkResponse,
+  incrementalEnabled,
+  incrementalIntervalMs,
+  incrementalOverlapMs,
+  incrementalCumulativeThreshold,
+  incrementalAnalysisInterval
+} from "./incremental";
 
 type StreamRole = "mixed" | "teacher" | "students";
 const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
@@ -548,6 +562,11 @@ interface Env {
   TIER2_ENABLED?: string;
   TIER2_AUTO_TRIGGER?: string;
   TIER2_BATCH_ENDPOINT?: string;
+  INCREMENTAL_ENABLED?: string;
+  INCREMENTAL_INTERVAL_MS?: string;
+  INCREMENTAL_OVERLAP_MS?: string;
+  INCREMENTAL_CUMULATIVE_THRESHOLD?: string;
+  INCREMENTAL_ANALYSIS_INTERVAL?: string;
   RESULT_BUCKET: R2Bucket;
   MEETING_SESSION: DurableObjectNamespace<MeetingSessionDO>;
 }
@@ -607,6 +626,7 @@ const SESSION_ROUTE_REGEX =
 const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state|profiles)$/;
 const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
 const SESSION_TIER2_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/tier2-status$/;
+const SESSION_INCREMENTAL_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/incremental-status$/;
 const SESSION_HISTORY_ROUTE_REGEX = /^\/v1\/sessions\/history$/;
 const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
 const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
@@ -621,6 +641,10 @@ const STORAGE_KEY_FINALIZE_V2_STATUS = "finalize_v2_status";
 const STORAGE_KEY_FINALIZE_LOCK = "finalize_lock";
 const STORAGE_KEY_TIER2_STATUS = "tier2_status";
 const STORAGE_KEY_TIER2_ALARM_TAG = "tier2_alarm_tag";
+const STORAGE_KEY_INCREMENTAL_STATUS = "incremental_status";
+const STORAGE_KEY_INCREMENTAL_ALARM_TAG = "incremental_alarm_tag";
+const STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES = "incremental_speaker_profiles";
+const STORAGE_KEY_INCREMENTAL_CHECKPOINT = "incremental_checkpoint";
 const STORAGE_KEY_MEMOS = "memos";
 const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
 const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
@@ -1522,6 +1546,22 @@ export default {
       return proxyToDO(request, env, sessionId, "tier2-status");
     }
 
+    const incrementalStatusMatch = path.match(SESSION_INCREMENTAL_STATUS_ROUTE_REGEX);
+    if (incrementalStatusMatch) {
+      const [, rawSessionId] = incrementalStatusMatch;
+      let sessionId: string;
+      try {
+        sessionId = safeSessionId(rawSessionId);
+      } catch (error) {
+        console.error("incremental-status session parse error:", error);
+        return badRequest("Request processing failed");
+      }
+      if (request.method !== "GET") {
+        return jsonResponse({ detail: "method not allowed" }, 405);
+      }
+      return proxyToDO(request, env, sessionId, "incremental-status");
+    }
+
     if (SESSION_HISTORY_ROUTE_REGEX.test(path)) {
       if (request.method !== "GET") {
         return jsonResponse({ detail: "method not allowed" }, 405);
@@ -1720,6 +1760,23 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.enqueueMutation(async () => {
+      // Check if this alarm is for incremental processing (during recording)
+      const incrementalTag = await this.ctx.storage.get<string>(STORAGE_KEY_INCREMENTAL_ALARM_TAG);
+      if (incrementalTag) {
+        await this.ctx.storage.delete(STORAGE_KEY_INCREMENTAL_ALARM_TAG);
+        const incrementalStatus = await this.loadIncrementalStatus();
+        if (incrementalStatus.status === "recording" || incrementalStatus.status === "idle") {
+          const sessionId = await this.resolveSessionIdForIncremental();
+          if (sessionId) {
+            // Run non-fatally: a failed increment should not crash the alarm handler
+            await this.runIncrementalJob(sessionId).catch((err) => {
+              console.warn(`[incremental] alarm job failed (non-fatal): ${getErrorMessage(err)}`);
+            });
+          }
+          return; // Incremental alarm handled; do not run stuck-finalize or cleanup
+        }
+      }
+
       // Check if this alarm is for Tier 2 background processing
       const tier2Tag = await this.ctx.storage.get<string>(STORAGE_KEY_TIER2_ALARM_TAG);
       if (tier2Tag) {
@@ -1734,6 +1791,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.failStuckFinalizeIfNeeded("alarm");
       await this.cleanupExpiredAudioChunks();
     });
+  }
+
+  /** Resolve session ID when DO has not yet been finalized (during recording). */
+  private async resolveSessionIdForIncremental(): Promise<string | null> {
+    // Try the finalized result key first
+    const resultKey = await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2);
+    if (resultKey) {
+      const match = resultKey.match(/sessions\/([^/]+)\//);
+      if (match) return match[1];
+    }
+    // Fall back to the incremental status started_at tag stored by scheduleIncrementalAlarm
+    const tag = await this.ctx.storage.get<string>("incremental_session_id");
+    return typeof tag === "string" && tag ? tag : null;
   }
 
   private async resolveSessionId(): Promise<string> {
@@ -6020,10 +6090,37 @@ export class MeetingSessionDO extends DurableObject<Env> {
         console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${getErrorMessage(err)}`);
       });
 
+      // ── Incremental finalize: if increments were processed during recording, use them ──
+      // If incremental is enabled and at least one increment completed, call /incremental/finalize
+      // instead of scheduling Tier 2. On failure, fall back to Tier 2.
+      let incrementalFinalizeSucceeded = false;
+      const incrementalStatusForFinalize = await this.loadIncrementalStatus();
+      if (incrementalEnabled(this.env) && incrementalStatusForFinalize.increments_completed > 0) {
+        try {
+          const finalizeNameAliases = ((state.config ?? {}) as Record<string, unknown>).name_aliases as Record<string, string[]> | undefined;
+          incrementalFinalizeSucceeded = await this.runIncrementalFinalize(
+            sessionId,
+            memos,
+            stats,
+            evidence,
+            locale,
+            finalizeNameAliases ?? {}
+          );
+          if (incrementalFinalizeSucceeded) {
+            console.log(`[finalize-v2] incremental finalize used as primary for session=${sessionId}, skipping tier2`);
+          } else {
+            console.warn(`[finalize-v2] incremental finalize failed, falling back to tier2 for session=${sessionId}`);
+          }
+        } catch (incFinalizeErr) {
+          console.warn(`[finalize-v2] incremental finalize threw (non-fatal): ${getErrorMessage(incFinalizeErr)}`);
+        }
+      }
+
       // ── Tier 2 background trigger ──
       // After Tier 1 succeeds, check if Tier 2 batch re-processing is enabled.
+      // Skip Tier 2 if incremental finalize already succeeded.
       // If so, schedule a DO alarm to run the Tier 2 job asynchronously.
-      if (this.tier2Enabled() && this.tier2AutoTrigger()) {
+      if (!incrementalFinalizeSucceeded && this.tier2Enabled() && this.tier2AutoTrigger()) {
         try {
           const tier2: Tier2Status = {
             enabled: true,
@@ -6521,6 +6618,331 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
+  // ── Incremental Processing ─────────────────────────────────────────────
+
+  private async loadIncrementalStatus(): Promise<IncrementalStatus> {
+    const stored = await this.ctx.storage.get<IncrementalStatus>(STORAGE_KEY_INCREMENTAL_STATUS);
+    if (!stored) return createDefaultIncrementalStatus();
+    return {
+      ...createDefaultIncrementalStatus(),
+      ...stored,
+      enabled: incrementalEnabled(this.env)
+    };
+  }
+
+  private async storeIncrementalStatus(status: IncrementalStatus): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_STATUS, status);
+  }
+
+  private async updateIncrementalStatus(patch: Partial<IncrementalStatus>): Promise<IncrementalStatus> {
+    const current = await this.loadIncrementalStatus();
+    const next: IncrementalStatus = { ...current, ...patch };
+    await this.storeIncrementalStatus(next);
+    return next;
+  }
+
+  /**
+   * Schedule a DO alarm for incremental processing 500ms from now.
+   * Stores the session ID so the alarm handler can resolve it without a finalized result key.
+   * No-op if incremental is disabled or alarm already pending.
+   */
+  private async scheduleIncrementalAlarm(sessionId: string): Promise<void> {
+    const existing = await this.ctx.storage.get<string>(STORAGE_KEY_INCREMENTAL_ALARM_TAG);
+    if (existing) return; // alarm already queued
+
+    const tag = `incremental_${sessionId}_${Date.now()}`;
+    await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_ALARM_TAG, tag);
+    // Store session ID so resolveSessionIdForIncremental can find it before finalization
+    await this.ctx.storage.put("incremental_session_id", sessionId);
+    await this.ctx.storage.setAlarm(Date.now() + 500);
+    console.log(`[incremental] alarm scheduled for session=${sessionId} tag=${tag}`);
+  }
+
+  /**
+   * Main incremental processing job — runs in the alarm handler.
+   * Gathers the audio range, POSTs to /incremental/process-chunk, stores results.
+   * Non-fatal: logs warning and increments failed count on any error.
+   */
+  private async runIncrementalJob(sessionId: string): Promise<void> {
+    const status = await this.loadIncrementalStatus();
+    if (!incrementalEnabled(this.env)) return;
+
+    // Compute total audio duration from "mixed" ingest (primary stream)
+    const ingestByStream = await this.loadIngestByStream(sessionId);
+    const totalAudioMs = ingestByStream.mixed.received_chunks * 1000;
+
+    const decision = shouldScheduleIncremental(this.env, status, totalAudioMs);
+    if (!decision.schedule) {
+      // Nothing to process yet — update status to "recording"
+      if (status.status === "idle") {
+        await this.updateIncrementalStatus({ status: "recording", enabled: true });
+      }
+      return;
+    }
+
+    await this.updateIncrementalStatus({
+      status: "processing",
+      enabled: true,
+      started_at: status.started_at ?? this.currentIsoTs()
+    });
+
+    try {
+      // Gather audio chunks for the range [startMs, endMs)
+      // Each chunk is 1 second of PCM, so seq corresponds to second offset
+      const sessionPrefix = `sessions/${sessionId}`;
+      const chunksPrefix = `${sessionPrefix}/chunks/`;
+
+      // All chunks for the "mixed" stream (primary)
+      const allChunkKeys: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({
+          prefix: chunksPrefix,
+          cursor,
+          limit: 500
+        });
+        for (const obj of listing.objects) {
+          // Only include top-level chunks (no sub-folder = mixed stream)
+          if (!obj.key.slice(chunksPrefix.length).includes("/")) {
+            allChunkKeys.push(obj.key);
+          }
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      allChunkKeys.sort();
+
+      // Filter to the [startMs, endMs) window by sequence index
+      // chunkObjectKey produces: sessions/{id}/chunks/{seqPadded}.pcm
+      // Each chunk = 1 second = 1000ms; seq 0 = [0ms, 1000ms)
+      const startSeq = Math.floor(decision.startMs / 1000);
+      const endSeq = Math.ceil(decision.endMs / 1000);
+
+      const rangeKeys = allChunkKeys.filter((key) => {
+        const seqStr = key.split("/").pop()?.replace(".pcm", "") ?? "0";
+        const seq = parseInt(seqStr, 10);
+        return seq >= startSeq && seq < endSeq;
+      });
+
+      if (rangeKeys.length === 0) {
+        console.warn(`[incremental] no chunks found for range [${decision.startMs},${decision.endMs}) session=${sessionId}`);
+        await this.updateIncrementalStatus({
+          status: "recording",
+          increments_failed: status.increments_failed + 1,
+          warnings: [...status.warnings, `no chunks for range [${decision.startMs},${decision.endMs})`]
+        });
+        return;
+      }
+
+      const pcmParts: Uint8Array[] = [];
+      for (const key of rangeKeys) {
+        const obj = await this.env.RESULT_BUCKET.get(key);
+        if (obj) {
+          pcmParts.push(new Uint8Array(await obj.arrayBuffer()));
+        }
+      }
+
+      const fullPcm = concatUint8Arrays(pcmParts);
+      const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+      const audioB64 = bytesToBase64(wavBytes);
+
+      // Load current speaker profiles, memos, stats
+      const storedProfiles = await this.ctx.storage.get<IncrementalSpeakerProfile[]>(STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES);
+      const speakerProfiles: IncrementalSpeakerProfile[] = storedProfiles ?? [];
+
+      const memos = await this.loadMemos();
+      const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
+      const locale = getSessionLocale(state, this.env);
+
+      // Compute rough speaker stats from existing utterances for context
+      const utterancesByStream = await this.loadUtterancesRawByStream();
+      const allUtterances = [
+        ...utterancesByStream.mixed,
+        ...utterancesByStream.teacher,
+        ...utterancesByStream.students
+      ];
+      const roughStats = computeSpeakerStats(allUtterances as unknown as TranscriptItem[]);
+
+      const payload = buildProcessChunkPayload({
+        sessionId,
+        incrementIndex: decision.incrementIndex,
+        audioB64,
+        startMs: decision.startMs,
+        endMs: decision.endMs,
+        language: locale,
+        speakerProfiles,
+        memos,
+        stats: roughStats,
+        analysisInterval: incrementalAnalysisInterval(this.env)
+      });
+
+      const inferenceBase = (
+        (this.env.INFERENCE_BASE_URL ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "")
+      ).trim() || "http://127.0.0.1:8000";
+      const apiKey = ((this.env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
+
+      const resp = await fetch(`${inferenceBase}/incremental/process-chunk`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { "x-api-key": apiKey } : {})
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(240_000) // 4 min timeout for a 3-min increment
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "unknown");
+        throw new Error(`/incremental/process-chunk returned ${resp.status}: ${errText.slice(0, 200)}`);
+      }
+
+      const json = await resp.json() as Record<string, unknown>;
+      const parsed = parseProcessChunkResponse(json);
+
+      // Persist updated speaker profiles and checkpoint
+      await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES, parsed.speakerProfiles);
+      if (parsed.checkpoint) {
+        await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_CHECKPOINT, parsed.checkpoint);
+      }
+
+      await this.updateIncrementalStatus({
+        status: "recording",
+        increments_completed: status.increments_completed + 1,
+        last_processed_ms: decision.endMs,
+        speakers_detected: parsed.speakersDetected,
+        stable_speaker_map: parsed.stableSpeakerMap,
+        last_increment_at: this.currentIsoTs(),
+        error: null
+      });
+
+      console.log(
+        `[incremental] increment ${decision.incrementIndex} completed for session=${sessionId}` +
+        ` speakers=${parsed.speakersDetected} utterances=${parsed.utterances.length}`
+      );
+    } catch (err) {
+      const message = getErrorMessage(err);
+      console.warn(`[incremental] increment ${decision.incrementIndex} failed (non-fatal) session=${sessionId}: ${message}`);
+      await this.updateIncrementalStatus({
+        status: "recording",
+        increments_failed: status.increments_failed + 1,
+        warnings: [...status.warnings, `increment ${decision.incrementIndex} failed: ${message}`],
+        error: message
+      });
+    }
+  }
+
+  /**
+   * Call the /incremental/finalize endpoint after recording ends.
+   * Returns true if finalization succeeded (caller can skip Tier 2).
+   * Returns false on failure (caller should fall back to Tier 2).
+   */
+  private async runIncrementalFinalize(
+    sessionId: string,
+    memos: MemoItem[],
+    stats: SpeakerStatItem[],
+    evidence: Array<import("./types_v2").EvidenceItem>,
+    locale: string,
+    nameAliases: Record<string, string[]>
+  ): Promise<boolean> {
+    try {
+      const incrementalStatus = await this.loadIncrementalStatus();
+      if (!incrementalEnabled(this.env) || incrementalStatus.increments_completed === 0) {
+        return false;
+      }
+
+      await this.updateIncrementalStatus({ status: "finalizing" });
+
+      // Gather all audio for the full session
+      const sessionPrefix = `sessions/${sessionId}`;
+      const chunksPrefix = `${sessionPrefix}/chunks/`;
+      const allChunkKeys: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({
+          prefix: chunksPrefix,
+          cursor,
+          limit: 500
+        });
+        for (const obj of listing.objects) {
+          if (!obj.key.slice(chunksPrefix.length).includes("/")) {
+            allChunkKeys.push(obj.key);
+          }
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      allChunkKeys.sort();
+
+      const pcmParts: Uint8Array[] = [];
+      for (const key of allChunkKeys) {
+        const obj = await this.env.RESULT_BUCKET.get(key);
+        if (obj) {
+          pcmParts.push(new Uint8Array(await obj.arrayBuffer()));
+        }
+      }
+
+      if (pcmParts.length === 0) {
+        console.warn(`[incremental] finalize: no audio chunks found for session=${sessionId}`);
+        await this.updateIncrementalStatus({ status: "failed", error: "no audio chunks" });
+        return false;
+      }
+
+      const fullPcm = concatUint8Arrays(pcmParts);
+      const endMs = (fullPcm.byteLength / (TARGET_SAMPLE_RATE * 2)) * 1000; // PCM16 = 2 bytes/sample
+      const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+      const finalAudioB64 = bytesToBase64(wavBytes);
+
+      const payload = buildFinalizePayload({
+        sessionId,
+        finalAudioB64,
+        startMs: 0,
+        endMs: Math.round(endMs),
+        memos,
+        stats,
+        evidence,
+        locale,
+        nameAliases
+      });
+
+      const inferenceBase = (
+        (this.env.INFERENCE_BASE_URL ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "")
+      ).trim() || "http://127.0.0.1:8000";
+      const apiKey = ((this.env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
+
+      const resp = await fetch(`${inferenceBase}/incremental/finalize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { "x-api-key": apiKey } : {})
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(300_000) // 5 min timeout
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "unknown");
+        throw new Error(`/incremental/finalize returned ${resp.status}: ${errText.slice(0, 200)}`);
+      }
+
+      // Response is a full ResultV2-compatible object — caller decides what to do with it.
+      // For now we just return true so the finalize_v2 persist stage knows it succeeded.
+      // The finalize_v2 flow can call runIncrementalFinalize separately and merge the result.
+      await this.updateIncrementalStatus({
+        status: "succeeded",
+        last_increment_at: this.currentIsoTs(),
+        error: null
+      });
+
+      console.log(`[incremental] finalize succeeded for session=${sessionId}`);
+      return true;
+    } catch (err) {
+      const message = getErrorMessage(err);
+      console.warn(`[incremental] finalize failed (non-fatal) session=${sessionId}: ${message}`);
+      await this.updateIncrementalStatus({ status: "failed", error: message });
+      return false;
+    }
+  }
+
   private async handleChunkFrame(
     sessionId: string,
     streamRole: StreamRole,
@@ -6633,6 +7055,23 @@ export class MeetingSessionDO extends DurableObject<Env> {
     // Previously, ctx.waitUntil races caused hundreds of concurrent
     // events+report LLM calls during recording, exhausting the thread pool
     // and preventing the synthesize call from succeeding at finalization.
+
+    // ── Incremental processing scheduling ──
+    // Only check on the "mixed" stream to avoid duplicate scheduling.
+    if (incrementalEnabled(this.env) && streamRole === "mixed") {
+      this.ctx.waitUntil(
+        (async () => {
+          const incStatus = await this.loadIncrementalStatus();
+          const totalAudioMs = ingestByStream.mixed.received_chunks * 1000;
+          const decision = shouldScheduleIncremental(this.env, incStatus, totalAudioMs);
+          if (decision.schedule) {
+            await this.scheduleIncrementalAlarm(sessionId);
+          }
+        })().catch((err) => {
+          console.warn(`[incremental] scheduling check failed (non-fatal) session=${sessionId}: ${getErrorMessage(err)}`);
+        })
+      );
+    }
   }
 
   private deriveMixedCaptureState(captureByStream: Record<StreamRole, CaptureState>): CaptureState["capture_state"] {
@@ -7938,6 +8377,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
       return jsonResponse({
         session_id: sessionId,
         ...tier2
+      });
+    }
+
+    if (action === "incremental-status" && request.method === "GET") {
+      const incrementalStatus = await this.loadIncrementalStatus();
+      return jsonResponse({
+        session_id: sessionId,
+        ...incrementalStatus
       });
     }
 
