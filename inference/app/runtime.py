@@ -14,12 +14,17 @@ from app.services.report_generator import ReportGenerator
 from app.services.improvement_generator import ImprovementGenerator
 from app.services.report_synthesizer import ReportSynthesizer
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
+from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
 from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 from app.services.sv import ModelScopeSVBackend
+from app.services.sv_onnx import OnnxSVBackend
 from app.services.whisper_batch import WhisperBatchTranscriber
 
-# ASR backend union type (duck typing — both have transcribe, transcribe_pcm, device, backend, model_size)
-ASRBackend = SenseVoiceTranscriber | WhisperBatchTranscriber
+# SV backend union type (duck typing — both have extract_embedding, score_embeddings, health, device)
+SVBackend = ModelScopeSVBackend | OnnxSVBackend
+
+# ASR backend union type (duck typing — all have transcribe, transcribe_pcm, device, backend, model_size)
+ASRBackend = SenseVoiceTranscriber | SenseVoiceOnnxTranscriber | WhisperBatchTranscriber
 
 
 def build_asr_backend(settings: Settings) -> ASRBackend:
@@ -29,6 +34,10 @@ def build_asr_backend(settings: Settings) -> ASRBackend:
             model_id=settings.sensevoice_model_id,
             device=settings.sensevoice_device,
             cache_dir=settings.modelscope_cache,
+        )
+    elif settings.asr_backend == "sensevoice-onnx":
+        return SenseVoiceOnnxTranscriber(
+            model_dir=settings.asr_onnx_model_path,
         )
     else:
         return WhisperBatchTranscriber(
@@ -41,7 +50,7 @@ def build_asr_backend(settings: Settings) -> ASRBackend:
 class AppRuntime:
     settings: Settings
     orchestrator: InferenceOrchestrator
-    sv_backend: ModelScopeSVBackend
+    sv_backend: SVBackend
     asr_backend: ASRBackend
     events_analyzer: EventsAnalyzer
     report_generator: ReportGenerator
@@ -61,12 +70,17 @@ def build_runtime(settings: Settings) -> AppRuntime:
     else:
         segmenter = DiarizationSegmenter(diarizer=UnimplementedDiarizer())
 
-    sv_backend = ModelScopeSVBackend(
-        model_id=settings.sv_model_id,
-        model_revision=settings.sv_model_revision,
-        cache_dir=settings.modelscope_cache,
-        device=settings.sv_device,
-    )
+    if settings.sv_backend == "onnx":
+        sv_backend: SVBackend = OnnxSVBackend(
+            model_path=settings.sv_onnx_model_path,
+        )
+    else:
+        sv_backend = ModelScopeSVBackend(
+            model_id=settings.sv_model_id,
+            model_revision=settings.sv_model_revision,
+            cache_dir=settings.modelscope_cache,
+            device=settings.sv_device,
+        )
 
     orchestrator = InferenceOrchestrator(
         settings=settings,

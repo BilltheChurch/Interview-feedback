@@ -19,3 +19,6 @@ pytest==8.3.4
 # Tier 2 batch processing (optional — graceful degradation if absent)
 faster-whisper>=1.0
 pyannote.audio>=4.0.0
+# ONNX Runtime backends (Phase 3 — torch-free inference)
+sherpa-onnx>=1.10.0
+onnxruntime>=1.17.0
