@@ -44,21 +44,41 @@ class Settings(BaseSettings):
     rate_limit_requests: int = Field(default=60, alias="RATE_LIMIT_REQUESTS")
     rate_limit_window_seconds: int = Field(default=60, alias="RATE_LIMIT_WINDOW_SECONDS")
 
-    enable_diarization: bool = Field(default=False, alias="ENABLE_DIARIZATION")
+    enable_diarization: bool = Field(default=True, alias="ENABLE_DIARIZATION")
     segmenter_backend: Literal["vad", "diarization"] = Field(default="vad", alias="SEGMENTER_BACKEND")
     modelscope_cache: str = Field(default="~/.cache/modelscope", alias="MODELSCOPE_CACHE")
     sv_device: str = Field(default="auto", alias="SV_DEVICE")
+    sv_backend: Literal["modelscope", "onnx"] = Field(
+        default="modelscope", alias="SV_BACKEND"
+    )
+    sv_onnx_model_path: str = Field(
+        default="~/.cache/campplus-onnx/campplus.onnx",
+        alias="SV_ONNX_MODEL_PATH",
+    )
 
     vad_mode: int = Field(default=2, alias="VAD_MODE")
     vad_frame_ms: int = Field(default=30, alias="VAD_FRAME_MS")
     vad_min_speech_ms: int = Field(default=300, alias="VAD_MIN_SPEECH_MS")
     vad_min_silence_ms: int = Field(default=250, alias="VAD_MIN_SILENCE_MS")
 
+    # ASR backend selection
+    asr_backend: Literal["sensevoice", "sensevoice-onnx", "whisper", "whisper-cpp"] = Field(
+        default="sensevoice", alias="ASR_BACKEND"
+    )
+    sensevoice_model_id: str = Field(
+        default="iic/SenseVoiceSmall", alias="SENSEVOICE_MODEL_ID"
+    )
+    sensevoice_device: str = Field(default="auto", alias="SENSEVOICE_DEVICE")
+    asr_onnx_model_path: str = Field(
+        default="~/.cache/sensevoice-onnx/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+        alias="ASR_ONNX_MODEL_PATH",
+    )
+
     # Tier 2 batch processing
     whisper_model_size: str = Field(default="large-v3", alias="WHISPER_MODEL_SIZE")
     whisper_device: str = Field(default="auto", alias="WHISPER_DEVICE")
     pyannote_model_id: str = Field(
-        default="pyannote/speaker-diarization-3.1", alias="PYANNOTE_MODEL_ID"
+        default="pyannote/speaker-diarization-community-1", alias="PYANNOTE_MODEL_ID"
     )
     pyannote_embedding_model_id: str = Field(
         default="pyannote/wespeaker-voxceleb-resnet34-LM", alias="PYANNOTE_EMBEDDING_MODEL_ID"

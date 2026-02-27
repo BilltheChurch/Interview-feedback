@@ -99,7 +99,7 @@ def test_transcribe_window_json_mode():
     pcm = _sample_pcm()
     pcm_b64 = base64.b64encode(pcm).decode()
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.post(
             "/asr/transcribe-window",
             json={
@@ -147,7 +147,7 @@ def test_transcribe_window_json_defaults():
 
     pcm_b64 = base64.b64encode(_sample_pcm()).decode()
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.post(
             "/asr/transcribe-window",
             json={"pcm_base64": pcm_b64},
@@ -174,7 +174,7 @@ def test_transcribe_window_binary_mode():
 
     pcm = _sample_pcm()
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.post(
             "/asr/transcribe-window?sample_rate=16000&language=zh",
             content=pcm,
@@ -200,7 +200,7 @@ def test_transcribe_window_binary_default_params():
 
     pcm = _sample_pcm()
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.post(
             "/asr/transcribe-window",
             content=pcm,
@@ -223,7 +223,7 @@ def test_asr_status():
     from app.main import app
     client = TestClient(app, raise_server_exceptions=False)
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.get("/asr/status")
 
     assert resp.status_code == 200
@@ -239,7 +239,11 @@ def test_asr_status_when_unavailable():
     from app.main import app
     client = TestClient(app, raise_server_exceptions=False)
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", side_effect=RuntimeError("model load failed")):
+    # Simulate runtime.asr_backend raising an error on property access
+    broken_runtime = MagicMock()
+    type(broken_runtime).asr_backend = property(lambda self: (_ for _ in ()).throw(RuntimeError("model load failed")))
+
+    with _no_auth(), patch.object(app.state, "runtime", broken_runtime):
         resp = client.get("/asr/status")
 
     assert resp.status_code == 200
@@ -319,7 +323,7 @@ def test_transcribe_window_empty_utterances():
 
     pcm_b64 = base64.b64encode(_sample_pcm()).decode()
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.post(
             "/asr/transcribe-window",
             json={"pcm_base64": pcm_b64},
@@ -342,7 +346,7 @@ def test_transcribe_window_whisper_error():
 
     pcm_b64 = base64.b64encode(_sample_pcm()).decode()
 
-    with _no_auth(), patch("app.routes.asr._get_whisper", return_value=mock_whisper):
+    with _no_auth(), patch.object(app.state, "runtime", MagicMock(asr_backend=mock_whisper)):
         resp = client.post(
             "/asr/transcribe-window",
             json={"pcm_base64": pcm_b64},

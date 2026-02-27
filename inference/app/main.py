@@ -45,6 +45,7 @@ from app.schemas import (
     ResolveResponse,
     ScoreRequest,
     ScoreResponse,
+    SpeakerTrack,
     SynthesizeReportRequest,
     ImprovementRequest,
     ImprovementResponse,
@@ -65,6 +66,7 @@ rate_limiter = (
     else None
 )
 app = FastAPI(title=settings.app_name, version="0.1.0")
+app.state.runtime = runtime
 app.include_router(asr_router)
 app.include_router(batch_router)
 
@@ -78,16 +80,13 @@ async def _expand_thread_pool() -> None:
 
 
 @app.on_event("startup")
-async def _warmup_whisper() -> None:
-    """Pre-load the Whisper model at startup so the first ASR request doesn't block for minutes."""
+async def _warmup_asr() -> None:
+    """Log ASR backend info at startup. Model is lazy-loaded on first transcribe call."""
     try:
-        from app.routes.asr import _get_whisper
-
-        logger.info("Warming up Whisper model (this may take a few minutes on first run)...")
-        whisper = await asyncio.to_thread(_get_whisper)
-        logger.info("Whisper model ready: device=%s, backend=%s", whisper.device, whisper.backend)
+        asr = runtime.asr_backend
+        logger.info("ASR backend ready: backend=%s, device=%s, model=%s", asr.backend, asr.device, asr.model_size)
     except Exception as exc:
-        logger.warning("Whisper warm-up failed (will retry on first request): %s", exc)
+        logger.warning("ASR backend info unavailable: %s", exc)
 
 
 @app.middleware("http")
@@ -285,9 +284,54 @@ async def merge_checkpoints(req: MergeCheckpointsRequest) -> AnalysisReportRespo
 
 @app.post("/sd/diarize", response_model=DiarizeResponse)
 async def diarize(req: DiarizeRequest) -> DiarizeResponse:
-    """Phase 2 placeholder — speaker diarization is not yet implemented.
-    Returns 501 Not Implemented."""
-    raise NotImplementedServiceError("/sd/diarize is reserved for Phase 2 diarization plugin")
+    """Speaker diarization using pyannote.audio full pipeline."""
+    if not runtime.settings.enable_diarization:
+        raise NotImplementedServiceError("/sd/diarize is disabled (ENABLE_DIARIZATION=false)")
+
+    import base64
+    import tempfile
+    import wave
+    from pathlib import Path
+
+    from app.routes.batch import _get_diarizer
+
+    # Decode base64 audio to temp WAV file
+    audio_bytes = base64.b64decode(req.audio.content_b64)
+
+    if req.audio.format == "pcm_s16le":
+        # Raw PCM needs WAV header
+        sr = req.audio.sample_rate or 16000
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        with wave.open(tmp, "wb") as wf:
+            wf.setnchannels(req.audio.channels or 1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(audio_bytes)
+        tmp_path = tmp.name
+    else:
+        # WAV/other formats: write directly
+        suffix = f".{req.audio.format}" if req.audio.format != "wav" else ".wav"
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(audio_bytes)
+        tmp.close()
+        tmp_path = tmp.name
+
+    try:
+        diarizer = _get_diarizer()
+        result = await asyncio.to_thread(diarizer.diarize, tmp_path)
+
+        return DiarizeResponse(
+            session_id=req.session_id,
+            tracks=[
+                SpeakerTrack(speaker_id=s.speaker_id, start_ms=s.start_ms, end_ms=s.end_ms)
+                for s in result.segments
+            ],
+        )
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @app.exception_handler(HTTPException)

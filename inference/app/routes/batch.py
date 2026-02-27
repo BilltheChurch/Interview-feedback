@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -78,8 +78,53 @@ _DOWNLOAD_TIMEOUT_S = 120
 async def _resolve_audio(audio_url: str) -> str:
     """Download audio from URL to a temp file, or return local path if it exists.
 
+    Supports:
+      - Local file paths (within AUDIO_UPLOAD_DIR)
+      - http:// / https:// remote URLs
+      - data:audio/...;base64,... data URIs (used by Edge Worker Tier 2)
+
     Returns the path to the audio file on disk.
     """
+    # Data URI — decode base64 inline audio (sent by Edge Worker Tier 2)
+    if audio_url.startswith("data:"):
+        import base64 as _b64
+
+        # Format: data:<mime>;base64,<payload>
+        try:
+            header, payload = audio_url.split(",", 1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Malformed data URI: missing comma separator")
+
+        if ";base64" not in header:
+            raise HTTPException(status_code=400, detail="Only base64-encoded data URIs are supported")
+
+        # Determine file extension from MIME type
+        mime = header.split(":")[1].split(";")[0] if ":" in header else ""
+        ext_map = {
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/wave": ".wav",
+            "audio/mp3": ".mp3",
+            "audio/mpeg": ".mp3",
+            "audio/flac": ".flac",
+            "audio/ogg": ".ogg",
+            "audio/pcm": ".pcm",
+        }
+        suffix = ext_map.get(mime, ".wav")
+
+        try:
+            raw = _b64.b64decode(payload)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Failed to decode base64 audio data")
+
+        if len(raw) > _MAX_AUDIO_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Audio data too large")
+
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(raw)
+        tmp.close()
+        return tmp.name
+
     # Local file path
     if not audio_url.startswith(("http://", "https://")):
         local_path = Path(audio_url).resolve()
@@ -228,15 +273,15 @@ class BatchProcessResponse(BaseModel):
 
 
 @router.post("/transcribe", response_model=BatchTranscribeResponse)
-async def batch_transcribe(req: BatchTranscribeRequest) -> BatchTranscribeResponse:
-    """Batch transcribe an audio file using Whisper."""
+async def batch_transcribe(req: BatchTranscribeRequest, request: Request) -> BatchTranscribeResponse:
+    """Batch transcribe an audio file using the configured ASR backend."""
     audio_path = await _resolve_audio(req.audio_url)
     is_temp = audio_path != req.audio_url
 
     try:
-        whisper = _get_whisper()
+        asr = request.app.state.runtime.asr_backend
         result: TranscriptResult = await asyncio.to_thread(
-            whisper.transcribe, audio_path, language=req.language
+            asr.transcribe, audio_path, language=req.language
         )
 
         utterances = [
@@ -317,10 +362,10 @@ async def batch_diarize(req: BatchDiarizeRequest) -> BatchDiarizeResponse:
 
 
 @router.post("/process", response_model=BatchProcessResponse)
-async def batch_process(req: BatchProcessRequest) -> BatchProcessResponse:
+async def batch_process(req: BatchProcessRequest, request: Request) -> BatchProcessResponse:
     """Combined batch processing: transcribe + diarize + merge.
 
-    Downloads the audio once, runs Whisper transcription and pyannote
+    Downloads the audio once, runs ASR transcription and pyannote
     diarization in parallel, then merges the results by aligning
     utterances to speaker segments.
     """
@@ -328,12 +373,12 @@ async def batch_process(req: BatchProcessRequest) -> BatchProcessResponse:
     is_temp = audio_path != req.audio_url
 
     try:
-        whisper = _get_whisper()
+        asr = request.app.state.runtime.asr_backend
         diarizer = _get_diarizer()
 
         # Run transcription and diarization in parallel
         transcript_result, diarize_result = await asyncio.gather(
-            asyncio.to_thread(whisper.transcribe, audio_path, language=req.language),
+            asyncio.to_thread(asr.transcribe, audio_path, language=req.language),
             asyncio.to_thread(
                 diarizer.diarize,
                 audio_path,

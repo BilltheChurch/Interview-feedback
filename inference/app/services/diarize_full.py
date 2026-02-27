@@ -1,10 +1,10 @@
 """Pyannote.audio full-pipeline diarization service.
 
-Runs the complete pyannote/speaker-diarization-3.1 pipeline on a full audio
+Runs the complete pyannote/speaker-diarization-community-1 pipeline on a full audio
 file, producing globally consistent speaker segments and optional embeddings.
 
 Requires:
-  - pyannote.audio >= 3.1
+  - pyannote.audio >= 4.0.0
   - A HuggingFace token with accepted pyannote model licenses
   - torch (CUDA, MPS, or CPU)
 
@@ -55,7 +55,7 @@ class DiarizeResult:
 class PyannoteFullDiarizer:
     """Full-file speaker diarization using pyannote.audio.
 
-    Loads the ``pyannote/speaker-diarization-3.1`` pipeline (or a custom
+    Loads the ``pyannote/speaker-diarization-community-1`` pipeline (or a custom
     model ID) and runs it on a complete audio file.
 
     Usage::
@@ -68,7 +68,7 @@ class PyannoteFullDiarizer:
         self,
         device: str = "auto",
         hf_token: str | None = None,
-        model_id: str = "pyannote/speaker-diarization-3.1",
+        model_id: str = "pyannote/speaker-diarization-community-1",
         embedding_model_id: str = "pyannote/wespeaker-voxceleb-resnet34-LM",
     ) -> None:
         self._device: DeviceType = detect_device() if device == "auto" else device  # type: ignore[assignment]
@@ -100,7 +100,7 @@ class PyannoteFullDiarizer:
             raise RuntimeError(
                 "HuggingFace token required for pyannote.audio. "
                 "Set HF_TOKEN environment variable or pass hf_token to constructor. "
-                "You must also accept the model license at https://huggingface.co/pyannote/speaker-diarization-3.1"
+                "You must also accept the model license at https://huggingface.co/pyannote/speaker-diarization-community-1"
             )
 
         from pyannote.audio import Pipeline
@@ -108,7 +108,7 @@ class PyannoteFullDiarizer:
         logger.info("Loading pyannote pipeline: %s ...", self._model_id)
         self._pipeline = Pipeline.from_pretrained(
             self._model_id,
-            use_auth_token=self._hf_token,
+            token=self._hf_token,
         )
 
         import torch
@@ -117,9 +117,10 @@ class PyannoteFullDiarizer:
             # ROCm uses torch.cuda API via HIP — "cuda" device works for both
             self._pipeline.to(torch.device("cuda"))
         elif self._device == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            # pyannote 3.1 has limited MPS support — some ops may fall back to CPU
+            # pyannote community-1 has limited MPS support — some ops may fall back to CPU
             try:
                 self._pipeline.to(torch.device("mps"))
+                logger.info("Pyannote pipeline successfully transferred to MPS device")
             except RuntimeError:
                 logger.warning("MPS transfer failed for pyannote, falling back to CPU")
                 self._pipeline.to(torch.device("cpu"))
@@ -143,7 +144,7 @@ class PyannoteFullDiarizer:
             logger.info("Loading embedding model: %s ...", self._embedding_model_id)
             self._embedding_model = Inference(
                 self._embedding_model_id,
-                use_auth_token=self._hf_token,
+                token=self._hf_token,
                 window="whole",
             )
 
@@ -196,7 +197,13 @@ class PyannoteFullDiarizer:
                 kwargs["max_speakers"] = max_speakers
 
         logger.info("Running pyannote diarization on %s (kwargs=%s)", audio_path, kwargs)
-        diarization = self._pipeline(audio_path, **kwargs)
+        raw_output = self._pipeline(audio_path, **kwargs)
+
+        # pyannote 4.x returns DiarizeOutput; extract the Annotation
+        if hasattr(raw_output, "speaker_diarization"):
+            diarization = raw_output.speaker_diarization
+        else:
+            diarization = raw_output
 
         # Convert pyannote Annotation to our segment format
         segments: list[SpeakerSegment] = []
@@ -211,11 +218,23 @@ class PyannoteFullDiarizer:
                 )
             )
 
-        # Extract speaker embeddings (centroids) if embedding model available
+        # Extract speaker embeddings
         embeddings: dict[str, list[float]] = {}
-        self._ensure_embedding_model()
-        if self._embedding_model is not None:
-            embeddings = self._extract_speaker_embeddings(audio_path, diarization)
+
+        # pyannote 4.x: DiarizeOutput includes speaker_embeddings directly
+        if hasattr(raw_output, "speaker_embeddings") and raw_output.speaker_embeddings is not None:
+            import numpy as np
+
+            emb_array = raw_output.speaker_embeddings  # shape: (num_speakers, dim)
+            unique_speakers = sorted(set(s.speaker_id for s in segments))
+            for i, spk in enumerate(unique_speakers):
+                if i < len(emb_array):
+                    embeddings[spk] = emb_array[i].tolist()
+        else:
+            # Fallback: use separate embedding model (pyannote <4.x)
+            self._ensure_embedding_model()
+            if self._embedding_model is not None:
+                embeddings = self._extract_speaker_embeddings(audio_path, diarization)
 
         # Estimate duration from last segment or from audio
         duration_ms = segments[-1].end_ms if segments else 0
