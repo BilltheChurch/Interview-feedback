@@ -1,14 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   createDefaultIncrementalStatus,
-  incrementalEnabled,
   incrementalIntervalMs,
   incrementalOverlapMs,
   incrementalCumulativeThreshold,
   incrementalAnalysisInterval,
   shouldScheduleIncremental,
-  buildProcessChunkPayload,
-  buildFinalizePayload,
   parseProcessChunkResponse,
   type IncrementalEnv,
   type ScheduleDecision,
@@ -22,9 +19,9 @@ function makeStatus(overrides: Partial<IncrementalStatus> = {}): IncrementalStat
   return { ...createDefaultIncrementalStatus(), enabled: true, ...overrides };
 }
 
-/** Env with incremental enabled and custom overrides. */
+/** Env with custom overrides (V0 INCREMENTAL_ENABLED removed). */
 function makeEnv(overrides: Partial<IncrementalEnv> = {}): IncrementalEnv {
-  return { INCREMENTAL_ENABLED: "true", ...overrides };
+  return { ...overrides };
 }
 
 // ── createDefaultIncrementalStatus ───────────────────────────────────────────
@@ -58,30 +55,6 @@ describe("createDefaultIncrementalStatus", () => {
 // ── Env parsing helpers ──────────────────────────────────────────────────────
 
 describe("env parsing helpers", () => {
-  describe("incrementalEnabled", () => {
-    it("defaults to false when env var absent", () => {
-      expect(incrementalEnabled({})).toBe(false);
-    });
-
-    it.each(["true", "1", "yes", "on", "TRUE", " True "])(
-      "returns true for %j",
-      (val) => {
-        expect(incrementalEnabled({ INCREMENTAL_ENABLED: val })).toBe(true);
-      }
-    );
-
-    it.each(["false", "0", "no", "off", "FALSE"])(
-      "returns false for %j",
-      (val) => {
-        expect(incrementalEnabled({ INCREMENTAL_ENABLED: val })).toBe(false);
-      }
-    );
-
-    it("returns fallback (false) for unrecognized value", () => {
-      expect(incrementalEnabled({ INCREMENTAL_ENABLED: "maybe" })).toBe(false);
-    });
-  });
-
   describe("incrementalIntervalMs", () => {
     it("defaults to 180_000", () => {
       expect(incrementalIntervalMs({})).toBe(180_000);
@@ -125,20 +98,13 @@ describe("env parsing helpers", () => {
 });
 
 // ── shouldScheduleIncremental ────────────────────────────────────────────────
+// Note: V1 callers gate on incrementalV1Enabled() before calling this function.
+// The function itself no longer checks INCREMENTAL_ENABLED.
 
 describe("shouldScheduleIncremental", () => {
   const noSchedule = (d: ScheduleDecision) => {
     expect(d.schedule).toBe(false);
   };
-
-  it("returns no-op when disabled", () => {
-    const env: IncrementalEnv = { INCREMENTAL_ENABLED: "false" };
-    noSchedule(shouldScheduleIncremental(env, makeStatus(), 360_000));
-  });
-
-  it("returns no-op when env var absent (default disabled)", () => {
-    noSchedule(shouldScheduleIncremental({}, makeStatus(), 360_000));
-  });
 
   it("returns no-op when status is 'processing'", () => {
     const env = makeEnv();
@@ -241,88 +207,6 @@ describe("shouldScheduleIncremental", () => {
   });
 });
 
-// ── buildProcessChunkPayload ─────────────────────────────────────────────────
-
-describe("buildProcessChunkPayload", () => {
-  const baseParams = {
-    sessionId: "sess-1",
-    incrementIndex: 0,
-    audioB64: "AAAA",
-    startMs: 0,
-    endMs: 180_000,
-    language: "zh",
-    speakerProfiles: [],
-    memos: [],
-    stats: [],
-    analysisInterval: 2,
-  };
-
-  it("maps camelCase params to snake_case payload", () => {
-    const p = buildProcessChunkPayload(baseParams);
-    expect(p.session_id).toBe("sess-1");
-    expect(p.increment_index).toBe(0);
-    expect(p.audio_b64).toBe("AAAA");
-    expect(p.start_ms).toBe(0);
-    expect(p.end_ms).toBe(180_000);
-    expect(p.language).toBe("zh");
-    expect(p.speaker_profiles).toEqual([]);
-    expect(p.memos).toEqual([]);
-    expect(p.stats).toEqual([]);
-  });
-
-  it("sets run_analysis=true when incrementIndex is a multiple of analysisInterval", () => {
-    expect(buildProcessChunkPayload({ ...baseParams, incrementIndex: 0, analysisInterval: 2 }).run_analysis).toBe(true);
-    expect(buildProcessChunkPayload({ ...baseParams, incrementIndex: 2, analysisInterval: 2 }).run_analysis).toBe(true);
-    expect(buildProcessChunkPayload({ ...baseParams, incrementIndex: 4, analysisInterval: 2 }).run_analysis).toBe(true);
-  });
-
-  it("sets run_analysis=false when incrementIndex is not a multiple", () => {
-    expect(buildProcessChunkPayload({ ...baseParams, incrementIndex: 1, analysisInterval: 2 }).run_analysis).toBe(false);
-    expect(buildProcessChunkPayload({ ...baseParams, incrementIndex: 3, analysisInterval: 2 }).run_analysis).toBe(false);
-  });
-
-  it("sets run_analysis=false when analysisInterval=0 (disabled)", () => {
-    expect(buildProcessChunkPayload({ ...baseParams, incrementIndex: 0, analysisInterval: 0 }).run_analysis).toBe(false);
-  });
-
-  it("passes through speaker profiles, memos, and stats", () => {
-    const profiles = [{ speaker_id: "spk-0", centroid: [0.1, 0.2], total_speech_ms: 5000, display_name: "Alice", first_seen_increment: 0 }];
-    const memos = [{ id: "m1", text: "Good question", timestamp: 1000 }] as any[];
-    const stats = [{ speaker_id: "spk-0", total_ms: 5000 }] as any[];
-    const p = buildProcessChunkPayload({ ...baseParams, speakerProfiles: profiles, memos, stats });
-    expect(p.speaker_profiles).toBe(profiles);
-    expect(p.memos).toBe(memos);
-    expect(p.stats).toBe(stats);
-  });
-});
-
-// ── buildFinalizePayload ─────────────────────────────────────────────────────
-
-describe("buildFinalizePayload", () => {
-  it("maps camelCase params to snake_case payload", () => {
-    const p = buildFinalizePayload({
-      sessionId: "sess-2",
-      finalAudioB64: "BBBB",
-      startMs: 360_000,
-      endMs: 400_000,
-      memos: [],
-      stats: [],
-      evidence: [],
-      locale: "en-US",
-      nameAliases: { "spk-0": ["Alice", "alice"] },
-    });
-    expect(p.session_id).toBe("sess-2");
-    expect(p.audio_b64).toBe("BBBB");
-    expect(p.start_ms).toBe(360_000);
-    expect(p.end_ms).toBe(400_000);
-    expect(p.locale).toBe("en-US");
-    expect(p.name_aliases).toEqual({ "spk-0": ["Alice", "alice"] });
-    expect(p.memos).toEqual([]);
-    expect(p.stats).toEqual([]);
-    expect(p.evidence).toEqual([]);
-  });
-});
-
 // ── parseProcessChunkResponse ────────────────────────────────────────────────
 
 describe("parseProcessChunkResponse", () => {
@@ -400,5 +284,34 @@ describe("parseProcessChunkResponse", () => {
       speaker_profiles: [],
     });
     expect(parsed.speakersDetected).toBe(5);
+  });
+});
+
+// ── parseProcessChunkResponse confidence + increment_index ──────────────────
+
+describe("parseProcessChunkResponse confidence + increment_index", () => {
+  it("extracts confidence from utterance", () => {
+    const json = {
+      utterances: [
+        { utterance_id: "u1", text: "hello", start_ms: 0, end_ms: 1000, duration_ms: 1000, stream_role: "mixed", confidence: 0.42 },
+      ],
+      speaker_profiles: [],
+      increment_index: 3,
+    };
+    const parsed = parseProcessChunkResponse(json);
+    expect(parsed.utterances[0].confidence).toBe(0.42);
+    expect(parsed.utterances[0].increment_index).toBe(3);
+  });
+
+  it("defaults confidence to 1.0 when missing", () => {
+    const json = {
+      utterances: [
+        { utterance_id: "u1", text: "hi", start_ms: 0, end_ms: 500, duration_ms: 500, stream_role: "mixed" },
+      ],
+      speaker_profiles: [],
+    };
+    const parsed = parseProcessChunkResponse(json);
+    expect(parsed.utterances[0].confidence).toBe(1.0);
+    expect(parsed.utterances[0].increment_index).toBe(0);
   });
 });
