@@ -188,6 +188,7 @@ export interface SpeakerStatItem {
   silence_ms: number;
   interruptions: number;
   interrupted_by_others: number;
+  binding_status?: "resolved" | "unresolved";
 }
 
 export interface OverallFeedback {
@@ -510,4 +511,15 @@ export interface IncrementalSpeakerProfile {
   total_speech_ms: number;
   display_name: string | null;
   first_seen_increment: number;
+}
+
+export interface StoredUtterance {
+  utterance_id: string;
+  increment_index: number;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  confidence: number;
+  speaker: string;
+  stream_role: "mixed" | "teacher" | "students";
 }
