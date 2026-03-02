@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -26,7 +27,7 @@ from app.schemas import (
     TeamDynamics,
     TranscriptUtterance,
 )
-from app.services.dashscope_llm import DashScopeLLM
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def _get_dimension_presets_dicts(req: SynthesizeReportRequest) -> list[dict]:
 class ReportSynthesizer:
     """LLM-core report generation with deep citations."""
 
-    def __init__(self, llm: DashScopeLLM):
+    def __init__(self, llm: DashScopeLLMAdapter):
         self.llm = llm
 
     @staticmethod
@@ -99,32 +100,33 @@ class ReportSynthesizer:
     def _filter_eligible_speakers(
         stats: list, interviewer_keys: set[str],
         memo_mentioned_keys: set[str] | None = None,
-    ) -> list:
-        """Filter out interviewer, unresolved clusters, and speakers with no evidence.
+    ) -> tuple[list, list]:
+        """Returns (active_speakers, zero_turn_speakers).
 
-        A speaker is eligible if:
-        - Not the interviewer, AND
-        - Has a display name (speaker_name) OR is mentioned in memos, AND
-        - Has talk_time > 0 OR is mentioned in memos/bindings.
+        active: turns > 0, not interviewer, has name or in memos → sent to LLM
+        zero_turn: turns == 0 but in memos → code generates evidence_insufficient
 
         Unresolved clusters (e.g. c1, c2) have no speaker_name and aren't in memos.
         """
+        import re as _re
+
         _memo_keys = memo_mentioned_keys or set()
-        eligible = []
+        active, zero_turn = [], []
         for s in stats:
             if s.speaker_key in interviewer_keys:
                 continue
             if (s.speaker_name or "") in interviewer_keys:
                 continue
             # Skip unresolved clusters: no display name AND not mentioned in memos
-            has_name = bool(s.speaker_name)
+            has_name = bool(s.speaker_name) and not _re.match(r'^c\d+$', s.speaker_name)
             in_memos = s.speaker_key in _memo_keys or (s.speaker_name or "") in _memo_keys
             if not has_name and not in_memos:
                 continue
-            # Must have talk time or be mentioned in memos
-            if s.talk_time_ms > 0 or in_memos:
-                eligible.append(s)
-        return eligible
+            if s.turns > 0 and s.talk_time_ms > 0:
+                active.append(s)
+            elif in_memos:
+                zero_turn.append(s)
+        return active, zero_turn
 
     @staticmethod
     def _extract_memo_mentioned_keys(req: SynthesizeReportRequest) -> set[str]:
@@ -244,7 +246,7 @@ class ReportSynthesizer:
 
         # 1. Truncate transcript if needed
         truncated_transcript, was_truncated = self._truncate_transcript(
-            req.transcript, max_tokens=6000
+            req.transcript, max_tokens=4000
         )
 
         # 2. Build prompts
@@ -260,11 +262,10 @@ class ReportSynthesizer:
         valid_evidence_ids = {e.evidence_id for e in req.evidence}
         interviewer_keys = self._identify_interviewer_keys(req)
         memo_mentioned_keys = self._extract_memo_mentioned_keys(req)
-        eligible_keys = {
-            s.speaker_key for s in self._filter_eligible_speakers(
-                req.stats, interviewer_keys, memo_mentioned_keys
-            )
-        }
+        active_speakers, zero_turn_speakers = self._filter_eligible_speakers(
+            req.stats, interviewer_keys, memo_mentioned_keys
+        )
+        eligible_keys = {s.speaker_key for s in active_speakers}
         # DIAG: log raw LLM output shape (defensive — must not crash synthesis)
         try:
             raw_pp = parsed.get("per_person", [])
@@ -319,8 +320,50 @@ class ReportSynthesizer:
         per_person = [
             p for p in per_person if p.person_key in eligible_keys
         ]
+
+        # 4d. Double insurance: if LLM sneaked zero-turn speakers, clear their claims
+        zero_turn_key_set = {s.speaker_key for s in zero_turn_speakers}
+        for p in per_person:
+            if p.person_key in zero_turn_key_set:
+                for dim in p.dimensions:
+                    dim.strengths = []
+                    dim.risks = []
+                    dim.actions = []
+                    dim.evidence_insufficient = True
+                    dim.score_rationale = "该候选人未在面试中发言，无法评估。"
+
+        # 4e. Generate placeholder entries for zero-turn speakers (not scored)
+        for s in zero_turn_speakers:
+            per_person.append(PersonFeedbackItem(
+                person_key=s.speaker_key,
+                display_name=s.speaker_name or s.speaker_key,
+                dimensions=[DimensionFeedback(
+                    dimension=dk,
+                    label_zh=dim_label_map.get(dk, dk),
+                    score=0.0,
+                    score_rationale="该候选人未在面试中发言，无法评估。",
+                    evidence_insufficient=True,
+                    not_applicable=True,
+                    strengths=[], risks=[], actions=[],
+                ) for dk in dimension_keys],
+                summary=PersonSummary(strengths=[], risks=[], actions=[]),
+            ))
+
         if not per_person:
             raise ValidationError("No eligible speakers after post-LLM filter")
+
+        # 4f. Unresolved speaker confidence clamp (code-enforced, not prompt-dependent)
+        unresolved_keys = {
+            s.speaker_key for s in req.stats
+            if getattr(s, 'binding_status', 'resolved') == 'unresolved'
+        }
+        for p in per_person:
+            if p.person_key in unresolved_keys:
+                for dim in p.dimensions:
+                    for claim in dim.strengths + dim.risks + dim.actions:
+                        claim.confidence = min(claim.confidence, 0.5)
+                    if not dim.score_rationale.startswith("⚠️"):
+                        dim.score_rationale = f"⚠️ 身份未确认 — {dim.score_rationale}"
 
         # 5. Build quality meta
         elapsed_ms = int((time.time() - started_at) * 1000)
@@ -402,59 +445,27 @@ class ReportSynthesizer:
             "You are an expert interview analyst generating structured feedback reports.\n\n"
             + context_anchor
             + scoring_rubric
-            + "CRITICAL RULES:\n"
-            "1. Every claim MUST cite 1-5 evidence references using the evidence_id values from the evidence_pack.\n"
-            "2. DO NOT invent evidence IDs — only use IDs from the evidence_pack.\n"
-            "3. Cross-reference the interviewer's memos and free-form notes with the actual transcript.\n"
-            "4. If a memo says someone showed a skill — find the specific transcript moment and cite it.\n"
-            "5. If memo observations conflict with transcript evidence, flag the discrepancy.\n"
-            "6. Only generate feedback for INTERVIEWEES (stream_role: \"students\"), NOT the interviewer (stream_role: \"teacher\"). The interviewer's role is to observe and take notes, not to be evaluated.\n"
-            "7. 使用 `session_context.dimension_presets` 作为评估框架。对每个预设维度分配 0-10 分。\n"
-            "8. For dimensions with weak evidence, generate ONE claim with low confidence (0.3-0.4) rather than empty arrays. Only use empty arrays if truly ZERO mentions exist.\n"
-            "9. Group observations by interview stage when stage data is available.\n"
-            "10. Use the free-form notes AND structured memos as primary evidence sources alongside transcript quotes.\n"
-            "11. If a person has talk_time_ms of 0 AND has no evidence or memos mentioning them, skip them entirely — do not generate per_person entry for them.\n"
-            "12. Ground every claim in evidence. Use evidence_pack quotes, memos, and transcript as sources. A memo like 'Tina gave good suggestions' IS valid evidence for a Tina leadership claim.\n"
-            "13. Set confidence below 0.4 for any claim based on a single piece of evidence.\n"
-            "14. Memos and free-form notes from the interviewer are FIRST-CLASS evidence sources — they should be cited and referenced just like transcript quotes.\n"
-            "15. IMPORTANT: Match evidence to speakers by reading the quote TEXT content. If an evidence quote mentions a person by name (e.g., 'Tina gave a good suggestion about X'), that evidence is attributable to that person. Use the speaker_key field AND the quote text together to determine attribution.\n"
-            "16. Even if a person has low talk_time_ms, generate claims for them if memos or evidence mention their contributions.\n"
-            "17. MINIMUM OUTPUT: For each person in interviewee_stats, you MUST generate at least 1 strength claim and 1 risk claim across all dimensions combined. A report with all empty claim arrays is INVALID.\n"
-            "18. CRITICAL: If name_aliases are provided, treat aliases as the SAME person. "
-            "For example, if name_aliases = {\"Rice\": [\"小米\"], \"Stephenie\": [\"思涵\"]}, then 小米 IS Rice and 思涵 IS Stephenie. "
-            "Merge all observations about an alias into the primary name's per_person entry. Use the primary name as person_key. "
-            "Do NOT create separate per_person entries for aliases. When writing text, always use the primary English name.\n"
-            "19. For each claim, also select 1-3 transcript segments that best support the claim. "
-            "Output as `supporting_utterances: [utterance_id, ...]` in each claim object. "
-            "Prefer segments containing key arguments, specific examples, or behavioral evidence.\n"
-            "20. 生成 `narrative`（2-4 句连贯段落）+ ≥3 个 `key_findings`（类型: strength/risk/observation）。\n"
-            "21. Use stats_observations (if provided) to enrich analysis with quantitative insights. "
-            "Incorporate relevant statistics into claims naturally.\n"
-            "22. claim.text 必须是纯自然语言 — 不要在文本中嵌入 [e_XXXXX] 引用。引用放在 evidence_refs 数组中。\n"
-            "23. 优先使用 tier_1 证据（面试者发言）。tier_3（面试官评价性发言）仅作为补充佐证。\n"
-            "24. 生成 `overall.narrative` 作为围绕 `session_context.position_title` 的连贯段落，不要使用要点列表。\n"
-            "25. 如果某个预设维度无法评估（证据完全不足），设置 `not_applicable: true` 和 `score: 5`。\n"
-            "26. 如果面试内容暗示需要预设之外的维度，输出 `suggested_dimensions`。\n"
-            "27. 在 overall 中生成 `recommendation`：基于所有维度的综合表现给出录用建议。\n"
-            "    - decision: 'recommend'（推荐）/ 'tentative'（待定）/ 'not_recommend'（不推荐）\n"
-            "    - confidence: 0.0-1.0 推荐置信度\n"
-            "    - rationale: 一句话推荐理由（中文）\n"
-            "    - context_type: 'hiring'（招聘）或 'admission'（录取）\n"
-            "28. 在 overall 中生成 `question_analysis`：对面试官的每个问题做深度分析（微型诊断）。\n"
-            "    - question_text: 面试官的原始问题\n"
-            "    - answer_utterance_ids: 候选人回答的 utterance_id 列表\n"
-            "    - answer_quality: A（优秀）/ B（良好）/ C（一般）/ D（较差）\n"
-            "    - comment: 回答质量简评（中文，1-2句）\n"
-            "    - related_dimensions: 该问题关联的评估维度 key 列表\n"
-            "    - scoring_rationale: 评分理由（中文，2-3句，解释为什么给这个评级）\n"
-            "    - answer_highlights: 回答中的亮点列表（中文，每条1句，引用候选人的具体表述或行为）\n"
-            "    - answer_weaknesses: 回答中的不足列表（中文，每条1句，指出具体缺陷）\n"
-            "    - suggested_better_answer: 改进方向建议（中文，2-3句，描述一个更优回答应该如何展开）\n"
-            "29. 在 overall 中生成 `interview_quality`：评估面试本身的质量。\n"
-            "    - coverage_ratio: 被有效探查的维度数/总维度数 (0-1)\n"
-            "    - follow_up_depth: 面试官有效追问次数\n"
-            "    - structure_score: 0-10 面试结构化程度\n"
-            "    - suggestions: 对面试官的建议（中文，1-2句）\n\n"
+            + "RULES:\n"
+            "1. EVIDENCE: Every claim cites 1-5 evidence_ids from evidence_pack only (no invented IDs). "
+            "Memos/free-form notes are first-class evidence — cross-reference with transcript. "
+            "Match evidence to speakers via speaker_key AND quote text content. "
+            "claim.text 必须是纯自然语言，引用放 evidence_refs 数组。优先 tier_1 证据，tier_3 仅作补充。\n"
+            "2. CONFIDENCE: Single-evidence claims → confidence < 0.4. Weak-evidence dimensions → ONE claim at 0.3-0.4. "
+            "binding_status='unresolved' speakers → ALL claim confidence ≤ 0.5 (code-enforced).\n"
+            "3. SCOPE: Only evaluate INTERVIEWEES (stream_role: \"students\"), never the interviewer. "
+            "Zero-turn speakers are pre-filtered — do NOT generate entries for speakers not in interviewee_stats. "
+            "For each person in interviewee_stats (all have turns > 0), generate ≥1 strength + ≥1 risk claim.\n"
+            "4. DIMENSIONS: 使用 dimension_presets 评估框架，每维度 0-10 分。"
+            "证据不足设 not_applicable: true + score: 5。如需额外维度，输出 suggested_dimensions。\n"
+            "5. ALIASES: name_aliases 中的别名是同一人，合并到 primary name 的 per_person entry（person_key = primary name）。\n"
+            "6. CLAIMS: Each claim includes supporting_utterances (1-3 utterance_ids). "
+            "Group observations by stage when available. Incorporate stats_observations naturally.\n"
+            "7. OVERALL: 生成 narrative（2-4句连贯段落，围绕 position_title）+ ≥3 key_findings。"
+            "Memo 与 transcript 矛盾时标注差异。\n"
+            "8. RECOMMENDATION: decision (recommend/tentative/not_recommend), confidence (0-1), rationale (中文), context_type.\n"
+            "9. QUESTION_ANALYSIS: 每个面试官问题 → question_text, answer_utterance_ids, answer_quality (A/B/C/D), comment, "
+            "related_dimensions, scoring_rationale, answer_highlights, answer_weaknesses, suggested_better_answer。\n"
+            "10. INTERVIEW_QUALITY: coverage_ratio (0-1), follow_up_depth (int), structure_score (0-10), suggestions (中文).\n\n"
             "OUTPUT FORMAT: Strict JSON matching the output_contract.\n"
             f"LANGUAGE: {locale_hint} — use professional, concise language.\n"
         )
@@ -517,11 +528,14 @@ class ReportSynthesizer:
         # Identify interviewer and filter eligible interviewees
         interviewer_keys = self._identify_interviewer_keys(req)
         memo_mentioned_keys = self._extract_memo_mentioned_keys(req)
-        eligible_stats = self._filter_eligible_speakers(
+        active_stats, _zero_turn = self._filter_eligible_speakers(
             req.stats, interviewer_keys, memo_mentioned_keys
         )
 
         # Only show named speakers in all_stats to avoid LLM creating entries for cluster IDs
+        def _has_valid_name(s) -> bool:
+            return bool(s.speaker_name) and not re.match(r'^c\d+$', s.speaker_name) and s.speaker_name != "unknown"
+
         stats = [
             {
                 "speaker_key": s.speaker_key,
@@ -530,17 +544,18 @@ class ReportSynthesizer:
                 "turns": s.turns,
             }
             for s in req.stats
-            if s.speaker_name
+            if _has_valid_name(s)
         ]
 
         interviewee_stats = [
             {
                 "speaker_key": s.speaker_key,
-                "speaker_name": s.speaker_name,
+                "speaker_name": s.speaker_name if _has_valid_name(s) else f"{s.speaker_key} (未确认身份)",
                 "talk_time_ms": s.talk_time_ms,
                 "turns": s.turns,
+                "binding_status": getattr(s, 'binding_status', 'resolved'),
             }
-            for s in eligible_stats
+            for s in active_stats  # only active speakers (from P1)
         ]
 
         # Get dimension presets
@@ -704,7 +719,7 @@ class ReportSynthesizer:
             return int(len(text.split()) * 1.3)  # English: ~1.3 tokens per word
 
     def _truncate_transcript(
-        self, transcript: list[TranscriptUtterance], max_tokens: int = 6000
+        self, transcript: list[TranscriptUtterance], max_tokens: int = 4000
     ) -> tuple[list[TranscriptUtterance], bool]:
         """Truncate if total token count exceeds max_tokens."""
         total_tokens = sum(self._estimate_tokens(u.text) for u in transcript)
@@ -1082,7 +1097,7 @@ class ReportSynthesizer:
         # Filter to eligible speakers only
         interviewer_keys = self._identify_interviewer_keys(req)
         memo_mentioned_keys = self._extract_memo_mentioned_keys(req)
-        eligible_stats = self._filter_eligible_speakers(
+        eligible_stats, _zero_turn = self._filter_eligible_speakers(
             req.stats, interviewer_keys, memo_mentioned_keys
         )
 

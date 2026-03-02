@@ -14,7 +14,7 @@ from app.schemas import (
     ImprovementResponse,
     OverallImprovement,
 )
-from app.services.dashscope_llm import DashScopeLLM
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ USER_PROMPT_TEMPLATE = """## 评价报告
 
 
 class ImprovementGenerator:
-    def __init__(self, llm: DashScopeLLM) -> None:
+    def __init__(self, llm: DashScopeLLMAdapter) -> None:
         self._llm = llm
 
     def generate(self, req: ImprovementRequest) -> ImprovementResponse:
