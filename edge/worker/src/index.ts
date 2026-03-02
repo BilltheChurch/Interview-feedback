@@ -62,6 +62,7 @@ import type {
   FinalizeV2Status,
   IncrementalStatus,
   IncrementalSpeakerProfile,
+  StoredUtterance,
   MemoItem,
   MemoSpeakerBinding,
   MergeCheckpointsRequestPayload,
@@ -82,15 +83,16 @@ import type {
 import {
   createDefaultIncrementalStatus,
   shouldScheduleIncremental,
-  buildProcessChunkPayload,
-  buildFinalizePayload,
   parseProcessChunkResponse,
-  incrementalEnabled,
-  incrementalIntervalMs,
-  incrementalOverlapMs,
-  incrementalCumulativeThreshold,
   incrementalAnalysisInterval
 } from "./incremental";
+import { buildFinalizePayloadV1 } from "./incremental_v1";
+import type { R2AudioRefV1 } from "./incremental_v1";
+
+// V1 增量管线特性开关
+function incrementalV1Enabled(env: Env): boolean {
+  return env.INCREMENTAL_V1_ENABLED === "true";
+}
 
 type StreamRole = "mixed" | "teacher" | "students";
 const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
@@ -562,7 +564,7 @@ interface Env {
   TIER2_ENABLED?: string;
   TIER2_AUTO_TRIGGER?: string;
   TIER2_BATCH_ENDPOINT?: string;
-  INCREMENTAL_ENABLED?: string;
+  INCREMENTAL_V1_ENABLED?: string;
   INCREMENTAL_INTERVAL_MS?: string;
   INCREMENTAL_OVERLAP_MS?: string;
   INCREMENTAL_CUMULATIVE_THRESHOLD?: string;
@@ -663,6 +665,8 @@ const STORAGE_KEY_CHECKPOINTS = "checkpoints";
 const STORAGE_KEY_LAST_CHECKPOINT_AT = "last_checkpoint_at";
 const STORAGE_KEY_CAPTION_SOURCE = "caption_source";
 const STORAGE_KEY_CAPTION_BUFFER = "caption_buffer";
+const STORAGE_KEY_INCREMENTAL_UTTERANCES = "incremental_utterances";
+const MAX_STORED_UTTERANCES = 2000;
 
 const TARGET_FORMAT = "pcm_s16le";
 const INFERENCE_MAX_AUDIO_SECONDS = 30;
@@ -6090,13 +6094,33 @@ export class MeetingSessionDO extends DurableObject<Env> {
         console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${getErrorMessage(err)}`);
       });
 
-      // ── Incremental finalize: if increments were processed during recording, use them ──
-      // If incremental is enabled and at least one increment completed, call /incremental/finalize
-      // instead of scheduling Tier 2. On failure, fall back to Tier 2.
+      // ── Incremental finalize: if V1 increments were processed during recording, use them ──
       let incrementalFinalizeSucceeded = false;
       const incrementalStatusForFinalize = await this.loadIncrementalStatus();
-      if (incrementalEnabled(this.env) && incrementalStatusForFinalize.increments_completed > 0) {
+      if (incrementalV1Enabled(this.env) && incrementalStatusForFinalize.increments_completed > 0) {
         try {
+          // ── 消灭大尾巴 — 检查未处理的尾部音频 ──
+          {
+            const ingestForTail = await this.loadIngestByStream(sessionId);
+            const totalAudioMs = ingestForTail.mixed.received_chunks * 1000;
+            const lastProcessedMs = incrementalStatusForFinalize.last_processed_ms;
+            const tailGapMs = totalAudioMs - lastProcessedMs;
+
+            if (tailGapMs > 30_000) {
+              console.log(
+                `[incremental-v1] tail gap detected: ${tailGapMs}ms unprocessed ` +
+                `(total=${totalAudioMs}ms, lastProcessed=${lastProcessedMs}ms), ` +
+                `running tail chunk for session=${sessionId}`
+              );
+              // 运行一次额外的 process-chunk 来覆盖尾部音频
+              try {
+                await this.runIncrementalJob(sessionId);
+              } catch (tailErr) {
+                console.warn(`[incremental-v1] tail chunk failed (non-fatal): ${getErrorMessage(tailErr)}`);
+              }
+            }
+          }
+
           const finalizeNameAliases = ((state.config ?? {}) as Record<string, unknown>).name_aliases as Record<string, string[]> | undefined;
           incrementalFinalizeSucceeded = await this.runIncrementalFinalize(
             sessionId,
@@ -6626,7 +6650,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return {
       ...createDefaultIncrementalStatus(),
       ...stored,
-      enabled: incrementalEnabled(this.env)
+      enabled: incrementalV1Enabled(this.env)
     };
   }
 
@@ -6665,7 +6689,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
    */
   private async runIncrementalJob(sessionId: string): Promise<void> {
     const status = await this.loadIncrementalStatus();
-    if (!incrementalEnabled(this.env)) return;
+    if (!incrementalV1Enabled(this.env)) return;
 
     // Compute total audio duration from "mixed" ingest (primary stream)
     const ingestByStream = await this.loadIngestByStream(sessionId);
@@ -6746,49 +6770,40 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
       const audioB64 = bytesToBase64(wavBytes);
 
-      // Load current speaker profiles, memos, stats
-      const storedProfiles = await this.ctx.storage.get<IncrementalSpeakerProfile[]>(STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES);
-      const speakerProfiles: IncrementalSpeakerProfile[] = storedProfiles ?? [];
-
-      const memos = await this.loadMemos();
       const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
       const locale = getSessionLocale(state, this.env);
-
-      // Compute rough speaker stats from existing utterances for context
-      const utterancesByStream = await this.loadUtterancesRawByStream();
-      const allUtterances = [
-        ...utterancesByStream.mixed,
-        ...utterancesByStream.teacher,
-        ...utterancesByStream.students
-      ];
-      const roughStats = computeSpeakerStats(allUtterances as unknown as TranscriptItem[]);
-
-      const payload = buildProcessChunkPayload({
-        sessionId,
-        incrementIndex: decision.incrementIndex,
-        audioB64,
-        startMs: decision.startMs,
-        endMs: decision.endMs,
-        language: locale,
-        speakerProfiles,
-        memos,
-        stats: roughStats,
-        analysisInterval: incrementalAnalysisInterval(this.env)
-      });
 
       const inferenceBase = (
         (this.env.INFERENCE_BASE_URL ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "")
       ).trim() || "http://127.0.0.1:8000";
       const apiKey = ((this.env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
 
-      const resp = await fetch(`${inferenceBase}/incremental/process-chunk`, {
+      // ── V1 增量管线：唯一路径 ──
+      const incrementId = crypto.randomUUID();
+      const analysisInterval = incrementalAnalysisInterval(this.env);
+      const runAnalysis = analysisInterval > 0 && decision.incrementIndex % analysisInterval === 0;
+
+      const v1Payload = {
+        v: 1 as const,
+        session_id: sessionId,
+        increment_id: incrementId,
+        increment_index: decision.incrementIndex,
+        audio_b64: audioB64,
+        audio_start_ms: decision.startMs,
+        audio_end_ms: decision.endMs,
+        locale,
+        run_analysis: runAnalysis,
+        total_frames: rangeKeys.length,
+      };
+
+      const resp = await fetch(`${inferenceBase}/v1/incremental/process-chunk`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(apiKey ? { "x-api-key": apiKey } : {})
         },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(240_000) // 4 min timeout for a 3-min increment
+        body: JSON.stringify(v1Payload),
+        signal: AbortSignal.timeout(240_000) // 4 分钟超时
       });
 
       if (!resp.ok) {
@@ -6804,6 +6819,37 @@ export class MeetingSessionDO extends DurableObject<Env> {
       if (parsed.checkpoint) {
         await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_CHECKPOINT, parsed.checkpoint);
       }
+
+      // Accumulate utterances in DO Storage (dedup by increment_index + utterance_id)
+      const existingUtts = await this.ctx.storage.get<StoredUtterance[]>(
+        STORAGE_KEY_INCREMENTAL_UTTERANCES
+      ) ?? [];
+
+      const newUtts: StoredUtterance[] = parsed.utterances.map(u => ({
+        utterance_id: u.utterance_id,
+        increment_index: u.increment_index,
+        text: u.text,
+        start_ms: u.start_ms,
+        end_ms: u.end_ms,
+        confidence: u.confidence ?? 1.0,
+        speaker: u.cluster_id ?? u.speaker_name ?? "unknown",
+        stream_role: u.stream_role ?? "mixed",
+      }));
+
+      const dedupKey = (u: StoredUtterance) => `${u.increment_index}:${u.utterance_id}`;
+      const seen = new Set(existingUtts.map(dedupKey));
+      const merged = [...existingUtts];
+      for (const u of newUtts) {
+        if (!seen.has(dedupKey(u))) {
+          merged.push(u);
+          seen.add(dedupKey(u));
+        }
+      }
+      const trimmed = merged.length > MAX_STORED_UTTERANCES
+        ? merged.slice(-MAX_STORED_UTTERANCES)
+        : merged;
+
+      await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_UTTERANCES, trimmed);
 
       await this.updateIncrementalStatus({
         status: "recording",
@@ -6846,13 +6892,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
   ): Promise<boolean> {
     try {
       const incrementalStatus = await this.loadIncrementalStatus();
-      if (!incrementalEnabled(this.env) || incrementalStatus.increments_completed === 0) {
+      if (!incrementalV1Enabled(this.env) || incrementalStatus.increments_completed === 0) {
         return false;
       }
 
       await this.updateIncrementalStatus({ status: "finalizing" });
 
-      // Gather all audio for the full session
+      // 列出所有 mixed 流的 chunk keys
       const sessionPrefix = `sessions/${sessionId}`;
       const chunksPrefix = `${sessionPrefix}/chunks/`;
       const allChunkKeys: string[] = [];
@@ -6873,50 +6919,50 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       allChunkKeys.sort();
 
-      const pcmParts: Uint8Array[] = [];
-      for (const key of allChunkKeys) {
-        const obj = await this.env.RESULT_BUCKET.get(key);
-        if (obj) {
-          pcmParts.push(new Uint8Array(await obj.arrayBuffer()));
-        }
-      }
-
-      if (pcmParts.length === 0) {
+      if (allChunkKeys.length === 0) {
         console.warn(`[incremental] finalize: no audio chunks found for session=${sessionId}`);
         await this.updateIncrementalStatus({ status: "failed", error: "no audio chunks" });
         return false;
       }
-
-      const fullPcm = concatUint8Arrays(pcmParts);
-      const endMs = (fullPcm.byteLength / (TARGET_SAMPLE_RATE * 2)) * 1000; // PCM16 = 2 bytes/sample
-      const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-      const finalAudioB64 = bytesToBase64(wavBytes);
-
-      const payload = buildFinalizePayload({
-        sessionId,
-        finalAudioB64,
-        startMs: 0,
-        endMs: Math.round(endMs),
-        memos,
-        stats,
-        evidence,
-        locale,
-        nameAliases
-      });
 
       const inferenceBase = (
         (this.env.INFERENCE_BASE_URL ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "")
       ).trim() || "http://127.0.0.1:8000";
       const apiKey = ((this.env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
 
-      const resp = await fetch(`${inferenceBase}/incremental/finalize`, {
+      // ── V1 增量 finalize：使用 R2 引用代替 base64 音频（唯一路径） ──
+      const r2AudioRefs: Array<{ key: string; startMs: number; endMs: number }> = allChunkKeys.map((key) => {
+        // 从 key 解析序列号，每个 chunk 代表 1 秒（1000ms）
+        const seqStr = key.split("/").pop()?.replace(".pcm", "") ?? "0";
+        const seq = parseInt(seqStr, 10);
+        return {
+          key,
+          startMs: seq * 1000,
+          endMs: (seq + 1) * 1000,
+        };
+      });
+
+      const totalAudioMs = allChunkKeys.length * 1000;
+
+      const v1Payload = buildFinalizePayloadV1({
+        sessionId,
+        r2AudioRefs,
+        totalAudioMs,
+        locale,
+        memos,
+        stats,
+        evidence,
+        nameAliases
+      });
+
+      const resp = await fetch(`${inferenceBase}/v1/incremental/finalize`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(apiKey ? { "x-api-key": apiKey } : {})
         },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(300_000) // 5 min timeout
+        body: JSON.stringify(v1Payload),
+        signal: AbortSignal.timeout(300_000) // 5 分钟超时
       });
 
       if (!resp.ok) {
@@ -7058,7 +7104,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
     // ── Incremental processing scheduling ──
     // Only check on the "mixed" stream to avoid duplicate scheduling.
-    if (incrementalEnabled(this.env) && streamRole === "mixed") {
+    if (incrementalV1Enabled(this.env) && streamRole === "mixed") {
       this.ctx.waitUntil(
         (async () => {
           const incStatus = await this.loadIncrementalStatus();
