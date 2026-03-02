@@ -25,6 +25,9 @@ from app.services.sv import ModelScopeSVBackend
 from app.services.sv_onnx import OnnxSVBackend
 from app.services.whisper_batch import WhisperBatchTranscriber
 
+import logging
+_logger = logging.getLogger(__name__)
+
 # SV backend union type (duck typing — both have extract_embedding, score_embeddings, health, device)
 SVBackend = ModelScopeSVBackend | OnnxSVBackend
 
@@ -50,6 +53,16 @@ def build_asr_backend(settings: Settings) -> ASRBackend:
         return LanguageAwareASRRouter(
             sensevoice_model_dir=settings.asr_onnx_model_path,
         )
+    elif settings.asr_backend == "parakeet":
+        try:
+            from app.services.backends.asr_parakeet import ParakeetTDTTranscriber
+            return ParakeetTDTTranscriber(
+                model_name=settings.parakeet_model_name,
+                device=settings.parakeet_device,
+            )
+        except (ImportError, RuntimeError) as exc:
+            _logger.warning("Parakeet unavailable (%s), falling back to sensevoice-onnx", exc)
+            return LanguageAwareASRRouter(sensevoice_model_dir=settings.asr_onnx_model_path)
     else:
         return WhisperBatchTranscriber(
             model_size=settings.whisper_model_size,
