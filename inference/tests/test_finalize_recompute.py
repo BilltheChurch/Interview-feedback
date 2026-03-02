@@ -99,9 +99,9 @@ def test_recompute_changes_low_confidence_text(app, mock_runtime):
     })
     assert resp.status_code == 200
     data = resp.json()
-    # Find recomputed utterance in transcript
-    recomputed = [u for u in data["transcript"] if u.get("id") == "utt_0" or u.get("recomputed")]
-    assert len(recomputed) >= 1 or any(u["text"] == "improved text" for u in data["transcript"])
+    # Verify low-confidence utterance text was replaced by recompute
+    assert any(u["text"] == "improved text" for u in data["transcript"]), \
+        "Low-confidence utterance should have been recomputed"
 
 
 def test_recompute_failure_does_not_block_report(app, mock_runtime):
