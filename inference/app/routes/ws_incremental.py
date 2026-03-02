@@ -29,9 +29,14 @@ from app.services.ws_protocol import (
 logger = logging.getLogger(__name__)
 
 
-def create_ws_app(runtime) -> FastAPI:
-    """Create a FastAPI app with the WS endpoint. Separate from main HTTP app."""
-    app = FastAPI(title="Inference WS")
+def register_ws_routes(app: FastAPI, runtime) -> None:
+    """Register WebSocket routes — gated by INCREMENTAL_V1_ENABLED.
+
+    When disabled, WS endpoint is not registered at all (returns 404 on connect attempt).
+    """
+    if not runtime.settings.incremental_v1_enabled:
+        logger.info("WS incremental routes disabled (INCREMENTAL_V1_ENABLED=false)")
+        return
 
     @app.websocket("/ws/v1/increment")
     async def ws_increment(ws: WebSocket):
@@ -49,11 +54,27 @@ def create_ws_app(runtime) -> FastAPI:
             except Exception:
                 pass
 
+
+# Keep create_ws_app for backward compatibility (standalone WS server mode)
+def create_ws_app(runtime) -> FastAPI:
+    """Create a standalone FastAPI app with the WS endpoint."""
+    app = FastAPI(title="Inference WS")
+    register_ws_routes(app, runtime)
     return app
 
 
 async def _handle_increment(ws: WebSocket, runtime) -> None:
     redis_state = runtime.redis_state
+
+    # Redis is required for WS endpoint (stateful processing)
+    if redis_state is None:
+        await ws.send_text(
+            json.dumps(ErrorFrame(
+                code="REDIS_UNAVAILABLE",
+                message="Redis is required for WS incremental endpoint",
+            ).to_dict())
+        )
+        return
 
     # 1. Receive StartFrame
     raw_start = await ws.receive_text()
