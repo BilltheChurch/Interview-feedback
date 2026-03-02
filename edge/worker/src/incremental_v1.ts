@@ -35,6 +35,17 @@ export interface R2AudioRefV1 {
   end_ms: number;
 }
 
+export interface RecomputeSegment {
+  utterance_id: string;
+  increment_index: number;
+  start_ms: number;
+  end_ms: number;
+  original_confidence: number;
+  stream_role: "mixed" | "teacher" | "students";
+  audio_b64: string;
+  audio_format: "wav";
+}
+
 export interface FinalizePayloadV1 {
   v: 1;
   session_id: string;
@@ -45,6 +56,7 @@ export interface FinalizePayloadV1 {
   stats: unknown[];
   evidence: unknown[];
   name_aliases: Record<string, string[]>;
+  recompute_segments: RecomputeSegment[];
 }
 
 export interface DropDecision {
@@ -90,6 +102,7 @@ export function buildFinalizePayloadV1(opts: {
   stats?: unknown[];
   evidence?: unknown[];
   nameAliases?: Record<string, string[]>;
+  recomputeSegments?: RecomputeSegment[];
 }): FinalizePayloadV1 {
   return {
     v: SCHEMA_VERSION as 1,
@@ -105,6 +118,7 @@ export function buildFinalizePayloadV1(opts: {
     stats: opts.stats ?? [],
     evidence: opts.evidence ?? [],
     name_aliases: opts.nameAliases ?? {},
+    recompute_segments: opts.recomputeSegments ?? [],
   };
 }
 
