@@ -73,3 +73,26 @@ def test_adapter_redis_injection():
     mock_redis = MagicMock()
     adapter._redis = mock_redis
     assert adapter._redis is mock_redis
+
+
+def test_call_dashscope_uses_keyword_args():
+    """_call_dashscope must pass keyword args to DashScopeLLM.generate_json.
+
+    DashScopeLLM.generate_json uses keyword-only params (*, system_prompt, user_prompt).
+    Passing positional args would raise TypeError at runtime.
+    """
+    from app.services.backends.llm_dashscope import DashScopeLLMAdapter
+    from app.services.backends.llm_protocol import LLMConfig
+
+    config = LLMConfig(api_key="test", model="qwen-turbo")
+    adapter = DashScopeLLMAdapter(config=config, redis_client=None)
+
+    mock_llm = MagicMock()
+    mock_llm.generate_json.return_value = {"result": "ok"}
+
+    with patch("app.services.dashscope_llm.DashScopeLLM", return_value=mock_llm):
+        result = adapter._call_dashscope("sys prompt", "user prompt", 30000)
+
+    mock_llm.generate_json.assert_called_once_with(
+        system_prompt="sys prompt", user_prompt="user prompt"
+    )
