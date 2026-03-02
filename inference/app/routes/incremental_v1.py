@@ -13,6 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
+
+import numpy as np
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -169,110 +172,249 @@ async def process_chunk_v1(req: ProcessChunkRequestV1, request: Request):
     )
 
 
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors."""
+    a_arr = np.array(a, dtype=np.float32)
+    b_arr = np.array(b, dtype=np.float32)
+    norm_a = np.linalg.norm(a_arr)
+    norm_b = np.linalg.norm(b_arr)
+    if norm_a < 1e-8 or norm_b < 1e-8:
+        return 0.0
+    return float(np.dot(a_arr, b_arr) / (norm_a * norm_b))
+
+
+def _merge_redis_profiles(
+    all_profiles: dict[str, dict], settings
+) -> tuple[dict[str, dict], dict[str, str]]:
+    """Merge similar speaker profiles by cosine similarity.
+
+    Returns (merged_profiles, merge_map) where merge_map maps old_id -> new_id.
+    The profile with a display_name (or more speech) is kept as representative.
+    """
+    threshold = settings.incremental_finalize_merge_threshold
+    merge_map: dict[str, str] = {spk: spk for spk in all_profiles}
+    merged: dict[str, dict] = dict(all_profiles)
+
+    # Greedy merge: compare all pairs, merge most similar first
+    changed = True
+    while changed:
+        changed = False
+        current_ids = list(merged.keys())
+        for i in range(len(current_ids)):
+            for j in range(i + 1, len(current_ids)):
+                id_a, id_b = current_ids[i], current_ids[j]
+                if id_a not in merged or id_b not in merged:
+                    continue
+                ca = merged[id_a].get("centroid", [])
+                cb = merged[id_b].get("centroid", [])
+                if not ca or not cb:
+                    continue
+                sim = _cosine_sim(ca, cb)
+                if sim >= threshold:
+                    # Merge b into a (keep named one, or one with more speech)
+                    a_named = bool(merged[id_a].get("display_name"))
+                    b_named = bool(merged[id_b].get("display_name"))
+                    if b_named and not a_named:
+                        keep, drop = id_b, id_a
+                    elif merged[id_b].get("total_speech_ms", 0) > merged[id_a].get("total_speech_ms", 0) and not a_named:
+                        keep, drop = id_b, id_a
+                    else:
+                        keep, drop = id_a, id_b
+                    # Merge speech time
+                    merged[keep]["total_speech_ms"] = (
+                        merged[keep].get("total_speech_ms", 0) +
+                        merged[drop].get("total_speech_ms", 0)
+                    )
+                    # Update merge map
+                    for k, v in merge_map.items():
+                        if v == drop:
+                            merge_map[k] = keep
+                    del merged[drop]
+                    changed = True
+                    break
+            if changed:
+                break
+
+    return merged, merge_map
+
+
+def _remap_utterances(
+    utterances: list[dict],
+    merged_profiles: dict[str, dict],
+    merge_map: dict[str, str],
+) -> list[dict]:
+    """Remap utterance speaker IDs to merged profile IDs."""
+    remapped = []
+    for u in utterances:
+        new_u = dict(u)
+        old_spk = u.get("speaker", "")
+        new_spk = merge_map.get(old_spk, old_spk)
+        new_u["speaker"] = new_spk
+        # Add display_name if available
+        profile = merged_profiles.get(new_spk, {})
+        if profile.get("display_name"):
+            new_u["speaker_name"] = profile["display_name"]
+        remapped.append(new_u)
+    return remapped
+
+
+def _build_transcript(utterances: list[dict]) -> list[dict]:
+    """Sort utterances by start_ms, deduplicate overlapping."""
+    sorted_utts = sorted(utterances, key=lambda u: u.get("start_ms", 0))
+    # Simple dedup: skip utterances that overlap > 50% with previous
+    deduped = []
+    for u in sorted_utts:
+        if deduped:
+            prev = deduped[-1]
+            overlap_start = max(prev.get("start_ms", 0), u.get("start_ms", 0))
+            overlap_end = min(prev.get("end_ms", 0), u.get("end_ms", 0))
+            overlap = max(0, overlap_end - overlap_start)
+            u_dur = max(1, u.get("end_ms", 0) - u.get("start_ms", 0))
+            if overlap / u_dur > 0.5 and prev.get("speaker") == u.get("speaker"):
+                continue  # Skip duplicate
+        deduped.append(u)
+    return deduped
+
+
+def _compute_stats(utterances: list[dict], total_audio_ms: int) -> list[dict]:
+    """Compute per-speaker statistics from utterances."""
+    spk_data: dict[str, dict] = defaultdict(lambda: {
+        "talk_time_ms": 0, "turns": 0, "speaker_name": None,
+    })
+    for u in utterances:
+        spk = u.get("speaker", "unknown")
+        dur = max(0, u.get("end_ms", 0) - u.get("start_ms", 0))
+        spk_data[spk]["talk_time_ms"] += dur
+        spk_data[spk]["turns"] += 1
+        if u.get("speaker_name") and not spk_data[spk]["speaker_name"]:
+            spk_data[spk]["speaker_name"] = u["speaker_name"]
+    return [
+        {
+            "speaker_key": spk,
+            "speaker_name": data["speaker_name"] or spk,
+            "talk_time_ms": data["talk_time_ms"],
+            "turns": data["turns"],
+        }
+        for spk, data in spk_data.items()
+    ]
+
+
+def _merge_checkpoints(checkpoints: list[dict]) -> str:
+    """Merge all checkpoint summaries into a single context string."""
+    parts = []
+    for i, chk in enumerate(checkpoints):
+        summary = chk.get("summary", "")
+        if summary:
+            parts.append(f"[Checkpoint {i}] {summary}")
+    return "\n\n".join(parts)
+
+
 @v1_router.post("/finalize")
 async def finalize_v1(req: FinalizeRequestV1, request: Request):
-    """V1 finalize — reads pre-computed state from Redis, merge-only."""
+    """V1 finalize — Redis-true-source merge-only.
+
+    Reads ALL data from Redis. Does NOT call processor.finalize().
+    Worker must send tail audio via process-chunk before calling finalize.
+    """
     runtime = request.app.state.runtime
     settings = runtime.settings
 
-    # 1. Feature flag check
     if not settings.incremental_v1_enabled:
         return _v1_disabled_response()
 
-    # 2. Redis availability check
     redis_state = runtime.redis_state
     if redis_state is None:
         return _redis_unavailable_response()
 
     t0 = time.monotonic()
 
-    # 3. Read all pre-computed state from Redis
+    # 1. Read ALL pre-computed state from Redis (true source)
     meta = redis_state.get_meta(req.session_id)
     all_utterances = redis_state.get_all_utterances(req.session_id)
     all_checkpoints = redis_state.get_all_checkpoints(req.session_id)
     all_profiles = redis_state.get_all_speaker_profiles(req.session_id)
 
-    last_audio_end_ms = int(meta.get("last_audio_end_ms", "0"))
     last_increment = int(meta.get("last_increment", "-1"))
     total_increments = last_increment + 1
 
     logger.info(
-        "V1 finalize: session=%s, %d increments in Redis, %d utterances, %d checkpoints, "
-        "last_audio_end_ms=%d, total_audio_ms=%d",
+        "V1 finalize (Redis merge-only): session=%s, %d increments, "
+        "%d utterances, %d checkpoints, %d profiles",
         req.session_id, total_increments, len(all_utterances),
-        len(all_checkpoints), last_audio_end_ms, req.total_audio_ms,
+        len(all_checkpoints), len(all_profiles),
     )
 
-    # 4. Tail processing: if there's unprocessed audio at the end
-    #    (gap between last_processed and total_audio > some small threshold),
-    #    we still need to run the existing finalize which handles tail audio.
-    #    The key improvement: most audio is already processed, so this is fast.
-    from app.schemas import (
-        IncrementalFinalizeRequest,
-        IncrementalFinalizeResponse,
-        Memo,
-        SpeakerStat,
-        EvidenceRef,
-    )
+    if not all_utterances:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "No increments found in Redis", "v": SCHEMA_VERSION},
+        )
 
-    # Convert memos/stats/evidence from dicts to schema objects
-    memos = [Memo(**m) if isinstance(m, dict) else m for m in req.memos]
-    stats = [SpeakerStat(**s) if isinstance(s, dict) else s for s in req.stats]
-    evidence = [EvidenceRef(**e) if isinstance(e, dict) else e for e in req.evidence]
+    # 2. Merge speaker profiles (cosine dedup)
+    merged_profiles, merge_map = _merge_redis_profiles(all_profiles, settings)
 
-    # Use existing finalize logic — it handles:
-    # - Processing any remaining tail audio from in-memory session
-    # - Merging speaker profiles
-    # - Collecting all utterances with deduplication
-    # - LLM transcript polishing
-    # - Checkpoint merging for final report
-    internal_req = IncrementalFinalizeRequest(
-        session_id=req.session_id,
-        locale=req.locale,
-        memos=memos,
-        stats=stats,
-        evidence=evidence,
-        name_aliases=req.name_aliases,
-    )
+    # 3. Remap utterances to merged speaker IDs
+    remapped = _remap_utterances(all_utterances, merged_profiles, merge_map)
 
-    processor = runtime.incremental_processor
-    result: IncrementalFinalizeResponse = await asyncio.to_thread(
-        processor.finalize, internal_req,
-    )
+    # 4. Build transcript (sorted, deduped)
+    transcript = _build_transcript(remapped)
+
+    # 5. Compute speaker stats
+    speaker_stats = _compute_stats(remapped, req.total_audio_ms)
+
+    # 6. Merge checkpoints for report context
+    _checkpoint_context = _merge_checkpoints(all_checkpoints)
+
+    # 7. Generate report via synthesizer (reuses existing LLM pipeline)
+    report = None
+    if transcript and speaker_stats:
+        try:
+            from app.schemas import SynthesizeReportRequest, Memo, SpeakerStat, EvidenceRef
+            memos = [Memo(**m) if isinstance(m, dict) else m for m in req.memos]
+            stats_objs = [SpeakerStat(**s) if isinstance(s, dict) else s for s in req.stats]
+            evidence = [EvidenceRef(**e) if isinstance(e, dict) else e for e in req.evidence]
+
+            synth_req = SynthesizeReportRequest(
+                session_id=req.session_id,
+                transcript=transcript,
+                memos=memos,
+                stats=stats_objs if stats_objs else [
+                    SpeakerStat(**s) for s in speaker_stats
+                ],
+                evidence=evidence,
+                locale=req.locale,
+            )
+            synth_result = await asyncio.to_thread(
+                runtime.report_synthesizer.synthesize, synth_req,
+            )
+            report = synth_result.model_dump() if hasattr(synth_result, "model_dump") else synth_result
+        except Exception:
+            logger.warning(
+                "V1 finalize: report synthesis failed for session=%s",
+                req.session_id, exc_info=True,
+            )
 
     finalize_ms = int((time.monotonic() - t0) * 1000)
 
-    # 5. Cleanup Redis session state
+    # 8. Cleanup Redis
     try:
         redis_state.cleanup_session(req.session_id)
     except Exception as exc:
-        logger.warning("V1 finalize: Redis cleanup failed for session=%s: %s", req.session_id, exc)
-
-    # 6. Build V1 response
-    transcript = [
-        u.model_dump() if hasattr(u, "model_dump") else u
-        for u in result.transcript
-    ]
-    speaker_stats = [
-        s.model_dump() if hasattr(s, "model_dump") else s
-        for s in result.speaker_stats
-    ]
-    report = None
-    if result.report is not None:
-        report = result.report.model_dump() if hasattr(result.report, "model_dump") else result.report
+        logger.warning("V1 finalize: Redis cleanup failed: %s", exc)
 
     return FinalizeResponseV1(
         session_id=req.session_id,
         transcript=transcript,
         speaker_stats=speaker_stats,
         report=report,
-        total_increments=max(total_increments, result.total_increments),
-        total_audio_ms=max(req.total_audio_ms, result.total_audio_ms),
+        total_increments=total_increments,
+        total_audio_ms=req.total_audio_ms,
         finalize_time_ms=finalize_ms,
         metrics={
             "redis_utterances": len(all_utterances),
             "redis_checkpoints": len(all_checkpoints),
             "redis_profiles": len(all_profiles),
+            "merged_speaker_count": len(merged_profiles),
             "finalize_ms": finalize_ms,
         },
     )
