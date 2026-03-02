@@ -14,6 +14,8 @@ from app.services.report_generator import ReportGenerator
 from app.services.improvement_generator import ImprovementGenerator
 from app.services.report_synthesizer import ReportSynthesizer
 from app.services.incremental_processor import IncrementalProcessor
+from app.services.speaker_arbiter import SpeakerArbiter
+from app.services.redis_state import RedisSessionState
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
 from app.services.asr_router import LanguageAwareASRRouter
 from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
@@ -66,6 +68,7 @@ class AppRuntime:
     improvement_generator: ImprovementGenerator
     checkpoint_analyzer: CheckpointAnalyzer
     incremental_processor: IncrementalProcessor
+    redis_state: RedisSessionState | None
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -125,12 +128,31 @@ def build_runtime(settings: Settings) -> AppRuntime:
         embedding_model_id=settings.pyannote_embedding_model_id,
     )
 
+    arbiter = SpeakerArbiter(sv_backend=sv_backend, confidence_threshold=0.50)
+
     incremental_processor = IncrementalProcessor(
         settings=settings,
         diarizer=diarizer,
         asr_backend=asr,
         checkpoint_analyzer=checkpoint_analyzer,
+        arbiter=arbiter,
     )
+
+    # Redis for V1 incremental state — graceful degradation on connection failure
+    redis_state: RedisSessionState | None = None
+    try:
+        import redis
+        rc = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        rc.ping()
+        redis_state = RedisSessionState(rc, ttl_s=settings.redis_session_ttl_s)
+        import logging
+        logging.getLogger(__name__).info("Redis connected: %s", settings.redis_url)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Redis unavailable (%s), V1 incremental endpoints will degrade: %s",
+            settings.redis_url, exc,
+        )
 
     return AppRuntime(
         settings=settings,
@@ -143,4 +165,5 @@ def build_runtime(settings: Settings) -> AppRuntime:
         improvement_generator=ImprovementGenerator(llm=report_llm),
         checkpoint_analyzer=checkpoint_analyzer,
         incremental_processor=incremental_processor,
+        redis_state=redis_state,
     )
