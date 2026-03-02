@@ -375,3 +375,80 @@ def test_process_chunk_has_window_limit():
                 "process_chunk_v1 must enforce window size limit"
             )
             break
+
+
+# ── Fallback / rollback tests (Task 12) ──────────────────────────────────
+
+
+def test_asr_fallback_config():
+    """ASR_BACKEND=sensevoice-onnx should work as fallback on macOS."""
+    from app.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        ASR_BACKEND="sensevoice-onnx",
+        SV_T_LOW=0.50,
+        SV_T_HIGH=0.70,
+        PROFILE_AUTO_THRESHOLD=0.72,
+        PROFILE_CONFIRM_THRESHOLD=0.60,
+    )
+    assert s.asr_backend == "sensevoice-onnx"
+
+
+def test_v1_disabled_returns_404():
+    """When V1 disabled, all V1 endpoints return 404."""
+    from app.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        INCREMENTAL_V1_ENABLED="false",
+        SV_T_LOW=0.50,
+        SV_T_HIGH=0.70,
+        PROFILE_AUTO_THRESHOLD=0.72,
+        PROFILE_CONFIRM_THRESHOLD=0.60,
+    )
+    assert s.incremental_v1_enabled is False
+
+
+def test_v1_enabled_config():
+    """When V1 enabled, incremental_v1_enabled should be True."""
+    from app.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        INCREMENTAL_V1_ENABLED="true",
+        SV_T_LOW=0.50,
+        SV_T_HIGH=0.70,
+        PROFILE_AUTO_THRESHOLD=0.72,
+        PROFILE_CONFIRM_THRESHOLD=0.60,
+    )
+    assert s.incremental_v1_enabled is True
+
+
+def test_body_limit_15mb():
+    """Body limit must be 15MB to support cumulative-mode 360s windows."""
+    from app.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        SV_T_LOW=0.50,
+        SV_T_HIGH=0.70,
+        PROFILE_AUTO_THRESHOLD=0.72,
+        PROFILE_CONFIRM_THRESHOLD=0.60,
+    )
+    assert s.max_request_body_bytes == 15 * 1024 * 1024
+
+
+def test_report_model_fallback():
+    """REPORT_MODEL_NAME can be changed to qwen-plus as fallback."""
+    from app.config import Settings
+
+    s = Settings(
+        _env_file=None,
+        REPORT_MODEL_NAME="qwen-plus",
+        SV_T_LOW=0.50,
+        SV_T_HIGH=0.70,
+        PROFILE_AUTO_THRESHOLD=0.72,
+        PROFILE_CONFIRM_THRESHOLD=0.60,
+    )
+    assert s.report_model_name == "qwen-plus"
