@@ -65,8 +65,9 @@ def test_idempotent_check_read_only(redis_state):
     assert redis_state.is_already_processed("sess-1", "inc-uuid-1") is False
 
 
+@pytest.mark.integration
 def test_atomic_write_marks_and_prevents_duplicate(redis_state):
-    """atomic_write_increment marks as processed; second call returns False."""
+    """atomic_write_increment marks as processed; second call returns False (Lua EVAL)."""
     first = redis_state.atomic_write_increment(
         "sess-1", "inc-uuid-1", 0,
         meta_updates={"last_increment": "0"},
@@ -86,6 +87,7 @@ def test_atomic_write_marks_and_prevents_duplicate(redis_state):
     assert len(utts) == 1  # not 2!
 
 
+@pytest.mark.integration
 def test_acquire_and_release_session_lock(redis_state):
     assert redis_state.acquire_session_lock("sess-1", "worker-1") is True
     assert redis_state.acquire_session_lock("sess-1", "worker-2") is False
@@ -115,8 +117,9 @@ def test_get_all_utterances(redis_state):
     assert len(all_utts) == 3
 
 
+@pytest.mark.integration
 def test_release_lock_wrong_owner(redis_state):
-    """Release lock with wrong owner should fail."""
+    """Release lock with wrong owner should fail (Lua EVAL)."""
     redis_state.acquire_session_lock("sess-1", "worker-1")
     result = redis_state.release_session_lock("sess-1", "worker-wrong")
     assert result is False

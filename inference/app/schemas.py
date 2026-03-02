@@ -245,6 +245,7 @@ class SpeakerStat(BaseModel):
     silence_ms: int = Field(default=0, ge=0)
     interruptions: int = Field(default=0, ge=0)
     interrupted_by_others: int = Field(default=0, ge=0)
+    binding_status: str = Field(default="resolved", pattern=r"^(resolved|unresolved)$")
 
 
 class AnalysisEvent(BaseModel):

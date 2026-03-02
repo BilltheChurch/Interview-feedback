@@ -135,7 +135,7 @@ class DashScopeLLMAdapter:
             model_name=self._config.model,
             timeout_ms=timeout_ms,
         )
-        return llm.generate_json(system_prompt, user_prompt)
+        return llm.generate_json(system_prompt=system_prompt, user_prompt=user_prompt)
 
     def get_metrics(self) -> list[LLMMetrics]:
         return list(self._metrics_log)

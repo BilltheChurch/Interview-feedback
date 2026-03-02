@@ -1538,7 +1538,11 @@ export function buildSynthesizePayload(params: {
       }
       return { ...e, speaker_key: sk };
     }),
-    stats: params.stats,
+    stats: params.stats.map(s => ({
+      ...s,
+      binding_status: (s.speaker_name && s.speaker_name !== "unknown" && !/^c\d+$/i.test(s.speaker_name))
+        ? "resolved" as const : "unresolved" as const,
+    })),
     events: params.events,
     rubric: params.rubric,
     session_context: params.sessionContext,
