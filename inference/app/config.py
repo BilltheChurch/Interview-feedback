@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     incremental_interval_ms: int = Field(default=180_000, alias="INCREMENTAL_INTERVAL_MS")
     incremental_overlap_ms: int = Field(default=30_000, alias="INCREMENTAL_OVERLAP_MS")
     incremental_cumulative_threshold: int = Field(
-        default=2, alias="INCREMENTAL_CUMULATIVE_THRESHOLD",
+        default=1, alias="INCREMENTAL_CUMULATIVE_THRESHOLD",
         description="First N increments use cumulative mode (audio from 0..end)",
     )
     incremental_analysis_interval: int = Field(
