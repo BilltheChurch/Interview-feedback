@@ -31,14 +31,14 @@ class Settings(BaseSettings):
     enrollment_ready_seconds: float = Field(default=12.0, alias="ENROLLMENT_READY_SECONDS")
     enrollment_ready_samples: int = Field(default=3, alias="ENROLLMENT_READY_SAMPLES")
     report_model_provider: Literal["dashscope"] = Field(default="dashscope", alias="REPORT_MODEL_PROVIDER")
-    report_model_name: str = Field(default="qwen-plus", alias="REPORT_MODEL_NAME")
+    report_model_name: str = Field(default="qwen-turbo", alias="REPORT_MODEL_NAME")
     dashscope_api_key: SecretStr = Field(default="", alias="DASHSCOPE_API_KEY")
     report_timeout_ms: int = Field(default=45000, alias="REPORT_TIMEOUT_MS")
 
     audio_sr: int = Field(default=16000, alias="AUDIO_SR")
     max_audio_seconds: int = Field(default=30, alias="MAX_AUDIO_SECONDS")
     max_audio_bytes: int = Field(default=5 * 1024 * 1024, alias="MAX_AUDIO_BYTES")
-    max_request_body_bytes: int = Field(default=6 * 1024 * 1024, alias="MAX_REQUEST_BODY_BYTES")
+    max_request_body_bytes: int = Field(default=15 * 1024 * 1024, alias="MAX_REQUEST_BODY_BYTES")
 
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
     rate_limit_requests: int = Field(default=60, alias="RATE_LIMIT_REQUESTS")
@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     incremental_max_sessions: int = Field(
         default=10, alias="INCREMENTAL_MAX_SESSIONS",
     )
+
+    # V1 incremental pipeline feature flag
+    incremental_v1_enabled: bool = Field(default=False, alias="INCREMENTAL_V1_ENABLED")
 
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
