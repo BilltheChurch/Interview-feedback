@@ -111,7 +111,11 @@ def test_config_has_recompute_settings():
     """Settings must have recompute_asr_enabled, model_size, device."""
     from unittest.mock import patch
     from app.config import Settings
-    with patch.dict("os.environ", {"RECOMPUTE_ASR_ENABLED": "false"}):
+    with patch.dict("os.environ", {
+        "RECOMPUTE_ASR_ENABLED": "false",
+        "RECOMPUTE_ASR_MODEL_SIZE": "large-v3",
+        "RECOMPUTE_ASR_DEVICE": "auto",
+    }, clear=False):
         settings = Settings()
         assert settings.recompute_asr_enabled is False
         assert settings.recompute_asr_model_size == "large-v3"
