@@ -11,9 +11,12 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import tempfile
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
@@ -309,6 +312,15 @@ def _merge_checkpoints(checkpoints: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _decode_recompute_audio(audio_b64: str, audio_format: str) -> str:
+    """Decode base64 audio to temp WAV file. Returns path."""
+    raw = base64.b64decode(audio_b64)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.write(raw)
+    tmp.close()
+    return tmp.name
+
+
 @v1_router.post("/finalize")
 async def finalize_v1(req: FinalizeRequestV1, request: Request):
     """V1 finalize — Redis-true-source merge-only.
@@ -358,6 +370,54 @@ async def finalize_v1(req: FinalizeRequestV1, request: Request):
 
     # 4. Build transcript (sorted, deduped)
     transcript = _build_transcript(remapped)
+
+    # 4.5. Recompute low-confidence utterances (best-effort)
+    recompute_requested = len(req.recompute_segments) if req.recompute_segments else 0
+    recompute_succeeded = 0
+    recompute_skipped = 0
+    recompute_failed = 0
+
+    if req.recompute_segments and runtime.recompute_asr is not None:
+        # Dual-key alignment: primary=utterance_id, fallback=(increment_index, start_ms, end_ms)
+        utt_by_id = {u.get("id", ""): u for u in transcript}
+        utt_by_coords = {
+            (u.get("increment_index", -1), u.get("start_ms", -1), u.get("end_ms", -1)): u
+            for u in transcript
+        }
+
+        for seg in req.recompute_segments:
+            target = utt_by_id.get(seg.utterance_id)
+            if target is None:
+                target = utt_by_coords.get(
+                    (seg.increment_index, seg.start_ms, seg.end_ms)
+                )
+            if target is None:
+                recompute_skipped += 1
+                continue
+            try:
+                wav_path = _decode_recompute_audio(seg.audio_b64, seg.audio_format)
+                try:
+                    result = runtime.recompute_asr.recompute_utterance(
+                        wav_path,
+                        language=target.get("language", "en"),
+                        start_ms=seg.start_ms,
+                        end_ms=seg.end_ms,
+                    )
+                    if result.get("text"):
+                        target["text"] = result["text"]
+                        target["confidence"] = result["confidence"]
+                        target["recomputed"] = True
+                        recompute_succeeded += 1
+                    else:
+                        recompute_skipped += 1
+                finally:
+                    Path(wav_path).unlink(missing_ok=True)
+            except Exception:
+                recompute_failed += 1
+                logger.warning(
+                    "Recompute failed for utterance %s, keeping original",
+                    seg.utterance_id, exc_info=True,
+                )
 
     # 5. Compute speaker stats
     speaker_stats = _compute_stats(remapped, req.total_audio_ms)
@@ -416,5 +476,9 @@ async def finalize_v1(req: FinalizeRequestV1, request: Request):
             "redis_profiles": len(all_profiles),
             "merged_speaker_count": len(merged_profiles),
             "finalize_ms": finalize_ms,
+            "recompute_requested": recompute_requested,
+            "recompute_succeeded": recompute_succeeded,
+            "recompute_skipped": recompute_skipped,
+            "recompute_failed": recompute_failed,
         },
     )
