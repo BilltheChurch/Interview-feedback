@@ -23,7 +23,7 @@ from app.schemas import (
     SynthesisContextMeta,
     TeamDynamics,
 )
-from app.services.dashscope_llm import DashScopeLLM
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ DIMENSIONS = ["leadership", "collaboration", "logic", "structure", "initiative"]
 class CheckpointAnalyzer:
     """Analyzes 5-minute interview windows incrementally during recording."""
 
-    def __init__(self, llm: DashScopeLLM):
+    def __init__(self, llm: DashScopeLLMAdapter):
         self.llm = llm
 
     def analyze_checkpoint(self, req: CheckpointRequest) -> CheckpointResponse:

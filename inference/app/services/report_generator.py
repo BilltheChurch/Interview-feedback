@@ -23,7 +23,7 @@ from app.schemas import (
     SummarySection,
     TeamDynamics,
 )
-from app.services.dashscope_llm import DashScopeLLM
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
 
 
 DIMENSIONS: tuple[str, ...] = (
@@ -45,7 +45,7 @@ DIMENSION_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 @dataclass(slots=True)
 class ReportGenerator:
-    llm: DashScopeLLM
+    llm: DashScopeLLMAdapter
 
     @staticmethod
     def _normalize_text(value: str) -> str:

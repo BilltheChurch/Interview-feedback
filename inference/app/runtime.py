@@ -6,7 +6,8 @@ from app.config import Settings
 from app.services.binder import BinderPolicy
 from app.services.checkpoint_analyzer import CheckpointAnalyzer
 from app.services.clustering import OnlineClusterer
-from app.services.dashscope_llm import DashScopeLLM
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
+from app.services.backends.llm_protocol import LLMConfig
 from app.services.events_analyzer import EventsAnalyzer
 from app.services.name_resolver import NameResolver
 from app.services.orchestrator import InferenceOrchestrator
@@ -111,11 +112,11 @@ def build_runtime(settings: Settings) -> AppRuntime:
 
     asr = build_asr_backend(settings)
 
-    report_llm = DashScopeLLM(
+    llm_config = LLMConfig(
         api_key=settings.dashscope_api_key.get_secret_value(),
-        model_name=settings.report_model_name,
-        timeout_ms=settings.report_timeout_ms,
+        model=settings.report_model_name,
     )
+    report_llm = DashScopeLLMAdapter(config=llm_config, redis_client=None)
 
     checkpoint_analyzer = CheckpointAnalyzer(llm=report_llm)
 
@@ -153,6 +154,10 @@ def build_runtime(settings: Settings) -> AppRuntime:
             "Redis unavailable (%s), V1 incremental endpoints will degrade: %s",
             settings.redis_url, exc,
         )
+
+    # Inject Redis into LLM adapter for idempotency cache (Constraint 4)
+    if redis_state is not None:
+        report_llm._redis = redis_state._redis
 
     return AppRuntime(
         settings=settings,
