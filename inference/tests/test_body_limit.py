@@ -33,3 +33,13 @@ def test_window_hard_limit_enforced():
         audio_b64="dGVzdA==", audio_start_ms=0, audio_end_ms=400_000,
     )
     assert req2.audio_end_ms - req2.audio_start_ms == 400_000
+
+
+def test_cumulative_threshold_is_1():
+    """First increment only should use cumulative mode (0..180s max)."""
+    s = Settings(
+        _env_file=None,
+        SV_T_LOW=0.50, SV_T_HIGH=0.70,
+        PROFILE_AUTO_THRESHOLD=0.72, PROFILE_CONFIRM_THRESHOLD=0.60,
+    )
+    assert s.incremental_cumulative_threshold == 1
