@@ -1,17 +1,18 @@
 /**
- * incremental.ts — Incremental processing helpers for the MeetingSessionDO.
+ * incremental.ts — Incremental scheduling helpers for the MeetingSessionDO.
  *
- * This module provides pure helper functions (no DO state access) for scheduling
- * and constructing incremental processing requests. The DO class in index.ts
- * calls these functions, keeping index.ts changes minimal.
+ * Pure helper functions (no DO state access) for scheduling decisions and
+ * response parsing. Payload construction is in incremental_v1.ts.
+ *
+ * V0 payload builders have been removed — all traffic goes through V1.
  */
 
-import type { IncrementalStatus, IncrementalSpeakerProfile, MemoItem, SpeakerStatItem, EvidenceItem } from "./types_v2";
+import type { IncrementalStatus, IncrementalSpeakerProfile } from "./types_v2";
 
 // ── Env subset needed by scheduling helpers ───────────────────────────────
+// Internal tuning — these values are code defaults, not exposed in wrangler.jsonc.
 
 export interface IncrementalEnv {
-  INCREMENTAL_ENABLED?: string;
   INCREMENTAL_INTERVAL_MS?: string;
   INCREMENTAL_OVERLAP_MS?: string;
   INCREMENTAL_CUMULATIVE_THRESHOLD?: string;
@@ -39,21 +40,9 @@ export function createDefaultIncrementalStatus(): IncrementalStatus {
 
 // ── Env parsing helpers ───────────────────────────────────────────────────
 
-function parseEnvBool(raw: string | undefined, fallback: boolean): boolean {
-  if (raw === undefined) return fallback;
-  const n = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(n)) return true;
-  if (["0", "false", "no", "off"].includes(n)) return false;
-  return fallback;
-}
-
 function parseEnvInt(raw: string | undefined, fallback: number): number {
   const v = Number(raw ?? String(fallback));
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
-}
-
-export function incrementalEnabled(env: IncrementalEnv): boolean {
-  return parseEnvBool(env.INCREMENTAL_ENABLED, false);
 }
 
 export function incrementalIntervalMs(env: IncrementalEnv): number {
@@ -96,8 +85,7 @@ export function shouldScheduleIncremental(
 ): ScheduleDecision {
   const noOp: ScheduleDecision = { schedule: false, startMs: 0, endMs: 0, incrementIndex: 0 };
 
-  if (!incrementalEnabled(env)) return noOp;
-
+  // Callers gate on incrementalV1Enabled() before reaching here.
   // Do not re-schedule while a job is running or the session is finalizing
   if (status.status === "processing" || status.status === "finalizing") return noOp;
 
@@ -123,105 +111,6 @@ export function shouldScheduleIncremental(
   return { schedule: true, startMs, endMs, incrementIndex };
 }
 
-// ── Payload builders ──────────────────────────────────────────────────────
-
-export interface ProcessChunkPayload {
-  session_id: string;
-  increment_index: number;
-  audio_b64: string;
-  start_ms: number;
-  end_ms: number;
-  language: string;
-  speaker_profiles: IncrementalSpeakerProfile[];
-  memos: MemoItem[];
-  stats: SpeakerStatItem[];
-  run_analysis: boolean;
-}
-
-/**
- * Build the request body for POST /incremental/process-chunk.
- */
-export function buildProcessChunkPayload(params: {
-  sessionId: string;
-  incrementIndex: number;
-  audioB64: string;
-  startMs: number;
-  endMs: number;
-  language: string;
-  speakerProfiles: IncrementalSpeakerProfile[];
-  memos: MemoItem[];
-  stats: SpeakerStatItem[];
-  analysisInterval: number;
-}): ProcessChunkPayload {
-  const {
-    sessionId,
-    incrementIndex,
-    audioB64,
-    startMs,
-    endMs,
-    language,
-    speakerProfiles,
-    memos,
-    stats,
-    analysisInterval
-  } = params;
-
-  // Run analysis (events/claims) every N increments
-  const runAnalysis = analysisInterval > 0 && incrementIndex % analysisInterval === 0;
-
-  return {
-    session_id: sessionId,
-    increment_index: incrementIndex,
-    audio_b64: audioB64,
-    start_ms: startMs,
-    end_ms: endMs,
-    language,
-    speaker_profiles: speakerProfiles,
-    memos,
-    stats,
-    run_analysis: runAnalysis
-  };
-}
-
-export interface FinalizePayload {
-  session_id: string;
-  audio_b64: string;
-  start_ms: number;
-  end_ms: number;
-  memos: MemoItem[];
-  stats: SpeakerStatItem[];
-  evidence: EvidenceItem[];
-  locale: string;
-  name_aliases: Record<string, string[]>;
-}
-
-/**
- * Build the request body for POST /incremental/finalize.
- */
-export function buildFinalizePayload(params: {
-  sessionId: string;
-  finalAudioB64: string;
-  startMs: number;
-  endMs: number;
-  memos: MemoItem[];
-  stats: SpeakerStatItem[];
-  evidence: EvidenceItem[];
-  locale: string;
-  nameAliases: Record<string, string[]>;
-}): FinalizePayload {
-  return {
-    session_id: params.sessionId,
-    audio_b64: params.finalAudioB64,
-    start_ms: params.startMs,
-    end_ms: params.endMs,
-    memos: params.memos,
-    stats: params.stats,
-    evidence: params.evidence,
-    locale: params.locale,
-    name_aliases: params.nameAliases
-  };
-}
-
 // ── Response parsers ──────────────────────────────────────────────────────
 
 export interface ParsedProcessChunkResponse {
@@ -234,6 +123,8 @@ export interface ParsedProcessChunkResponse {
     start_ms: number;
     end_ms: number;
     duration_ms: number;
+    confidence: number;
+    increment_index: number;
   }>;
   speakerProfiles: IncrementalSpeakerProfile[];
   checkpoint: Record<string, unknown> | null;
@@ -247,8 +138,13 @@ export interface ParsedProcessChunkResponse {
  * Returns safe defaults for missing fields so the DO never crashes on a partial response.
  */
 export function parseProcessChunkResponse(json: Record<string, unknown>): ParsedProcessChunkResponse {
+  const rawIncrementIndex = typeof json.increment_index === "number" ? json.increment_index : 0;
   const utterances = Array.isArray(json.utterances)
-    ? (json.utterances as ParsedProcessChunkResponse["utterances"])
+    ? (json.utterances as any[]).map((u) => ({
+        ...u,
+        confidence: typeof u.confidence === "number" ? u.confidence : 1.0,
+        increment_index: typeof u.increment_index === "number" ? u.increment_index : rawIncrementIndex,
+      }))
     : [];
   const speakerProfiles = Array.isArray(json.speaker_profiles)
     ? (json.speaker_profiles as IncrementalSpeakerProfile[])
