@@ -87,7 +87,7 @@ import {
   incrementalAnalysisInterval
 } from "./incremental";
 import { buildFinalizePayloadV1 } from "./incremental_v1";
-import type { R2AudioRefV1 } from "./incremental_v1";
+import type { R2AudioRefV1, RecomputeSegment } from "./incremental_v1";
 
 // V1 增量管线特性开关
 function incrementalV1Enabled(env: Env): boolean {
@@ -6944,6 +6944,69 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
       const totalAudioMs = allChunkKeys.length * 1000;
 
+      // ── Recompute: filter low-confidence utterances, fetch audio from R2 ──
+      const RECOMPUTE_CONFIDENCE_THRESHOLD = 0.7;
+      const RECOMPUTE_MAX_SEGMENTS = 10;
+      const RECOMPUTE_MIN_DURATION_MS = 500;
+      const RECOMPUTE_MAX_DURATION_MS = 30_000;
+      const RECOMPUTE_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
+      const BASE64_OVERHEAD = 4 / 3;
+      const JSON_FIELD_OVERHEAD = 200;
+
+      const storedUtterances = await this.ctx.storage.get<StoredUtterance[]>(
+        STORAGE_KEY_INCREMENTAL_UTTERANCES
+      ) ?? [];
+
+      const lowConfUtterances = storedUtterances
+        .filter(u =>
+          u.confidence < RECOMPUTE_CONFIDENCE_THRESHOLD &&
+          (u.end_ms - u.start_ms) >= RECOMPUTE_MIN_DURATION_MS &&
+          (u.end_ms - u.start_ms) <= RECOMPUTE_MAX_DURATION_MS
+        )
+        .sort((a, b) => a.confidence - b.confidence)
+        .slice(0, RECOMPUTE_MAX_SEGMENTS);
+
+      const recomputeSegments: RecomputeSegment[] = [];
+      let estimatedPayloadBytes = 0;
+
+      for (const utt of lowConfUtterances) {
+        if (estimatedPayloadBytes >= RECOMPUTE_MAX_PAYLOAD_BYTES) break;
+
+        const startSeq = Math.floor(utt.start_ms / 1000);
+        const endSeq = Math.ceil(utt.end_ms / 1000);
+
+        const pcmChunks: Uint8Array[] = [];
+        let fetchFailed = false;
+        for (let seq = startSeq; seq < endSeq; seq++) {
+          const key = chunkObjectKey(sessionId, utt.stream_role as StreamRole, seq);
+          const obj = await this.env.RESULT_BUCKET.get(key);
+          if (!obj) { fetchFailed = true; break; }
+          pcmChunks.push(new Uint8Array(await obj.arrayBuffer()));
+        }
+
+        if (fetchFailed || pcmChunks.length === 0) continue;
+
+        const totalPcm = concatUint8Arrays(pcmChunks);
+        const segPayload = Math.ceil(totalPcm.byteLength * BASE64_OVERHEAD) + JSON_FIELD_OVERHEAD;
+        if (estimatedPayloadBytes + segPayload > RECOMPUTE_MAX_PAYLOAD_BYTES) continue;
+
+        const wavBytes = pcm16ToWavBytes(totalPcm);
+        const audioB64 = bytesToBase64(wavBytes);
+
+        recomputeSegments.push({
+          utterance_id: utt.utterance_id,
+          increment_index: utt.increment_index,
+          start_ms: utt.start_ms,
+          end_ms: utt.end_ms,
+          original_confidence: utt.confidence,
+          stream_role: utt.stream_role,
+          audio_b64: audioB64,
+          audio_format: "wav",
+        });
+
+        estimatedPayloadBytes += segPayload;
+      }
+
       const v1Payload = buildFinalizePayloadV1({
         sessionId,
         r2AudioRefs,
@@ -6952,7 +7015,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         memos,
         stats,
         evidence,
-        nameAliases
+        nameAliases,
+        recomputeSegments,
       });
 
       const resp = await fetch(`${inferenceBase}/v1/incremental/finalize`, {
@@ -6973,6 +7037,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // Response is a full ResultV2-compatible object — caller decides what to do with it.
       // For now we just return true so the finalize_v2 persist stage knows it succeeded.
       // The finalize_v2 flow can call runIncrementalFinalize separately and merge the result.
+
+      // Clean up DO utterance cache (Hard Point 5)
+      await this.ctx.storage.delete(STORAGE_KEY_INCREMENTAL_UTTERANCES);
+
       await this.updateIncrementalStatus({
         status: "succeeded",
         last_increment_at: this.currentIsoTs(),
@@ -6984,6 +7052,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     } catch (err) {
       const message = getErrorMessage(err);
       console.warn(`[incremental] finalize failed (non-fatal) session=${sessionId}: ${message}`);
+      // Clean up utterance cache even on failure (Hard Point 5)
+      await this.ctx.storage.delete(STORAGE_KEY_INCREMENTAL_UTTERANCES).catch(() => {});
       await this.updateIncrementalStatus({ status: "failed", error: message });
       return false;
     }
