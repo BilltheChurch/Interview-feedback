@@ -94,3 +94,25 @@ def test_recompute_utterance_model_error_propagates():
             recomputer.recompute_utterance(wav_path)
     finally:
         os.unlink(wav_path)
+
+
+# --- Config + Runtime integration tests ---
+
+
+def test_runtime_has_recompute_asr_field():
+    """AppRuntime must have recompute_asr attribute."""
+    import dataclasses
+    from app.runtime import AppRuntime
+    fields = {f.name for f in dataclasses.fields(AppRuntime)}
+    assert "recompute_asr" in fields
+
+
+def test_config_has_recompute_settings():
+    """Settings must have recompute_asr_enabled, model_size, device."""
+    from unittest.mock import patch
+    from app.config import Settings
+    with patch.dict("os.environ", {"RECOMPUTE_ASR_ENABLED": "false"}):
+        settings = Settings()
+        assert settings.recompute_asr_enabled is False
+        assert settings.recompute_asr_model_size == "large-v3"
+        assert settings.recompute_asr_device == "auto"

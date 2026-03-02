@@ -56,12 +56,18 @@ def build_asr_backend(settings: Settings) -> ASRBackend:
     elif settings.asr_backend == "parakeet":
         try:
             from app.services.backends.asr_parakeet import ParakeetTDTTranscriber
+            _logger.info("Loading Parakeet TDT ASR on %s", settings.parakeet_device)
             return ParakeetTDTTranscriber(
                 model_name=settings.parakeet_model_name,
                 device=settings.parakeet_device,
             )
-        except (ImportError, RuntimeError) as exc:
-            _logger.warning("Parakeet unavailable (%s), falling back to sensevoice-onnx", exc)
+        except Exception as exc:
+            # Covers: ImportError (no nemo), RuntimeError (CUDA init fail),
+            # OSError (missing shared lib), torch.cuda.CudaError, etc.
+            _logger.warning(
+                "Parakeet unavailable (%s: %s), falling back to sensevoice-onnx",
+                type(exc).__name__, exc,
+            )
             return LanguageAwareASRRouter(sensevoice_model_dir=settings.asr_onnx_model_path)
     else:
         return WhisperBatchTranscriber(
@@ -83,6 +89,7 @@ class AppRuntime:
     checkpoint_analyzer: CheckpointAnalyzer
     incremental_processor: IncrementalProcessor
     redis_state: RedisSessionState | None
+    recompute_asr: object | None  # SelectiveRecomputeASR | None (lazy import)
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -172,6 +179,19 @@ def build_runtime(settings: Settings) -> AppRuntime:
     if redis_state is not None:
         report_llm._redis = redis_state._redis
 
+    # Recompute ASR for finalize-time low-confidence correction (lazy-loaded)
+    recompute_asr = None
+    if settings.recompute_asr_enabled:
+        try:
+            from app.services.backends.asr_recompute import SelectiveRecomputeASR
+            recompute_asr = SelectiveRecomputeASR(
+                model_size=settings.recompute_asr_model_size,
+                device=settings.recompute_asr_device,
+            )
+            _logger.info("Recompute ASR registered: %s on %s", settings.recompute_asr_model_size, settings.recompute_asr_device)
+        except Exception as exc:
+            _logger.warning("Recompute ASR unavailable (%s: %s)", type(exc).__name__, exc)
+
     return AppRuntime(
         settings=settings,
         orchestrator=orchestrator,
@@ -184,4 +204,5 @@ def build_runtime(settings: Settings) -> AppRuntime:
         checkpoint_analyzer=checkpoint_analyzer,
         incremental_processor=incremental_processor,
         redis_state=redis_state,
+        recompute_asr=recompute_asr,
     )
