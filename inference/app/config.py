@@ -118,6 +118,11 @@ class Settings(BaseSettings):
         default=10, alias="INCREMENTAL_MAX_SESSIONS",
     )
 
+    # Recompute ASR for finalize-time low-confidence correction
+    recompute_asr_enabled: bool = Field(default=False, alias="RECOMPUTE_ASR_ENABLED")
+    recompute_asr_model_size: str = Field(default="large-v3", alias="RECOMPUTE_ASR_MODEL_SIZE")
+    recompute_asr_device: str = Field(default="auto", alias="RECOMPUTE_ASR_DEVICE")
+
     # V1 incremental pipeline feature flag
     incremental_v1_enabled: bool = Field(default=False, alias="INCREMENTAL_V1_ENABLED")
 
