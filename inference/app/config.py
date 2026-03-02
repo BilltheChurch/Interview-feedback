@@ -100,9 +100,28 @@ class Settings(BaseSettings):
     incremental_speaker_match_threshold: float = Field(
         default=0.60, alias="INCREMENTAL_SPEAKER_MATCH_THRESHOLD",
     )
+    incremental_speaker_match_threshold_relaxed: float = Field(
+        default=0.40, alias="INCREMENTAL_SPEAKER_MATCH_THRESHOLD_RELAXED",
+        description="Second-pass threshold for unmatched speakers (lower to reduce over-segmentation)",
+    )
+    incremental_min_speaker_duration_ms: int = Field(
+        default=15_000, alias="INCREMENTAL_MIN_SPEAKER_DURATION_MS",
+        description="Local speakers with less speech cannot create new global profiles",
+    )
+    incremental_finalize_merge_threshold: float = Field(
+        default=0.55, alias="INCREMENTAL_FINALIZE_MERGE_THRESHOLD",
+        description="At finalize, merge global speaker profiles with centroid cosine sim above this threshold",
+    )
     incremental_max_sessions: int = Field(
         default=10, alias="INCREMENTAL_MAX_SESSIONS",
     )
+
+    # Redis
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    redis_session_ttl_s: int = Field(default=7200, alias="REDIS_SESSION_TTL_S")
+
+    # WebSocket server
+    ws_port: int = Field(default=8001, alias="WS_PORT")
 
 
 @lru_cache(maxsize=1)
