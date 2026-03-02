@@ -103,9 +103,9 @@ def main():
             "audio_b64": audio_b64,
             "audio_start_ms": start_ms,
             "audio_end_ms": end_ms,
-            "language": "zh",
+            "language": "en",
             "run_analysis": False,
-            "locale": "zh-CN",
+            "locale": "en-US",
         }
 
         t0 = time.time()
@@ -166,9 +166,9 @@ def main():
             "audio_b64": audio_b64,
             "audio_start_ms": tail_start,
             "audio_end_ms": total_ms,
-            "language": "zh",
+            "language": "en",
             "run_analysis": False,
-            "locale": "zh-CN",
+            "locale": "en-US",
         }
         t0 = time.time()
         r = requests.post(f"{BASE_URL}/v1/incremental/process-chunk",
@@ -227,7 +227,7 @@ def main():
         "v": 1,
         "session_id": session_id,
         "total_audio_ms": total_ms,
-        "locale": "zh-CN",
+        "locale": "en-US",
         "recompute_segments": recompute_segments,
     }
 

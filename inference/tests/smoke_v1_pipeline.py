@@ -114,9 +114,9 @@ def main():
         "audio_b64": audio_b64,
         "audio_start_ms": 0,
         "audio_end_ms": 60000,
-        "language": "zh",
+        "language": "en",
         "run_analysis": False,
-        "locale": "zh-CN",
+        "locale": "en-US",
     }
 
     t0 = time.time()
@@ -158,9 +158,9 @@ def main():
         "audio_b64": slice_real_audio_b64(60_000, 120_000),
         "audio_start_ms": 60000,
         "audio_end_ms": 120000,
-        "language": "zh",
+        "language": "en",
         "run_analysis": False,
-        "locale": "zh-CN",
+        "locale": "en-US",
     }
     t0 = time.time()
     r3 = requests.post(f"{BASE_URL}/v1/incremental/process-chunk", json=payload2, headers=HEADERS, timeout=120)
@@ -190,7 +190,7 @@ def main():
         "v": 1,
         "session_id": SESSION_ID,
         "total_audio_ms": 120000,
-        "locale": "zh-CN",
+        "locale": "en-US",
         "recompute_segments": [{
             "utterance_id": "nonexistent-id",  # Will test coord fallback or skip
             "increment_index": 0,
