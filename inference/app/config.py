@@ -62,9 +62,11 @@ class Settings(BaseSettings):
     vad_min_silence_ms: int = Field(default=250, alias="VAD_MIN_SILENCE_MS")
 
     # ASR backend selection
-    asr_backend: Literal["sensevoice", "sensevoice-onnx", "whisper", "whisper-cpp"] = Field(
+    asr_backend: Literal["sensevoice", "sensevoice-onnx", "whisper", "whisper-cpp", "parakeet"] = Field(
         default="sensevoice", alias="ASR_BACKEND"
     )
+    parakeet_model_name: str = Field(default="nvidia/parakeet-tdt-0.6b-v2", alias="PARAKEET_MODEL_NAME")
+    parakeet_device: str = Field(default="cuda", alias="PARAKEET_DEVICE")
     sensevoice_model_id: str = Field(
         default="iic/SenseVoiceSmall", alias="SENSEVOICE_MODEL_ID"
     )
