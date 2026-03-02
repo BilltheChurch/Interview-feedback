@@ -46,17 +46,13 @@
     "DIARIZATION_BACKEND_DEFAULT": "local",
     "AUDIO_RETENTION_HOURS": "72",
     "TIER2_ENABLED": "true",
-    "TIER2_AUTO_TRIGGER": "true",
+    "TIER2_AUTO_TRIGGER": "false",
     "TIER2_BATCH_ENDPOINT": "http://127.0.0.1:8000/batch/process",
     "WORKER_API_KEY": "",
     "DEFAULT_LOCALE": "zh-CN",
     "CAPTION_PROVIDER": "acs-teams",
     "CAPTION_FALLBACK_TO_ASR": "true",
-    "INCREMENTAL_ENABLED": "false",
-    "INCREMENTAL_INTERVAL_MS": "180000",
-    "INCREMENTAL_OVERLAP_MS": "30000",
-    "INCREMENTAL_CUMULATIVE_THRESHOLD": "2",
-    "INCREMENTAL_ANALYSIS_INTERVAL": "2"
+    "INCREMENTAL_V1_ENABLED": "true"
   },
 
   "durable_objects": {

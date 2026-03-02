@@ -190,7 +190,8 @@ class IncrementalProcessor:
 
             # Step 2: Match speakers — local diarization labels → global profiles
             speaker_mapping = self._match_speakers(
-                diarize_result, session, req.increment_index, req.audio_start_ms, req.audio_end_ms
+                diarize_result, session, req.increment_index,
+                req.audio_start_ms, req.audio_end_ms, wav_path,
             )
 
             # Step 3: Transcribe each diarization segment individually
@@ -385,6 +386,7 @@ class IncrementalProcessor:
         increment_index: int,
         audio_start_ms: int,
         audio_end_ms: int,
+        wav_path: str = "",
     ) -> dict[str, str]:
         """Match local diarization speakers to global session profiles.
 
@@ -552,6 +554,84 @@ class IncrementalProcessor:
                         )
                     else:
                         logger.debug("  P2 → DROP %s (no globals, dur=%dms)", local_id, dur_ms)
+
+        # ── Pass 3: CAM++ arbiter correction for low-confidence mappings ──
+        if self._arbiter is not None and local_embs and wav_path:
+            # Compute confidence: cosine sim between local emb and matched global centroid
+            match_confidences: dict[str, float] = {}
+            for lid, gid in mapping.items():
+                emb = local_embs.get(lid)
+                if emb is None:
+                    match_confidences[lid] = 1.0
+                    continue
+                profile = session.speaker_profiles.get(gid)
+                if profile is not None and profile.centroid.size > 0:
+                    match_confidences[lid] = self._cosine_similarity(emb, profile.centroid)
+                else:
+                    match_confidences[lid] = 0.0
+
+            # Build audio_segments: slice representative WAV for low-confidence speakers
+            audio_segments: dict[str, str] = {}
+            seg_temps: list[str] = []
+            low_conf_speakers = [
+                lid for lid, conf in match_confidences.items()
+                if conf < self._arbiter.confidence_threshold
+            ]
+
+            if low_conf_speakers:
+                try:
+                    audio_samples, sr = self._read_wav_samples(wav_path)
+                except Exception:
+                    logger.warning("Pass 3: failed to read WAV %s, skipping arbiter", wav_path)
+                    audio_samples = None
+
+                if audio_samples is not None:
+                    for lid in low_conf_speakers:
+                        # Find longest segment for this local speaker
+                        best_seg = None
+                        best_dur = 0
+                        for seg in diarize_result.segments:
+                            if seg.speaker_id == lid:
+                                dur = seg.end_ms - seg.start_ms
+                                if dur > best_dur:
+                                    best_dur = dur
+                                    best_seg = seg
+                        if best_seg is None or best_dur < 300:
+                            continue
+                        # Slice audio
+                        start_sample = int(best_seg.start_ms / 1000 * sr)
+                        end_sample = int(best_seg.end_ms / 1000 * sr)
+                        segment_samples = audio_samples[start_sample:end_sample]
+                        if len(segment_samples) < int(0.3 * sr):
+                            continue
+                        try:
+                            seg_wav = self._samples_to_wav(segment_samples, sr)
+                            audio_segments[lid] = seg_wav
+                            seg_temps.append(seg_wav)
+                        except Exception:
+                            logger.warning("Pass 3: failed to write temp WAV for %s", lid)
+
+            try:
+                if audio_segments or match_confidences:
+                    corrected = self._arbiter.arbitrate(
+                        pyannote_mapping=mapping,
+                        pyannote_confidences=match_confidences,
+                        audio_segments=audio_segments,
+                        global_profiles=session.speaker_profiles,
+                    )
+                    if corrected != mapping:
+                        for k, v in corrected.items():
+                            if mapping.get(k) != v:
+                                logger.info("  P3 Arbiter: %s → %s (was %s)", k, v, mapping.get(k))
+                        mapping = corrected
+            except Exception:
+                logger.warning("Pass 3 arbiter failed, keeping Pass 1+2 mapping", exc_info=True)
+            finally:
+                for tmp in seg_temps:
+                    try:
+                        Path(tmp).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
         return mapping
 

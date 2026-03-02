@@ -10,14 +10,18 @@ Enforces:
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 import json
 import logging
+import os
 import tempfile
 import wave
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from app.schemas import IncrementalProcessRequest
 from app.services.ws_protocol import (
     SCHEMA_VERSION,
     ErrorFrame,
@@ -167,20 +171,51 @@ async def _handle_increment(ws: WebSocket, runtime) -> None:
             pcm_data, start.sample_rate, start.channels, start.bit_depth
         )
 
-        # 7. Process increment
+        # 7. Process increment (CPU-bound — must not block event loop)
         try:
-            result = runtime.incremental_processor.process_increment_v2(
+            with open(wav_path, "rb") as f:
+                audio_b64 = base64.b64encode(f.read()).decode("ascii")
+
+            req = IncrementalProcessRequest(
                 session_id=sid,
-                increment_id=inc_id,
                 increment_index=start.increment_index,
-                wav_path=wav_path,
+                audio_b64=audio_b64,
+                audio_format="wav",
                 audio_start_ms=start.audio_start_ms,
                 audio_end_ms=start.audio_end_ms,
                 language=start.language,
                 run_analysis=start.run_analysis,
             )
+
+            response = await asyncio.to_thread(
+                runtime.incremental_processor.process_increment, req
+            )
+
+            # Dual-format speaker_profiles:
+            # - Redis (atomic_write_increment): dict[speaker_id, profile_dict]
+            # - ResultFrame (WS protocol): list[dict]
+            profiles_dict = {
+                p.speaker_id: p.model_dump()
+                for p in response.speaker_profiles
+            }
+            profiles_list = [
+                p.model_dump() for p in response.speaker_profiles
+            ]
+            utterances_list = [
+                u.model_dump() for u in response.utterances
+            ]
+            checkpoint_dict = (
+                response.checkpoint.model_dump()
+                if response.checkpoint else None
+            )
+            metrics_dict = {
+                "diarization_time_ms": response.diarization_time_ms,
+                "transcription_time_ms": response.transcription_time_ms,
+                "total_processing_time_ms": response.total_processing_time_ms,
+                "speakers_detected": response.speakers_detected,
+                "stable_speaker_map": response.stable_speaker_map,
+            }
         finally:
-            import os
             try:
                 os.unlink(wav_path)
             except OSError:
@@ -195,13 +230,11 @@ async def _handle_increment(ws: WebSocket, runtime) -> None:
                 "last_increment": start.increment_index,
                 "last_audio_end_ms": start.audio_end_ms,
             },
-            speaker_profiles=result.get("speaker_profiles", {}),
-            utterances=result.get("utterances", []),
-            checkpoint=result.get("checkpoint"),
+            speaker_profiles=profiles_dict,
+            utterances=utterances_list,
+            checkpoint=checkpoint_dict,
         )
         if not was_written:
-            # Race condition: another request completed while we were processing.
-            # Our result is discarded (the first writer wins).
             logger.warning(
                 "Increment %s was written by another request (race), discarding",
                 inc_id,
@@ -211,11 +244,11 @@ async def _handle_increment(ws: WebSocket, runtime) -> None:
         result_frame = ResultFrame(
             session_id=sid,
             increment_index=start.increment_index,
-            utterances=result.get("utterances", []),
-            speaker_profiles=result.get("speaker_profiles", []),
-            checkpoint=result.get("checkpoint"),
+            utterances=utterances_list,
+            speaker_profiles=profiles_list,
+            checkpoint=checkpoint_dict,
             metrics={
-                **result.get("metrics", {}),
+                **metrics_dict,
                 "frames_received": frames_received,
                 "frames_expected": start.total_frames,
                 "was_written": was_written,
