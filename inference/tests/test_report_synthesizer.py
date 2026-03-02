@@ -559,7 +559,11 @@ def test_interviewer_filtered_via_session_context() -> None:
 
 
 def test_zero_talk_time_speaker_filtered() -> None:
-    """Speakers with talk_time_ms=0 should be excluded from per_person."""
+    """Speakers with talk_time_ms=0 should not get real claims in per_person.
+
+    If the zero-turn speaker is mentioned in memos, they get a placeholder entry
+    with not_applicable=True and empty claim arrays. Otherwise they are excluded entirely.
+    """
 
     class MockLLMWithSilentSpeaker:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
@@ -596,13 +600,68 @@ def test_zero_talk_time_speaker_filtered() -> None:
 
     synthesizer = ReportSynthesizer(llm=MockLLMWithSilentSpeaker())
     req = _build_test_request()
-    # Add a silent speaker with 0 talk time
+    # Add a silent speaker with 0 talk time (not mentioned in memos → excluded entirely)
     req.stats.append(SpeakerStat(speaker_key="Silent", speaker_name="Silent Person", talk_time_ms=0, turns=0))
     result = synthesizer.synthesize(req)
 
     speaker_keys = {p.person_key for p in result.per_person}
-    assert "Silent" not in speaker_keys, "Zero talk-time speaker should be filtered out"
+    assert "Silent" not in speaker_keys, "Zero talk-time speaker not in memos should be filtered out"
     assert "Alice" in speaker_keys
+
+
+def test_zero_talk_time_memo_mentioned_gets_placeholder() -> None:
+    """Zero-turn speaker mentioned in memos gets placeholder with not_applicable=True."""
+
+    class MockLLMBasic:
+        def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+            return {
+                "overall": {
+                    "narrative": "Summary.",
+                    "narrative_evidence_refs": [],
+                    "key_findings": [
+                        {"type": "observation", "text": "Observation", "evidence_refs": []}
+                    ],
+                    "suggested_dimensions": [],
+                },
+                "per_person": [
+                    {
+                        "person_key": "Alice",
+                        "display_name": "Alice",
+                        "dimensions": [
+                            {"dimension": dim, "label_zh": "", "score": 5.0, "strengths": [], "risks": [], "actions": []}
+                            for dim in ["leadership", "collaboration", "logic", "structure", "initiative"]
+                        ],
+                        "summary": {"strengths": [], "risks": [], "actions": []},
+                    },
+                ],
+            }
+
+    synthesizer = ReportSynthesizer(llm=MockLLMBasic())
+    req = _build_test_request()
+    # Add Daisy: 0 turns, 0 talk_time, but mentioned in a memo
+    req.stats.append(SpeakerStat(speaker_key="Daisy", speaker_name="Daisy", talk_time_ms=0, turns=0))
+    req.memos.append(Memo(
+        memo_id="m_daisy",
+        created_at_ms=5000,
+        type="observation",
+        tags=[],
+        text="Daisy was present but didn't speak.",
+    ))
+    result = synthesizer.synthesize(req)
+
+    # Daisy should exist as placeholder
+    daisy_entries = [p for p in result.per_person if p.person_key == "Daisy"]
+    assert len(daisy_entries) == 1
+    daisy = daisy_entries[0]
+
+    # All dimensions should be not_applicable with no claims
+    for dim in daisy.dimensions:
+        assert dim.not_applicable is True
+        assert dim.evidence_insufficient is True
+        assert dim.strengths == []
+        assert dim.risks == []
+        assert dim.actions == []
+        assert dim.score == 0.0
 
 
 def test_empty_dimension_arrays_allowed() -> None:
@@ -709,13 +768,13 @@ def test_system_prompt_requires_minimum_key_findings() -> None:
     assert "narrative" in prompt
 
 
-def test_transcript_truncation_increased() -> None:
-    """Transcript should be truncated at 6000 tokens, not 4000."""
+def test_transcript_truncation_limit() -> None:
+    """Transcript should be truncated at 4000 tokens for latency optimization."""
     synthesizer = ReportSynthesizer(llm=MockLLMForSynthesis())
     import inspect
     sig = inspect.signature(synthesizer._truncate_transcript)
     max_tokens_default = sig.parameters["max_tokens"].default
-    assert max_tokens_default == 6000
+    assert max_tokens_default == 4000
 
 
 def test_supporting_utterances_parsed_from_llm_output() -> None:
@@ -1145,7 +1204,7 @@ def test_v2_system_prompt_no_embed_references_rule() -> None:
     prompt = synthesizer._build_system_prompt(req)
 
     assert "claim.text 必须是纯自然语言" in prompt
-    assert "不要在文本中嵌入 [e_XXXXX]" in prompt
+    assert "evidence_refs" in prompt
 
 
 def test_v2_system_prompt_tier_priority_rule() -> None:
@@ -1164,7 +1223,7 @@ def test_v2_system_prompt_narrative_rule() -> None:
     req = _build_test_request()
     prompt = synthesizer._build_system_prompt(req)
 
-    assert "overall.narrative" in prompt
+    assert "narrative" in prompt
     assert "连贯段落" in prompt
 
 

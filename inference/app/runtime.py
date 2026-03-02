@@ -6,7 +6,8 @@ from app.config import Settings
 from app.services.binder import BinderPolicy
 from app.services.checkpoint_analyzer import CheckpointAnalyzer
 from app.services.clustering import OnlineClusterer
-from app.services.dashscope_llm import DashScopeLLM
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
+from app.services.backends.llm_protocol import LLMConfig
 from app.services.events_analyzer import EventsAnalyzer
 from app.services.name_resolver import NameResolver
 from app.services.orchestrator import InferenceOrchestrator
@@ -14,6 +15,8 @@ from app.services.report_generator import ReportGenerator
 from app.services.improvement_generator import ImprovementGenerator
 from app.services.report_synthesizer import ReportSynthesizer
 from app.services.incremental_processor import IncrementalProcessor
+from app.services.speaker_arbiter import SpeakerArbiter
+from app.services.redis_state import RedisSessionState
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
 from app.services.asr_router import LanguageAwareASRRouter
 from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
@@ -21,6 +24,9 @@ from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 from app.services.sv import ModelScopeSVBackend
 from app.services.sv_onnx import OnnxSVBackend
 from app.services.whisper_batch import WhisperBatchTranscriber
+
+import logging
+_logger = logging.getLogger(__name__)
 
 # SV backend union type (duck typing — both have extract_embedding, score_embeddings, health, device)
 SVBackend = ModelScopeSVBackend | OnnxSVBackend
@@ -47,6 +53,22 @@ def build_asr_backend(settings: Settings) -> ASRBackend:
         return LanguageAwareASRRouter(
             sensevoice_model_dir=settings.asr_onnx_model_path,
         )
+    elif settings.asr_backend == "parakeet":
+        try:
+            from app.services.backends.asr_parakeet import ParakeetTDTTranscriber
+            _logger.info("Loading Parakeet TDT ASR on %s", settings.parakeet_device)
+            return ParakeetTDTTranscriber(
+                model_name=settings.parakeet_model_name,
+                device=settings.parakeet_device,
+            )
+        except Exception as exc:
+            # Covers: ImportError (no nemo), RuntimeError (CUDA init fail),
+            # OSError (missing shared lib), torch.cuda.CudaError, etc.
+            _logger.warning(
+                "Parakeet unavailable (%s: %s), falling back to sensevoice-onnx",
+                type(exc).__name__, exc,
+            )
+            return LanguageAwareASRRouter(sensevoice_model_dir=settings.asr_onnx_model_path)
     else:
         return WhisperBatchTranscriber(
             model_size=settings.whisper_model_size,
@@ -66,6 +88,8 @@ class AppRuntime:
     improvement_generator: ImprovementGenerator
     checkpoint_analyzer: CheckpointAnalyzer
     incremental_processor: IncrementalProcessor
+    redis_state: RedisSessionState | None
+    recompute_asr: object | None  # SelectiveRecomputeASR | None (lazy import)
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -108,11 +132,11 @@ def build_runtime(settings: Settings) -> AppRuntime:
 
     asr = build_asr_backend(settings)
 
-    report_llm = DashScopeLLM(
+    llm_config = LLMConfig(
         api_key=settings.dashscope_api_key.get_secret_value(),
-        model_name=settings.report_model_name,
-        timeout_ms=settings.report_timeout_ms,
+        model=settings.report_model_name,
     )
+    report_llm = DashScopeLLMAdapter(config=llm_config, redis_client=None)
 
     checkpoint_analyzer = CheckpointAnalyzer(llm=report_llm)
 
@@ -125,12 +149,48 @@ def build_runtime(settings: Settings) -> AppRuntime:
         embedding_model_id=settings.pyannote_embedding_model_id,
     )
 
+    arbiter = SpeakerArbiter(sv_backend=sv_backend, confidence_threshold=0.50)
+
     incremental_processor = IncrementalProcessor(
         settings=settings,
         diarizer=diarizer,
         asr_backend=asr,
         checkpoint_analyzer=checkpoint_analyzer,
+        arbiter=arbiter,
     )
+
+    # Redis for V1 incremental state — graceful degradation on connection failure
+    redis_state: RedisSessionState | None = None
+    try:
+        import redis
+        rc = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        rc.ping()
+        redis_state = RedisSessionState(rc, ttl_s=settings.redis_session_ttl_s)
+        import logging
+        logging.getLogger(__name__).info("Redis connected: %s", settings.redis_url)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Redis unavailable (%s), V1 incremental endpoints will degrade: %s",
+            settings.redis_url, exc,
+        )
+
+    # Inject Redis into LLM adapter for idempotency cache (Constraint 4)
+    if redis_state is not None:
+        report_llm._redis = redis_state._redis
+
+    # Recompute ASR for finalize-time low-confidence correction (lazy-loaded)
+    recompute_asr = None
+    if settings.recompute_asr_enabled:
+        try:
+            from app.services.backends.asr_recompute import SelectiveRecomputeASR
+            recompute_asr = SelectiveRecomputeASR(
+                model_size=settings.recompute_asr_model_size,
+                device=settings.recompute_asr_device,
+            )
+            _logger.info("Recompute ASR registered: %s on %s", settings.recompute_asr_model_size, settings.recompute_asr_device)
+        except Exception as exc:
+            _logger.warning("Recompute ASR unavailable (%s: %s)", type(exc).__name__, exc)
 
     return AppRuntime(
         settings=settings,
@@ -143,4 +203,6 @@ def build_runtime(settings: Settings) -> AppRuntime:
         improvement_generator=ImprovementGenerator(llm=report_llm),
         checkpoint_analyzer=checkpoint_analyzer,
         incremental_processor=incremental_processor,
+        redis_state=redis_state,
+        recompute_asr=recompute_asr,
     )

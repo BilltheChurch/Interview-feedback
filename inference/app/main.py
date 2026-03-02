@@ -13,7 +13,8 @@ from starlette.responses import Response
 from app.config import get_settings
 from app.routes.asr import router as asr_router
 from app.routes.batch import router as batch_router
-from app.routes.incremental import router as incremental_router
+from app.routes.incremental_v1 import v1_router
+from app.routes.ws_incremental import register_ws_routes
 from app.exceptions import (
     AudioDecodeError,
     NotImplementedServiceError,
@@ -72,7 +73,8 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 app.state.runtime = runtime
 app.include_router(asr_router)
 app.include_router(batch_router)
-app.include_router(incremental_router)
+app.include_router(v1_router)
+register_ws_routes(app, runtime)
 
 _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
@@ -81,20 +83,6 @@ _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 async def _expand_thread_pool() -> None:
     """Expand asyncio thread pool so concurrent SV model calls don't starve other endpoints."""
     asyncio.get_running_loop().set_default_executor(_thread_pool)
-
-
-@app.on_event("startup")
-async def _start_incremental_cleanup() -> None:
-    """Periodically clean up stale incremental processing sessions."""
-    async def _cleanup_loop():
-        while True:
-            await asyncio.sleep(300)  # every 5 minutes
-            try:
-                runtime.incremental_processor.cleanup_stale_sessions()
-            except Exception as exc:
-                logger.warning("Incremental session cleanup error: %s", exc)
-
-    asyncio.create_task(_cleanup_loop())
 
 
 @app.on_event("startup")

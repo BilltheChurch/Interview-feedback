@@ -60,7 +60,7 @@ jobs:
         run: npx vitest run tests/contract-inference.test.ts
 
   inference:
-    name: Inference (Pytest)
+    name: Inference (Unit)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -74,6 +74,30 @@ jobs:
           cache-dependency-path: inference/requirements.txt
       - run: pip install -r requirements.txt
       - name: Run Tests
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v -m "not integration"
       - name: Run contract tests
         run: python -m pytest tests/test_contract_worker_inference.py -v
+
+  inference-integration:
+    name: Inference (Integration)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+    defaults:
+      run:
+        working-directory: inference
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: inference/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Run Integration Tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+        run: python -m pytest tests/ -v -m "integration"

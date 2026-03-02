@@ -14,21 +14,47 @@ from fastapi.testclient import TestClient
 from app.services.ws_protocol import encode_pcm_frame, SCHEMA_VERSION
 
 
+def _make_mock_response():
+    """Build a mock IncrementalProcessResponse."""
+    mock_profile = MagicMock()
+    mock_profile.speaker_id = "spk_00"
+    mock_profile.model_dump.return_value = {
+        "speaker_id": "spk_00",
+        "total_speech_ms": 3000,
+    }
+
+    mock_utterance = MagicMock()
+    mock_utterance.model_dump.return_value = {
+        "speaker": "spk_00",
+        "text": "hello",
+        "start_ms": 0,
+        "end_ms": 1500,
+    }
+
+    response = MagicMock()
+    response.speaker_profiles = [mock_profile]
+    response.utterances = [mock_utterance]
+    response.checkpoint = None
+    response.diarization_time_ms = 500
+    response.transcription_time_ms = 300
+    response.total_processing_time_ms = 1000
+    response.speakers_detected = 1
+    response.stable_speaker_map = False
+    return response
+
+
 @pytest.fixture
 def mock_runtime():
     """Build a mock AppRuntime with mock IncrementalProcessor."""
     runtime = MagicMock()
     runtime.incremental_processor = MagicMock()
     runtime.redis_state = MagicMock()
-    # Mock process_increment to return a simple result
-    runtime.incremental_processor.process_increment_v2.return_value = {
-        "session_id": "sess-1",
-        "increment_index": 0,
-        "utterances": [{"speaker": "spk_00", "text": "hello", "start_ms": 0, "end_ms": 1500}],
-        "speaker_profiles": [],
-        "checkpoint": None,
-        "metrics": {"diarization_ms": 500, "transcription_ms": 300, "total_ms": 1000},
-    }
+    runtime.settings = MagicMock()
+    runtime.settings.incremental_v1_enabled = True
+
+    # Mock process_increment to return IncrementalProcessResponse
+    runtime.incremental_processor.process_increment.return_value = _make_mock_response()
+
     # Mock idempotency check (read-only pre-check + atomic write)
     runtime.redis_state.is_already_processed.return_value = False
     runtime.redis_state.atomic_write_increment.return_value = True
