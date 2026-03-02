@@ -13,7 +13,9 @@ from app.services.orchestrator import InferenceOrchestrator
 from app.services.report_generator import ReportGenerator
 from app.services.improvement_generator import ImprovementGenerator
 from app.services.report_synthesizer import ReportSynthesizer
+from app.services.incremental_processor import IncrementalProcessor
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
+from app.services.asr_router import LanguageAwareASRRouter
 from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
 from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 from app.services.sv import ModelScopeSVBackend
@@ -24,11 +26,16 @@ from app.services.whisper_batch import WhisperBatchTranscriber
 SVBackend = ModelScopeSVBackend | OnnxSVBackend
 
 # ASR backend union type (duck typing — all have transcribe, transcribe_pcm, device, backend, model_size)
-ASRBackend = SenseVoiceTranscriber | SenseVoiceOnnxTranscriber | WhisperBatchTranscriber
+ASRBackend = SenseVoiceTranscriber | SenseVoiceOnnxTranscriber | WhisperBatchTranscriber | LanguageAwareASRRouter
 
 
 def build_asr_backend(settings: Settings) -> ASRBackend:
-    """Factory: create ASR backend based on settings.asr_backend."""
+    """Factory: create ASR backend based on settings.asr_backend.
+
+    When asr_backend is "sensevoice-onnx", automatically enables language-aware
+    routing: English → Moonshine ONNX, other languages → SenseVoice ONNX.
+    Falls back to SenseVoice-only if Moonshine model is not available.
+    """
     if settings.asr_backend == "sensevoice":
         return SenseVoiceTranscriber(
             model_id=settings.sensevoice_model_id,
@@ -36,8 +43,9 @@ def build_asr_backend(settings: Settings) -> ASRBackend:
             cache_dir=settings.modelscope_cache,
         )
     elif settings.asr_backend == "sensevoice-onnx":
-        return SenseVoiceOnnxTranscriber(
-            model_dir=settings.asr_onnx_model_path,
+        # Language-aware routing: SenseVoice (multilingual) + Moonshine (English)
+        return LanguageAwareASRRouter(
+            sensevoice_model_dir=settings.asr_onnx_model_path,
         )
     else:
         return WhisperBatchTranscriber(
@@ -57,6 +65,7 @@ class AppRuntime:
     report_synthesizer: ReportSynthesizer
     improvement_generator: ImprovementGenerator
     checkpoint_analyzer: CheckpointAnalyzer
+    incremental_processor: IncrementalProcessor
 
 
 def build_runtime(settings: Settings) -> AppRuntime:
@@ -104,6 +113,25 @@ def build_runtime(settings: Settings) -> AppRuntime:
         model_name=settings.report_model_name,
         timeout_ms=settings.report_timeout_ms,
     )
+
+    checkpoint_analyzer = CheckpointAnalyzer(llm=report_llm)
+
+    # Diarizer for incremental processor (lazy-loaded, same as batch endpoint)
+    from app.services.diarize_full import PyannoteFullDiarizer
+    diarizer = PyannoteFullDiarizer(
+        device=settings.pyannote_device,
+        hf_token=settings.hf_token.get_secret_value(),
+        model_id=settings.pyannote_model_id,
+        embedding_model_id=settings.pyannote_embedding_model_id,
+    )
+
+    incremental_processor = IncrementalProcessor(
+        settings=settings,
+        diarizer=diarizer,
+        asr_backend=asr,
+        checkpoint_analyzer=checkpoint_analyzer,
+    )
+
     return AppRuntime(
         settings=settings,
         orchestrator=orchestrator,
@@ -113,5 +141,6 @@ def build_runtime(settings: Settings) -> AppRuntime:
         report_generator=ReportGenerator(llm=report_llm),
         report_synthesizer=ReportSynthesizer(llm=report_llm),
         improvement_generator=ImprovementGenerator(llm=report_llm),
-        checkpoint_analyzer=CheckpointAnalyzer(llm=report_llm),
+        checkpoint_analyzer=checkpoint_analyzer,
+        incremental_processor=incremental_processor,
     )

@@ -39,7 +39,7 @@ jobs:
           retention-days: 7
 
   edge-worker:
-    name: Edge Worker (TypeCheck)
+    name: Edge Worker (TypeCheck + Test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -54,6 +54,10 @@ jobs:
       - run: npm ci
       - name: TypeScript Check
         run: npm run typecheck
+      - name: Run Worker tests
+        run: npx vitest run
+      - name: Run contract tests
+        run: npx vitest run tests/contract-inference.test.ts
 
   inference:
     name: Inference (Pytest)
@@ -71,3 +75,5 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Run Tests
         run: python -m pytest tests/ -v
+      - name: Run contract tests
+        run: python -m pytest tests/test_contract_worker_inference.py -v

@@ -45,6 +45,7 @@ type UseDraftFeedbackReturn = {
   error: string | null;
   fetchDraft: () => Promise<void>;
   startFinalization: () => Promise<void>;
+  startIncrementalPolling: () => void;
 };
 
 export function useDraftFeedback({
@@ -60,6 +61,7 @@ export function useDraftFeedback({
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const tier2PollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const incrementalPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const jobIdRef = useRef<string | null>(null);
 
   // Cleanup polling on unmount
@@ -67,6 +69,7 @@ export function useDraftFeedback({
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (tier2PollRef.current) clearInterval(tier2PollRef.current);
+      if (incrementalPollRef.current) clearInterval(incrementalPollRef.current);
     };
   }, []);
 
@@ -236,6 +239,69 @@ export function useDraftFeedback({
     }
   }, [baseUrl, sessionId, pollIntervalMs, startTier2Polling]);
 
+  /**
+   * Poll incremental processing status after finalization.
+   * When incremental finalize succeeds, fetch the result and set status to tier2_ready.
+   * If incremental finalize fails, fall back to Tier 2 polling.
+   */
+  const startIncrementalPolling = useCallback(() => {
+    if (!baseUrl || !sessionId) return;
+
+    const checkIncremental = async () => {
+      try {
+        const result = await window.desktopAPI.getIncrementalStatus({
+          baseUrl,
+          sessionId,
+        });
+
+        if (!result || !result.enabled) {
+          // Not enabled — fall back to Tier 2 polling
+          if (incrementalPollRef.current) clearInterval(incrementalPollRef.current);
+          startTier2Polling();
+          return;
+        }
+
+        if (result.status === 'succeeded') {
+          if (incrementalPollRef.current) clearInterval(incrementalPollRef.current);
+
+          // Fetch the enhanced report from incremental finalization
+          try {
+            const fullResult = await window.desktopAPI.getResultV2({
+              baseUrl,
+              sessionId,
+            });
+            setReport(fullResult);
+            setIsDraft(false);
+            setIsTier2Enhanced(true);
+            setStatus('tier2_ready');
+          } catch {
+            // Keep current report if fetch fails
+          }
+          return;
+        }
+
+        if (result.status === 'failed') {
+          if (incrementalPollRef.current) clearInterval(incrementalPollRef.current);
+          // Incremental failed — fall back to Tier 2 polling
+          startTier2Polling();
+          return;
+        }
+
+        // Still finalizing — update status indicator
+        if (result.status === 'finalizing') {
+          setStatus('tier2_running');
+        }
+      } catch {
+        // Status not available — fall back to Tier 2
+        if (incrementalPollRef.current) clearInterval(incrementalPollRef.current);
+        startTier2Polling();
+      }
+    };
+
+    incrementalPollRef.current = setInterval(checkIncremental, pollIntervalMs);
+    checkIncremental(); // Initial check
+  }, [baseUrl, sessionId, pollIntervalMs, startTier2Polling]);
+
   return {
     status,
     report,
@@ -245,5 +311,6 @@ export function useDraftFeedback({
     error,
     fetchDraft,
     startFinalization,
+    startIncrementalPolling,
   };
 }

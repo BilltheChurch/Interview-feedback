@@ -651,3 +651,99 @@ class ImprovementResponse(BaseModel):
     improvements: ImprovementReport
     model: str = ""
     elapsed_ms: int = 0
+
+
+# ── Shared Batch/Incremental Schemas ───────────────────────────────────────
+
+
+class WordTimestampOut(BaseModel):
+    word: str
+    start_ms: int
+    end_ms: int
+    confidence: float = 1.0
+
+
+class MergedUtteranceOut(BaseModel):
+    id: str
+    speaker: str
+    text: str
+    start_ms: int
+    end_ms: int
+    words: list[WordTimestampOut] = Field(default_factory=list)
+    language: str = ""
+    confidence: float = 1.0
+
+
+# ── Incremental Processing Schemas ─────────────────────────────────────────
+
+
+class SpeakerProfileOut(BaseModel):
+    """Speaker profile tracked across incremental processing."""
+    speaker_id: str
+    centroid: list[float]
+    total_speech_ms: int = Field(default=0, ge=0)
+    first_seen_increment: int = Field(default=0, ge=0)
+    display_name: str | None = None
+
+
+class IncrementalProcessRequest(BaseModel):
+    """Request to process a single audio increment."""
+    session_id: str = Field(min_length=1, max_length=128)
+    increment_index: int = Field(ge=0)
+    audio_b64: str = Field(description="Base64-encoded audio (WAV)")
+    audio_format: Literal["wav", "pcm_s16le"] = "wav"
+    audio_start_ms: int = Field(ge=0)
+    audio_end_ms: int = Field(gt=0)
+    num_speakers: int | None = Field(default=None, ge=1, le=20)
+    run_analysis: bool = True
+    language: str = "auto"
+    locale: str = "zh-CN"
+    previous_speaker_profiles: list[SpeakerProfileOut] | None = None
+    memos: list[Memo] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+
+
+class IncrementalProcessResponse(BaseModel):
+    """Response from processing a single audio increment."""
+    session_id: str
+    increment_index: int
+    utterances: list[MergedUtteranceOut] = Field(default_factory=list)
+    speaker_profiles: list[SpeakerProfileOut] = Field(default_factory=list)
+    speaker_mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description="local_speaker_id → global_speaker_id mapping",
+    )
+    checkpoint: CheckpointResponse | None = None
+    diarization_time_ms: int = Field(default=0, ge=0)
+    transcription_time_ms: int = Field(default=0, ge=0)
+    total_processing_time_ms: int = Field(default=0, ge=0)
+    speakers_detected: int = Field(default=0, ge=0)
+    stable_speaker_map: bool = False
+
+
+class IncrementalFinalizeRequest(BaseModel):
+    """Request to finalize incremental processing and generate report."""
+    session_id: str = Field(min_length=1, max_length=128)
+    final_audio_b64: str | None = Field(
+        default=None, description="Base64-encoded final audio chunk (WAV), if any unprocessed audio remains"
+    )
+    final_audio_format: Literal["wav", "pcm_s16le"] = "wav"
+    final_audio_start_ms: int = Field(default=0, ge=0)
+    final_audio_end_ms: int = Field(default=0, ge=0)
+    memos: list[Memo] = Field(default_factory=list)
+    stats: list[SpeakerStat] = Field(default_factory=list)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    session_context: SessionContext | None = None
+    locale: str = "zh-CN"
+    name_aliases: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class IncrementalFinalizeResponse(BaseModel):
+    """Response from incremental finalization with full report."""
+    session_id: str
+    transcript: list[MergedUtteranceOut] = Field(default_factory=list)
+    speaker_stats: list[SpeakerStat] = Field(default_factory=list)
+    report: AnalysisReportResponse | None = None
+    total_increments: int = Field(default=0, ge=0)
+    total_audio_ms: int = Field(default=0, ge=0)
+    finalize_time_ms: int = Field(default=0, ge=0)

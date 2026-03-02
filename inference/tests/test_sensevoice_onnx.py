@@ -93,10 +93,10 @@ class TestOnnxConfigIntegration:
         assert s.asr_onnx_model_path == "/custom/model/path"
 
     def test_runtime_builds_onnx_backend(self):
-        """Runtime should create SenseVoiceOnnxTranscriber when configured."""
+        """Runtime should create LanguageAwareASRRouter when configured with sensevoice-onnx."""
         from app.config import Settings
         from app.runtime import build_asr_backend
-        from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
+        from app.services.asr_router import LanguageAwareASRRouter
 
         s = Settings(
             _env_file=None,
@@ -105,7 +105,7 @@ class TestOnnxConfigIntegration:
             INFERENCE_API_KEY="test",
         )
         backend = build_asr_backend(s)
-        assert isinstance(backend, SenseVoiceOnnxTranscriber)
+        assert isinstance(backend, LanguageAwareASRRouter)
 
     def test_runtime_builds_sensevoice_backend(self):
         """Runtime should still create SenseVoiceTranscriber for 'sensevoice'."""

@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   finalizeV2: (payload) => ipcRenderer.invoke('session:finalizeV2', payload),
   getFinalizeStatus: (payload) => ipcRenderer.invoke('session:getFinalizeStatus', payload),
   getTier2Status: (payload) => ipcRenderer.invoke('session:getTier2Status', payload),
+  getIncrementalStatus: (payload) => ipcRenderer.invoke('session:getIncrementalStatus', payload),
   getResultV2: (payload) => ipcRenderer.invoke('session:getResultV2', payload),
   getFeedbackReady: (payload) => ipcRenderer.invoke('session:getFeedbackReady', payload),
   openFeedback: (payload) => ipcRenderer.invoke('session:openFeedback', payload),

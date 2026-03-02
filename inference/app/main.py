@@ -13,6 +13,7 @@ from starlette.responses import Response
 from app.config import get_settings
 from app.routes.asr import router as asr_router
 from app.routes.batch import router as batch_router
+from app.routes.incremental import router as incremental_router
 from app.exceptions import (
     AudioDecodeError,
     NotImplementedServiceError,
@@ -71,6 +72,7 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 app.state.runtime = runtime
 app.include_router(asr_router)
 app.include_router(batch_router)
+app.include_router(incremental_router)
 
 _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
@@ -79,6 +81,20 @@ _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 async def _expand_thread_pool() -> None:
     """Expand asyncio thread pool so concurrent SV model calls don't starve other endpoints."""
     asyncio.get_running_loop().set_default_executor(_thread_pool)
+
+
+@app.on_event("startup")
+async def _start_incremental_cleanup() -> None:
+    """Periodically clean up stale incremental processing sessions."""
+    async def _cleanup_loop():
+        while True:
+            await asyncio.sleep(300)  # every 5 minutes
+            try:
+                runtime.incremental_processor.cleanup_stale_sessions()
+            except Exception as exc:
+                logger.warning("Incremental session cleanup error: %s", exc)
+
+    asyncio.create_task(_cleanup_loop())
 
 
 @app.on_event("startup")
@@ -232,16 +248,23 @@ async def models_status() -> ModelsStatusResponse:
     # ASR models
     if s.asr_backend == "sensevoice-onnx":
         m = _check_dir("sensevoice-onnx", s.asr_onnx_model_path)
-        m.loaded = bool(runtime.asr_backend and runtime.asr_backend.backend == "sensevoice-onnx")
+        m.loaded = bool(runtime.asr_backend)
         m.provider = getattr(runtime.asr_backend, "device", "unknown")
         models.append(m)
 
-    # Moonshine (English fallback)
+    # Moonshine (English-specialized, auto-routed by LanguageAwareASRRouter)
     moonshine_path = os.environ.get(
         "MOONSHINE_MODEL_PATH",
         "~/.cache/moonshine-onnx/sherpa-onnx-moonshine-base-en-int8",
     )
-    models.append(_check_dir("moonshine-onnx", moonshine_path, required=False))
+    moonshine_status = _check_dir("moonshine-onnx", moonshine_path, required=False)
+    # Check if Moonshine is actively loaded via the language-aware router
+    from app.services.asr_router import LanguageAwareASRRouter
+    if isinstance(runtime.asr_backend, LanguageAwareASRRouter):
+        moonshine_status.loaded = runtime.asr_backend._moonshine_available
+        if moonshine_status.loaded:
+            moonshine_status.provider = "language-aware-router (en→moonshine)"
+    models.append(moonshine_status)
 
     # SV model
     if s.sv_backend == "onnx":

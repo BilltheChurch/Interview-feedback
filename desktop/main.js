@@ -567,6 +567,24 @@ function registerIpcHandlers() {
     return response.data;
   });
 
+  ipcMain.handle('session:getIncrementalStatus', async (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('incremental status payload is required');
+    }
+    const baseUrl = String(payload.baseUrl || '').trim().replace(/\/+$/, '');
+    const sessionId = String(payload.sessionId || '').trim();
+    if (!baseUrl || !sessionId) {
+      throw new Error('baseUrl and sessionId are required');
+    }
+    const response = await requestJson(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/incremental-status`
+    );
+    if (!response.ok) {
+      throw new Error(`get-incremental-status failed: ${response.status} ${JSON.stringify(response.data).slice(0, 240)}`);
+    }
+    return response.data;
+  });
+
   ipcMain.handle('session:getResultV2', async (_event, payload) => {
     if (!payload || typeof payload !== 'object') {
       throw new Error('session result payload is required');
