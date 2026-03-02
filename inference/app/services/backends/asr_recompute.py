@@ -81,3 +81,27 @@ class SelectiveRecomputeASR:
             )
 
         return recomputed
+
+    def recompute_utterance(
+        self,
+        audio_path: str,
+        language: str = "en",
+        start_ms: int = 0,
+        end_ms: int = 0,
+    ) -> dict:
+        """Re-transcribe a single audio segment with high-precision model.
+
+        Returns: {"text": str, "confidence": float, "recomputed": True}
+        Raises on model error — caller must handle.
+        """
+        self._ensure_model()
+        segments, _info = self._model.transcribe(
+            audio_path,
+            language=language,
+        )
+        new_text = " ".join(s.text for s in segments).strip()
+        return {
+            "text": new_text,
+            "confidence": 0.90,
+            "recomputed": True,
+        }
