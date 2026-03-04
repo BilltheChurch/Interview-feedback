@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock
 
 from app.schemas import (
-    ClaimImprovement,
-    DimensionImprovement,
     DimensionPreset,
-    ImprovementReport,
     ImprovementRequest,
-    ImprovementResponse,
-    OverallImprovement,
     TranscriptUtterance,
 )
 from app.services.improvement_generator import ImprovementGenerator

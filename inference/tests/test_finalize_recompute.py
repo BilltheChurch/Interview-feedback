@@ -71,6 +71,7 @@ def mock_runtime():
 @pytest.fixture
 def app(mock_runtime):
     from fastapi import FastAPI
+
     from app.routes.incremental_v1 import v1_router
     app = FastAPI()
     app.state.runtime = mock_runtime

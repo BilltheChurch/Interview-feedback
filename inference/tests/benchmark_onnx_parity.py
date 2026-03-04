@@ -31,8 +31,8 @@ def check_sensevoice_parity() -> dict:
         return {"status": "SKIP", "reason": "No test audio"}
 
     try:
-        from app.services.sensevoice_transcriber import SenseVoiceTranscriber
         from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
+        from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 
         pytorch = SenseVoiceTranscriber()
         onnx = SenseVoiceOnnxTranscriber()
@@ -67,8 +67,9 @@ def check_campplus_parity() -> dict:
         return {"status": "SKIP", "reason": "ONNX model not exported yet"}
 
     try:
-        import numpy as np
         import wave
+
+        import numpy as np
 
         # Load audio
         with wave.open(audio, "rb") as wf:
@@ -117,8 +118,8 @@ def check_onnx_speed() -> dict:
         return {"status": "SKIP", "reason": "No test audio"}
 
     try:
-        from app.services.sensevoice_transcriber import SenseVoiceTranscriber
         from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
+        from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 
         pytorch = SenseVoiceTranscriber()
         onnx = SenseVoiceOnnxTranscriber()

@@ -8,18 +8,16 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from app.services.diarize_full import (
-    PyannoteFullDiarizer,
     DiarizeResult,
+    PyannoteFullDiarizer,
     SpeakerSegment,
-    detect_device,
 )
-
 
 # ---------------------------------------------------------------------------
 # Device detection
@@ -162,7 +160,7 @@ def test_diarize_with_mocked_pipeline():
     mock_pipeline = MagicMock()
     mock_pipeline.return_value = mock_annotation
 
-    mock_from_pretrained = MagicMock(return_value=mock_pipeline)
+    MagicMock(return_value=mock_pipeline)
 
     with (
         patch("app.services.diarize_full.detect_device", return_value="cpu"),

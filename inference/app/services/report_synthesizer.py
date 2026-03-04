@@ -11,7 +11,6 @@ from app.schemas import (
     AnalysisReportResponse,
     DimensionClaim,
     DimensionFeedback,
-    DimensionPreset,
     InterviewQuality,
     KeyFinding,
     OverallFeedback,

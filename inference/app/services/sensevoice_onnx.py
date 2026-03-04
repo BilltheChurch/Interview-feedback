@@ -14,7 +14,7 @@ import time
 import wave
 from typing import Any
 
-from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
+from app.services.whisper_batch import TranscriptResult, Utterance
 
 logger = logging.getLogger(__name__)
 

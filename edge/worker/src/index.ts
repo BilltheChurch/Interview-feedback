@@ -179,6 +179,26 @@ import {
   type InferenceCallContext
 } from "./inference-helpers";
 import {
+  currentRealtimeWsState as currentRealtimeWsStateFn,
+  refreshAsrStreamMetrics as refreshAsrStreamMetricsFn,
+  closeRealtimeAsrSession as closeRealtimeAsrSessionFn,
+  hydrateRuntimeFromCursor as hydrateRuntimeFromCursorFn,
+  enqueueRealtimeChunk as enqueueRealtimeChunkFn,
+  replayGapFromR2 as replayGapFromR2Fn,
+  loadChunkRange as loadChunkRangeFn,
+  getAsrProvider as getAsrProviderFn,
+  autoResolveStudentsUtterance as autoResolveStudentsUtteranceFn,
+  maybeAutoEnrollStudentsUtterance as maybeAutoEnrollStudentsUtteranceFn,
+  appendTeacherSpeakerEvent as appendTeacherSpeakerEventFn,
+  emitRealtimeUtterance as emitRealtimeUtteranceFn,
+  handleRealtimeAsrMessage as handleRealtimeAsrMessageFn,
+  ensureRealtimeAsrConnected as ensureRealtimeAsrConnectedFn,
+  drainRealtimeQueue as drainRealtimeQueueFn,
+  maybeRunAsrWindows as maybeRunAsrWindowsFn,
+  type RealtimeAsrContext,
+} from "./realtime-asr-processor";
+
+import {
   buildEvidenceIndex as buildEvidenceIndexFn,
   findClaimInReport as findClaimInReportFn,
   downWeightClaimConfidenceByEvidence as downWeightClaimConfidenceByEvidenceFn,
@@ -1137,765 +1157,77 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return clearFinalizeStageCheckpointFn(this.ctx.storage);
   }
 
+  private get realtimeAsrCtx(): RealtimeAsrContext {
+    return {
+      env: this.env,
+      doCtx: this.ctx,
+      asrProcessingByStream: this.asrProcessingByStream,
+      asrRealtimeByStream: this.asrRealtimeByStream,
+      getLocalWhisperProvider: () => this.localWhisperProvider,
+      setLocalWhisperProvider: (p) => { this.localWhisperProvider = p; },
+      inferenceCallCtx: this.inferenceCallCtx,
+      asrRealtimeEnabled: () => this.asrRealtimeEnabled(),
+      asrDebugEnabled: () => this.asrDebugEnabled(),
+      resolveAudioWindowSeconds: () => this.resolveAudioWindowSeconds(),
+      currentIsoTs: () => this.currentIsoTs(),
+      loadAsrByStream: () => this.loadAsrByStream(),
+      storeAsrByStream: (s) => this.storeAsrByStream(s),
+      loadAsrCursorByStream: () => this.loadAsrCursorByStream(),
+      patchAsrCursor: (r, p) => this.patchAsrCursor(r, p),
+      loadIngestByStream: (id) => this.loadIngestByStream(id),
+      loadUtterancesRawByStream: () => this.loadUtterancesRawByStream(),
+      storeUtterancesRawByStream: (s) => this.storeUtterancesRawByStream(s),
+      loadUtterancesMergedByStream: () => this.loadUtterancesMergedByStream(),
+      storeUtterancesMergedByStream: (s) => this.storeUtterancesMergedByStream(s),
+      appendSpeakerEvent: (e) => this.appendSpeakerEvent(e),
+      maybeScheduleCheckpoint: (id, ms, r) => this.maybeScheduleCheckpoint(id, ms, r),
+      confidenceBucketFromEvidence: (e) => this.confidenceBucketFromEvidence(e),
+      inferParticipantFromText: (s, t) => this.inferParticipantFromText(s, t),
+      rosterNameByCandidate: (s, c) => this.rosterNameByCandidate(s, c),
+      updateUnassignedEnrollmentByCluster: (s, c, d) => this.updateUnassignedEnrollmentByCluster(s, c, d),
+      participantProgressFromProfiles: (s) => this.participantProgressFromProfiles(s),
+      refreshEnrollmentMode: (s) => this.refreshEnrollmentMode(s),
+    };
+  }
+
   private currentRealtimeWsState(runtime: AsrRealtimeRuntime): "disconnected" | "connecting" | "running" | "error" {
-    if (runtime.connecting) return "connecting";
-    if (runtime.connected && runtime.running) return "running";
-    if (runtime.connected) return "connecting";
-    return "disconnected";
+    return currentRealtimeWsStateFn(runtime);
   }
 
-  async refreshAsrStreamMetrics(
-    sessionId: string,
-    streamRole: StreamRole,
-    patch: Partial<AsrState> = {}
-  ): Promise<void> {
-    const [asrByStream, ingestByStream] = await Promise.all([this.loadAsrByStream(), this.loadIngestByStream(sessionId)]);
-    const runtime = this.asrRealtimeByStream[streamRole];
-    const asr = asrByStream[streamRole];
-
-    asr.mode = this.asrRealtimeEnabled() ? "realtime" : "windowed";
-    asr.asr_ws_state = this.currentRealtimeWsState(runtime);
-    asr.backlog_chunks = runtime.sendQueue.length;
-    asr.ingest_lag_seconds = Math.max(0, ingestByStream[streamRole].last_seq - runtime.lastSentSeq);
-    asr.last_emit_at = runtime.lastEmitAt;
-
-    Object.assign(asr, patch);
-    asrByStream[streamRole] = asr;
-    await this.storeAsrByStream(asrByStream);
+  async refreshAsrStreamMetrics(sessionId: string, streamRole: StreamRole, patch: Partial<AsrState> = {}): Promise<void> {
+    return refreshAsrStreamMetricsFn(sessionId, streamRole, this.realtimeAsrCtx, patch);
   }
 
-  async closeRealtimeAsrSession(
-    streamRole: StreamRole,
-    reason: string,
-    clearQueue = false,
-    gracefulFinish = true
-  ): Promise<void> {
-    const runtime = this.asrRealtimeByStream[streamRole];
-    const ws = runtime.ws;
-
-    if (clearQueue) {
-      runtime.sendQueue = [];
-      runtime.currentStartSeq = null;
-      runtime.currentStartTsMs = null;
-      runtime.lastSentSeq = 0;
-      runtime.sentChunkTsBySeq.clear();
-      runtime.lastEmitAt = null;
-      runtime.lastFinalTextNorm = "";
-    }
-
-    if (ws) {
-      try {
-        if (runtime.taskId && gracefulFinish) {
-          ws.send(
-            JSON.stringify({
-              header: {
-                action: "finish-task",
-                task_id: runtime.taskId,
-                streaming: "duplex"
-              },
-              payload: {
-                input: {}
-              }
-            })
-          );
-          await sleep(1000);
-        }
-      } catch {
-        // ignore finish-task errors during close
-      }
-      try {
-        ws.close(1000, reason.slice(0, WS_CLOSE_REASON_MAX_LEN));
-      } catch {
-        // ignore close errors
-      }
-    }
-
-    runtime.connected = false;
-    runtime.connecting = false;
-    runtime.running = false;
-    runtime.readyResolve = null;
-    runtime.readyReject = null;
-    runtime.readyPromise = null;
-    runtime.connectPromise = null;
-    runtime.flushPromise = null;
-    runtime.ws = null;
-    runtime.taskId = null;
-    runtime.drainGeneration += 1;
+  async closeRealtimeAsrSession(streamRole: StreamRole, reason: string, clearQueue = false, gracefulFinish = true): Promise<void> {
+    return closeRealtimeAsrSessionFn(streamRole, reason, this.realtimeAsrCtx, clearQueue, gracefulFinish);
   }
 
   private async hydrateRuntimeFromCursor(streamRole: StreamRole): Promise<void> {
-    const cursors = await this.loadAsrCursorByStream();
-    const cursor = cursors[streamRole];
-    const runtime = this.asrRealtimeByStream[streamRole];
-    runtime.lastSentSeq = Math.max(runtime.lastSentSeq, cursor.last_sent_seq);
-    if (runtime.currentStartSeq === null && cursor.last_emitted_seq > 0) {
-      runtime.currentStartSeq = cursor.last_emitted_seq + 1;
-    }
+    return hydrateRuntimeFromCursorFn(streamRole, this.realtimeAsrCtx);
+  }
+
+  private async enqueueRealtimeChunk(sessionId: string, streamRole: StreamRole, seq: number, timestampMs: number, bytes: Uint8Array): Promise<void> {
+    return enqueueRealtimeChunkFn(sessionId, streamRole, seq, timestampMs, bytes, this.realtimeAsrCtx);
   }
 
   private async replayGapFromR2(sessionId: string, streamRole: StreamRole): Promise<void> {
-    const [cursors, ingestByStream] = await Promise.all([this.loadAsrCursorByStream(), this.loadIngestByStream(sessionId)]);
-    const cursor = cursors[streamRole];
-    const ingest = ingestByStream[streamRole];
-    const replayStart = cursor.last_sent_seq + 1;
-    if (replayStart > ingest.last_seq) return;
-
-    for (let seq = replayStart; seq <= ingest.last_seq; seq += 1) {
-      const key = chunkObjectKey(sessionId, streamRole, seq);
-      const object = await this.env.RESULT_BUCKET.get(key);
-      if (!object) continue;
-      const bytes = new Uint8Array(await object.arrayBuffer());
-      if (bytes.byteLength !== ONE_SECOND_PCM_BYTES) continue;
-      const tsRaw = object.customMetadata?.timestamp_ms ?? "";
-      const parsedTs = Number(tsRaw);
-      const timestampMs = Number.isFinite(parsedTs) ? parsedTs : seq * 1000;
-      await this.enqueueRealtimeChunk(sessionId, streamRole, seq, timestampMs, bytes);
-    }
+    return replayGapFromR2Fn(sessionId, streamRole, this.realtimeAsrCtx);
   }
 
-  private async ensureRealtimeAsrConnected(sessionId: string, streamRole: StreamRole): Promise<void> {
-    const runtime = this.asrRealtimeByStream[streamRole];
-    await this.hydrateRuntimeFromCursor(streamRole);
-    if (runtime.connected && runtime.running && runtime.ws) {
-      return;
-    }
-    if (runtime.connectPromise) {
-      return runtime.connectPromise;
-    }
-
-    runtime.connectPromise = (async () => {
-      runtime.connecting = true;
-      await this.refreshAsrStreamMetrics(sessionId, streamRole);
-
-      const apiKey = (this.env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim();
-      if (!apiKey) {
-        throw new Error("ALIYUN_DASHSCOPE_API_KEY is missing");
-      }
-
-      const asrByStream = await this.loadAsrByStream();
-      const asrState = asrByStream[streamRole];
-      const wsUrl = this.env.ASR_WS_URL ?? DASHSCOPE_DEFAULT_WS_URL;
-      const handshakeUrl = toWebSocketHandshakeUrl(wsUrl);
-      const timeoutMs = parseTimeoutMs(this.env.ASR_TIMEOUT_MS ?? "45000");
-
-      const fetchAbort = new AbortController();
-      const fetchTimer = setTimeout(() => fetchAbort.abort(), Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
-      const response = await fetch(handshakeUrl, {
-        method: "GET",
-        headers: {
-          Authorization: `bearer ${apiKey}`,
-          Upgrade: "websocket"
-        },
-        signal: fetchAbort.signal
-      });
-      clearTimeout(fetchTimer);
-
-      if (response.status !== 101 || !response.webSocket) {
-        throw new Error(`dashscope websocket handshake failed: HTTP ${response.status}`);
-      }
-
-      const ws = response.webSocket;
-      ws.accept();
-
-      runtime.ws = ws;
-      runtime.connected = true;
-      runtime.running = false;
-      runtime.startedAt = Date.now();
-      runtime.taskId = `asr-realtime-${streamRole}-${crypto.randomUUID()}`;
-      runtime.readyPromise = new Promise<void>((resolve, reject) => {
-        runtime.readyResolve = resolve;
-        runtime.readyReject = reject;
-      });
-
-      ws.addEventListener("message", (event) => {
-        this.ctx.waitUntil(
-          this.handleRealtimeAsrMessage(sessionId, streamRole, event.data).catch(async (error) => {
-            log("error", "asr realtime message handler failed", { component: "asr", stream_role: streamRole, error: getErrorMessage(error) });
-            await this.refreshAsrStreamMetrics(sessionId, streamRole, {
-              asr_ws_state: "error",
-              last_error: getErrorMessage(error)
-            });
-          })
-        );
-      });
-
-      ws.addEventListener("error", () => {
-        this.ctx.waitUntil(
-          this.refreshAsrStreamMetrics(sessionId, streamRole, {
-            asr_ws_state: "error",
-            last_error: "dashscope websocket error"
-          })
-        );
-      });
-
-      ws.addEventListener("close", () => {
-        runtime.connected = false;
-        runtime.running = false;
-        runtime.ws = null;
-        runtime.taskId = null;
-        runtime.readyPromise = null;
-        runtime.readyResolve = null;
-        runtime.readyReject = null;
-        this.ctx.waitUntil(this.refreshAsrStreamMetrics(sessionId, streamRole));
-      });
-
-      ws.send(
-        JSON.stringify({
-          header: {
-            action: "run-task",
-            task_id: runtime.taskId,
-            streaming: "duplex"
-          },
-          payload: {
-            task_group: "audio",
-            task: "asr",
-            function: "recognition",
-            model: asrState.model,
-            input: {},
-            parameters: {
-              format: "pcm",
-              sample_rate: TARGET_SAMPLE_RATE
-            }
-          }
-        })
-      );
-
-      const startedTimeout = setTimeout(() => {
-        runtime.readyReject?.(new Error("dashscope task-started timeout"));
-      }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
-
-      await runtime.readyPromise;
-      clearTimeout(startedTimeout);
-      runtime.reconnectBackoffMs = 500;
-      await this.replayGapFromR2(sessionId, streamRole);
-
-      await this.refreshAsrStreamMetrics(sessionId, streamRole, {
-        asr_ws_state: "running",
-        last_error: null
-      });
-    })()
-      .catch(async (error) => {
-        runtime.connected = false;
-        runtime.running = false;
-        runtime.ws = null;
-        runtime.readyPromise = null;
-        runtime.readyResolve = null;
-        runtime.readyReject = null;
-        await this.refreshAsrStreamMetrics(sessionId, streamRole, {
-          asr_ws_state: "error",
-          last_error: getErrorMessage(error)
-        });
-        throw error;
-      })
-      .finally(() => {
-        runtime.connecting = false;
-        runtime.connectPromise = null;
-      });
-
-    return runtime.connectPromise;
-  }
-
-  private async emitRealtimeUtterance(
-    sessionId: string,
-    streamRole: StreamRole,
-    text: string
-  ): Promise<void> {
-    const runtime = this.asrRealtimeByStream[streamRole];
-    const endSeq = Math.max(runtime.lastSentSeq, runtime.currentStartSeq ?? runtime.lastSentSeq);
-    if (endSeq <= 0) {
-      return;
-    }
-
-    const startSeq = runtime.currentStartSeq ?? endSeq;
-    const createdAt = new Date().toISOString();
-    const endIngestAtMs = runtime.sentChunkTsBySeq.get(endSeq) ?? Date.now();
-    const latencyMs = Math.max(0, Date.now() - endIngestAtMs);
-    const startMs = (startSeq - 1) * 1000;
-    const endMs = endSeq * 1000;
-
-    const [asrByStream, utterancesByStream, ingestByStream] = await Promise.all([
-      this.loadAsrByStream(),
-      this.loadUtterancesRawByStream(),
-      this.loadIngestByStream(sessionId)
-    ]);
-
-    const asrState = asrByStream[streamRole];
-    const utterances = utterancesByStream[streamRole];
-    const utterance: UtteranceRaw = {
-      utterance_id: `${sessionId}-${streamRole}-${String(endSeq).padStart(8, "0")}-${Date.now().toString(36)}`,
-      session_id: sessionId,
-      stream_role: streamRole,
-      text: text.trim(),
-      start_seq: startSeq,
-      end_seq: endSeq,
-      start_ms: startMs,
-      end_ms: endMs,
-      duration_ms: endMs - startMs,
-      asr_model: asrState.model,
-      asr_provider: "dashscope",
-      confidence: null,
-      created_at: createdAt,
-      latency_ms: latencyMs
-    };
-    utterances.push(utterance);
-    utterancesByStream[streamRole] = utterances;
-    await this.storeUtterancesRawByStream(utterancesByStream);
-
-    const mergedByStream = await this.loadUtterancesMergedByStream();
-    mergedByStream[streamRole] = mergeUtterances(utterances);
-    await this.storeUtterancesMergedByStream(mergedByStream);
-
-    asrState.mode = this.asrRealtimeEnabled() ? "realtime" : "windowed";
-    asrState.asr_ws_state = "running";
-    asrState.last_window_end_seq = endSeq;
-    asrState.utterance_count = utterances.length;
-    asrState.total_windows_processed += 1;
-    asrState.total_audio_seconds_processed += Math.max(1, endSeq - startSeq + 1);
-    asrState.last_window_latency_ms = latencyMs;
-    if (!asrState.avg_window_latency_ms || asrState.avg_window_latency_ms <= 0) {
-      asrState.avg_window_latency_ms = latencyMs;
-    } else {
-      const processed = asrState.total_windows_processed;
-      asrState.avg_window_latency_ms =
-        (asrState.avg_window_latency_ms * (processed - 1) + latencyMs) / processed;
-    }
-    const windowDurationMs = Math.max(1000, (endSeq - startSeq + 1) * 1000);
-    const currentRtf = latencyMs / windowDurationMs;
-    if (!asrState.avg_rtf || asrState.avg_rtf <= 0) {
-      asrState.avg_rtf = currentRtf;
-    } else {
-      const processed = asrState.total_windows_processed;
-      asrState.avg_rtf = (asrState.avg_rtf * (processed - 1) + currentRtf) / processed;
-    }
-    asrState.last_error = null;
-    asrState.last_success_at = createdAt;
-    asrState.consecutive_failures = 0;
-    asrState.next_retry_after_ms = 0;
-    asrState.last_emit_at = createdAt;
-
-    const recent = [...(asrState.recent_ingest_to_utterance_ms ?? []), latencyMs].slice(-200);
-    asrState.recent_ingest_to_utterance_ms = recent;
-    asrState.ingest_to_utterance_p50_ms = quantile(recent, 0.5);
-    asrState.ingest_to_utterance_p95_ms = quantile(recent, 0.95);
-    asrState.backlog_chunks = runtime.sendQueue.length;
-    asrState.ingest_lag_seconds = Math.max(0, ingestByStream[streamRole].last_seq - runtime.lastSentSeq);
-
-    asrByStream[streamRole] = asrState;
-    await this.storeAsrByStream(asrByStream);
-
-    runtime.lastEmitAt = createdAt;
-    runtime.currentStartSeq = endSeq + 1;
-    runtime.currentStartTsMs = null;
-    for (const seq of runtime.sentChunkTsBySeq.keys()) {
-      if (seq <= endSeq) {
-        runtime.sentChunkTsBySeq.delete(seq);
-      }
-    }
-    await this.patchAsrCursor(streamRole, {
-      last_sent_seq: Math.max(runtime.lastSentSeq, endSeq),
-      last_emitted_seq: endSeq
-    });
-
-    if (streamRole === "students") {
-      let resolvedInfo:
-        | {
-            cluster_id: string;
-            speaker_name: string | null;
-            decision: "auto" | "confirm" | "unknown";
-            evidence: ResolveEvidence | null;
-          }
-        | null = null;
-      try {
-        const chunkRange = await this.loadChunkRange(sessionId, streamRole, startSeq, endSeq);
-        const mergedPcm = concatUint8Arrays(chunkRange);
-        const resolveWav = tailPcm16BytesToWavForSeconds(mergedPcm, this.resolveAudioWindowSeconds());
-        resolvedInfo = await this.autoResolveStudentsUtterance(sessionId, utterance, resolveWav);
-        const enrollWav = pcm16ToWavBytes(mergedPcm);
-        await this.maybeAutoEnrollStudentsUtterance(sessionId, utterance, enrollWav, resolvedInfo);
-      } catch (error) {
-        const inferenceError = error instanceof InferenceRequestError ? error : null;
-        await this.appendSpeakerEvent({
-          ts: new Date().toISOString(),
-          stream_role: "students",
-          source: "inference_resolve",
-          identity_source: "inference_resolve",
-          utterance_id: utterance.utterance_id,
-          cluster_id: null,
-          speaker_name: null,
-          decision: "unknown",
-          evidence: null,
-          note: `students auto-resolve failed: ${getErrorMessage(error)}`,
-          backend: inferenceError ? inferenceError.health.active_backend : "primary",
-          fallback_reason: inferenceError ? "resolve_all_backends_failed" : null,
-          confidence_bucket: "unknown",
-          metadata: {
-            profile_score: resolvedInfo?.evidence?.profile_top_score ?? null,
-            profile_margin: resolvedInfo?.evidence?.profile_margin ?? null,
-            binding_locked: false,
-            timeline: inferenceError?.timeline ?? null
-          }
-        });
-      }
-    } else if (streamRole === "teacher") {
-      await this.appendTeacherSpeakerEvent(sessionId, utterance);
-    }
-
-    // Schedule incremental checkpoint if interval has elapsed (non-blocking)
-    this.ctx.waitUntil(
-      this.maybeScheduleCheckpoint(sessionId, utterance.end_ms, streamRole)
-    );
-  }
-
-  private async handleRealtimeAsrMessage(
-    sessionId: string,
-    streamRole: StreamRole,
-    data: string | ArrayBuffer | ArrayBufferView
-  ): Promise<void> {
-    if (typeof data !== "string") return;
-
-    let payload: unknown;
-    try {
-      payload = JSON.parse(data);
-    } catch {
-      return;
-    }
-    if (!payload || typeof payload !== "object") return;
-    const messageObject = payload as Record<string, unknown>;
-    const headerObject = (messageObject.header ?? null) as Record<string, unknown> | null;
-    const payloadObject = messageObject.payload ?? null;
-    const eventName = String(headerObject?.event ?? "");
-
-    if (this.asrDebugEnabled() && ["task-started", "result-generated", "task-finished", "task-failed"].includes(eventName)) {
-      log("debug", "asr-debug event", { sessionId, streamRole, eventName, payload: JSON.stringify(payloadObject).slice(0, 400) });
-    }
-
-    const runtime = this.asrRealtimeByStream[streamRole];
-    if (eventName === "task-started") {
-      runtime.running = true;
-      runtime.readyResolve?.();
-      runtime.readyResolve = null;
-      runtime.readyReject = null;
-      await this.refreshAsrStreamMetrics(sessionId, streamRole, { asr_ws_state: "running", last_error: null });
-      return;
-    }
-
-    if (eventName === "task-failed") {
-      const detail = `dashscope task failed: ${JSON.stringify(payload).slice(0, 400)}`;
-      runtime.readyReject?.(new Error(detail));
-      runtime.readyResolve = null;
-      runtime.readyReject = null;
-      await this.refreshAsrStreamMetrics(sessionId, streamRole, { asr_ws_state: "error", last_error: detail });
-      return;
-    }
-
-    const text = extractFirstString(payloadObject);
-    if (!text || !text.trim()) return;
-
-    const finalFlag = extractBooleanByKeys(payloadObject, [
-      "is_final",
-      "final",
-      "sentence_end",
-      "sentenceEnd",
-      "end_of_sentence"
-    ]);
-    const isFinal = eventName === "task-finished" || finalFlag !== false;
-    if (!isFinal) return;
-
-    const normalized = normalizeTextForMerge(text);
-    if (normalized && normalized === runtime.lastFinalTextNorm) {
-      return;
-    }
-    runtime.lastFinalTextNorm = normalized;
-
-    const beginMs = extractNumberByKeys(payloadObject, ["begin_time", "beginTime", "start_ms", "startMs"]);
-    const endMs = extractNumberByKeys(payloadObject, ["end_time", "endTime", "end_ms", "endMs"]);
-    if (beginMs !== null && endMs !== null && endMs >= beginMs) {
-      const startSeq = Math.max(1, Math.floor(beginMs / 1000) + 1);
-      const inferredEndSeq = Math.max(startSeq, Math.ceil(endMs / 1000));
-      runtime.currentStartSeq = startSeq;
-      runtime.lastSentSeq = Math.max(runtime.lastSentSeq, inferredEndSeq);
-    }
-
-    await this.emitRealtimeUtterance(sessionId, streamRole, text);
-  }
-
-  private async enqueueRealtimeChunk(
-    sessionId: string,
-    streamRole: StreamRole,
-    seq: number,
-    timestampMs: number,
-    bytes: Uint8Array
-  ): Promise<void> {
-    const runtime = this.asrRealtimeByStream[streamRole];
-    if (seq <= runtime.lastSentSeq) {
-      return;
-    }
-    if (runtime.sendQueue.some((item) => item.seq === seq)) {
-      return;
-    }
-    runtime.sendQueue.push({
-      seq,
-      timestampMs,
-      receivedAtMs: Date.now(),
-      bytes
-    });
-    const cursors = await this.loadAsrCursorByStream();
-    const current = cursors[streamRole];
-    await this.patchAsrCursor(streamRole, {
-      last_ingested_seq: Math.max(current.last_ingested_seq, seq)
-    });
-    await this.refreshAsrStreamMetrics(sessionId, streamRole);
-  }
-
-  private async drainRealtimeQueue(sessionId: string, streamRole: StreamRole): Promise<void> {
-    const runtime = this.asrRealtimeByStream[streamRole];
-    if (runtime.flushPromise) {
-      return runtime.flushPromise;
-    }
-
-    const startGen = runtime.drainGeneration;
-    runtime.flushPromise = (async () => {
-      while (runtime.sendQueue.length > 0 && runtime.drainGeneration === startGen) {
-        try {
-          let lastSentSeq = runtime.lastSentSeq;
-          await this.ensureRealtimeAsrConnected(sessionId, streamRole);
-          if (runtime.drainGeneration !== startGen) break;
-          if (!runtime.ws || runtime.ws.readyState !== WebSocket.OPEN) {
-            throw new Error("dashscope websocket is not open");
-          }
-
-          while (runtime.sendQueue.length > 0 && runtime.drainGeneration === startGen) {
-            const head = runtime.sendQueue[0];
-            if (!runtime.ws || runtime.ws.readyState !== WebSocket.OPEN) {
-              throw new Error("dashscope websocket closed while draining");
-            }
-            if (runtime.currentStartSeq === null) {
-              runtime.currentStartSeq = head.seq;
-              runtime.currentStartTsMs = head.timestampMs;
-            }
-            runtime.ws.send(head.bytes);
-            runtime.lastSentSeq = Math.max(runtime.lastSentSeq, head.seq);
-            lastSentSeq = Math.max(lastSentSeq, head.seq);
-            runtime.sentChunkTsBySeq.set(head.seq, head.receivedAtMs);
-            runtime.sendQueue.shift();
-          }
-
-          await this.patchAsrCursor(streamRole, {
-            last_sent_seq: lastSentSeq
-          });
-          await this.refreshAsrStreamMetrics(sessionId, streamRole);
-        } catch (error) {
-          if (runtime.drainGeneration !== startGen) break;
-          await this.refreshAsrStreamMetrics(sessionId, streamRole, {
-            asr_ws_state: "error",
-            last_error: getErrorMessage(error)
-          });
-          await this.closeRealtimeAsrSession(streamRole, "reconnect", false, false);
-          if (runtime.drainGeneration !== startGen) break;
-          const backoff = runtime.reconnectBackoffMs;
-          runtime.reconnectBackoffMs = Math.min(10_000, runtime.reconnectBackoffMs * 2);
-          await sleep(backoff);
-        }
-      }
-    })().finally(() => {
-      runtime.flushPromise = null;
-    });
-
-    return runtime.flushPromise;
-  }
-
-  private async loadChunkRange(
-    sessionId: string,
-    streamRole: StreamRole,
-    startSeq: number,
-    endSeq: number
-  ): Promise<Uint8Array[]> {
-    const chunks: Uint8Array[] = [];
-    for (let seq = startSeq; seq <= endSeq; seq += 1) {
-      const key = chunkObjectKey(sessionId, streamRole, seq);
-      const object = await this.env.RESULT_BUCKET.get(key);
-      if (!object) {
-        throw new Error(`missing chunk in R2: ${key}`);
-      }
-      const payload = new Uint8Array(await object.arrayBuffer());
-      if (payload.byteLength !== ONE_SECOND_PCM_BYTES) {
-        throw new Error(`invalid chunk size for ${key}: ${payload.byteLength}`);
-      }
-      chunks.push(payload);
-    }
-    return chunks;
+  private async loadChunkRange(sessionId: string, streamRole: StreamRole, startSeq: number, endSeq: number): Promise<Uint8Array[]> {
+    return loadChunkRangeFn(sessionId, streamRole, startSeq, endSeq, this.realtimeAsrCtx);
   }
 
   private getAsrProvider(): "funASR" | "local-whisper" {
-    const provider = (this.env.ASR_PROVIDER ?? "funASR").toLowerCase();
-    if (provider === "local-whisper") {
-      if (!this.localWhisperProvider) {
-        const endpoint = this.env.ASR_ENDPOINT ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "http://127.0.0.1:8000";
-        this.localWhisperProvider = new LocalWhisperASRProvider({
-          endpoint,
-          language: this.env.ASR_LANGUAGE ?? "auto",
-          timeout_ms: parseInt(this.env.ASR_TIMEOUT_MS ?? "30000", 10),
-          apiKey: (this.env.INFERENCE_API_KEY ?? "").trim(),
-        });
-      }
-      return "local-whisper";
-    }
-    return "funASR";
+    return getAsrProviderFn(this.realtimeAsrCtx);
   }
 
-  private async runFunAsrDashScope(wavBytes: Uint8Array, model: string) {
-    return runFunAsrDashScopeFn(this.env, wavBytes, model);
+  private async autoResolveStudentsUtterance(sessionId: string, utterance: UtteranceRaw, wavBytes: Uint8Array): Promise<{ cluster_id: string; speaker_name: string | null; decision: "auto" | "confirm" | "unknown"; evidence: ResolveEvidence | null } | null> {
+    return autoResolveStudentsUtteranceFn(sessionId, utterance, wavBytes, this.realtimeAsrCtx);
   }
 
-  private async invokeInferenceResolve(
-    sessionId: string,
-    audio: AudioPayload,
-    asrText: string | null,
-    currentState: SessionState
-  ) {
-    return invokeInferenceResolveFn(this.inferenceCallCtx, sessionId, audio, asrText, currentState);
-  }
-
-  private async autoResolveStudentsUtterance(
-    sessionId: string,
-    utterance: UtteranceRaw,
-    wavBytes: Uint8Array
-  ): Promise<{
-    cluster_id: string;
-    speaker_name: string | null;
-    decision: "auto" | "confirm" | "unknown";
-    evidence: ResolveEvidence | null;
-  } | null> {
-    if (!utterance.text.trim()) {
-      return null;
-    }
-
-    const currentState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-    const safeWavBytes = truncatePcm16WavToSeconds(wavBytes, this.resolveAudioWindowSeconds());
-    const audioPayload: AudioPayload = {
-      content_b64: bytesToBase64(safeWavBytes),
-      format: "wav",
-      sample_rate: TARGET_SAMPLE_RATE,
-      channels: TARGET_CHANNELS
-    };
-
-    const resolveCall = await this.invokeInferenceResolve(sessionId, audioPayload, utterance.text, currentState);
-    const resolved = resolveCall.resolved;
-    const mergedState = normalizeSessionState({
-      ...resolved.updated_state,
-      capture_by_stream: currentState.capture_by_stream
-    });
-    await this.ctx.storage.put(STORAGE_KEY_STATE, mergedState);
-    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
-    const boundSpeakerName =
-      resolved.speaker_name ??
-      mergedState.bindings[resolved.cluster_id] ??
-      mergedState.clusters.find((item) => item.cluster_id === resolved.cluster_id)?.bound_name ??
-      null;
-
-    await this.appendSpeakerEvent({
-      ts: new Date().toISOString(),
-      stream_role: "students",
-      source: "inference_resolve",
-      identity_source: identitySourceFromBindingSource(resolved.evidence.binding_source),
-      utterance_id: utterance.utterance_id,
-      cluster_id: resolved.cluster_id,
-      speaker_name: boundSpeakerName,
-      decision: resolved.decision,
-      evidence: resolved.evidence,
-      backend: resolveCall.backend,
-      fallback_reason: resolveCall.degraded ? "inference_failover" : null,
-      confidence_bucket: this.confidenceBucketFromEvidence(resolved.evidence),
-      metadata: {
-        profile_score: resolved.evidence.profile_top_score ?? null,
-        profile_margin: resolved.evidence.profile_margin ?? null,
-        binding_locked: mergedState.cluster_binding_meta[resolved.cluster_id]?.locked ?? false,
-        warnings: resolveCall.warnings,
-        timeline: resolveCall.timeline
-      }
-    });
-    return {
-      cluster_id: resolved.cluster_id,
-      speaker_name: boundSpeakerName,
-      decision: resolved.decision,
-      evidence: resolved.evidence ?? null
-    };
-  }
-
-  private async maybeAutoEnrollStudentsUtterance(
-    sessionId: string,
-    utterance: UtteranceRaw,
-    wavBytes: Uint8Array,
-    resolved:
-      | {
-          cluster_id: string;
-          speaker_name: string | null;
-          decision: "auto" | "confirm" | "unknown";
-          evidence: ResolveEvidence | null;
-        }
-      | null
-  ): Promise<void> {
-    const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-    const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
-    if (enrollment.mode !== "collecting" && enrollment.mode !== "ready") {
-      return;
-    }
-    const durationSeconds = Math.max(1, utterance.duration_ms / 1000);
-    let participantName =
-      this.inferParticipantFromText(state, utterance.text) ??
-      (resolved?.speaker_name ? this.rosterNameByCandidate(state, resolved.speaker_name) : null);
-
-    if (!participantName) {
-      this.updateUnassignedEnrollmentByCluster(state, resolved?.cluster_id, durationSeconds);
-      await this.ctx.storage.put(STORAGE_KEY_STATE, state);
-      await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
-      return;
-    }
-
-    const enrollAudio: AudioPayload = {
-      content_b64: bytesToBase64(truncatePcm16WavToSeconds(wavBytes, INFERENCE_MAX_AUDIO_SECONDS)),
-      format: "wav",
-      sample_rate: TARGET_SAMPLE_RATE,
-      channels: TARGET_CHANNELS
-    };
-    const enrollCall = await this.callInferenceEnroll(sessionId, participantName, enrollAudio, state);
-    const enrollResult = enrollCall.payload;
-    const nextState = normalizeSessionState({
-      ...enrollResult.updated_state,
-      capture_by_stream: state.capture_by_stream
-    });
-    const progress = this.participantProgressFromProfiles(nextState);
-    nextState.enrollment_state = {
-      ...(nextState.enrollment_state ?? buildDefaultEnrollmentState()),
-      mode: "collecting",
-      started_at: nextState.enrollment_state?.started_at ?? this.currentIsoTs(),
-      stopped_at: null,
-      participants: progress,
-      updated_at: this.currentIsoTs()
-    };
-    this.refreshEnrollmentMode(nextState);
-    await this.ctx.storage.put(STORAGE_KEY_STATE, nextState);
-    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, this.currentIsoTs());
-    if (enrollCall.degraded) {
-      await this.appendSpeakerEvent({
-        ts: this.currentIsoTs(),
-        stream_role: "students",
-        source: "inference_resolve",
-        identity_source: "enrollment_match",
-        utterance_id: utterance.utterance_id,
-        cluster_id: resolved?.cluster_id ?? null,
-        speaker_name: participantName,
-        decision: "confirm",
-        note: "enrollment call used secondary inference backend",
-        backend: enrollCall.backend,
-        fallback_reason: "inference_failover",
-        confidence_bucket: "medium",
-        metadata: {
-          warnings: enrollCall.warnings,
-          timeline: enrollCall.timeline
-        }
-      });
-    }
+  private async maybeAutoEnrollStudentsUtterance(sessionId: string, utterance: UtteranceRaw, wavBytes: Uint8Array, resolved: { cluster_id: string; speaker_name: string | null; decision: "auto" | "confirm" | "unknown"; evidence: ResolveEvidence | null } | null): Promise<void> {
+    return maybeAutoEnrollStudentsUtteranceFn(sessionId, utterance, wavBytes, resolved, this.realtimeAsrCtx);
   }
 
   private resolveTeacherIdentity(state: SessionState, asrText: string): { speakerName: string; identitySource: NonNullable<SpeakerEvent["identity_source"]> } {
@@ -1903,249 +1235,35 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async appendTeacherSpeakerEvent(sessionId: string, utterance: UtteranceRaw): Promise<void> {
-    if (!utterance.text.trim()) {
-      return;
-    }
-
-    const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-    const identity = this.resolveTeacherIdentity(state, utterance.text);
-
-    await this.appendSpeakerEvent({
-      ts: new Date().toISOString(),
-      stream_role: "teacher",
-      source: "teacher_direct",
-      identity_source: identity.identitySource,
-      utterance_id: utterance.utterance_id,
-      cluster_id: "teacher",
-      speaker_name: identity.speakerName,
-      decision: "auto",
-      evidence: null,
-      note: `teacher direct bind for session ${sessionId}`,
-      backend: "worker",
-      fallback_reason: null,
-      confidence_bucket: "high"
-    });
+    return appendTeacherSpeakerEventFn(sessionId, utterance, this.realtimeAsrCtx);
   }
 
-  private async maybeRunAsrWindows(
-    sessionId: string,
-    streamRole: StreamRole,
-    force = false,
-    maxWindows = 0
-  ): Promise<AsrRunResult> {
-    const asrByStream = await this.loadAsrByStream();
-    const asrState = asrByStream[streamRole];
-    asrState.mode = "windowed";
-    asrState.asr_ws_state = "disconnected";
-    const utterancesByStream = await this.loadUtterancesRawByStream();
-    const utterances = utterancesByStream[streamRole];
+  private async emitRealtimeUtterance(sessionId: string, streamRole: StreamRole, text: string): Promise<void> {
+    return emitRealtimeUtteranceFn(sessionId, streamRole, text, this.realtimeAsrCtx);
+  }
 
-    if (!asrState.enabled) {
-      asrState.last_error = "ASR disabled or API key missing";
-      asrByStream[streamRole] = asrState;
-      await this.storeAsrByStream(asrByStream);
-      return {
-        generated: 0,
-        last_window_end_seq: asrState.last_window_end_seq,
-        utterance_count: utterances.length,
-        total_windows_processed: asrState.total_windows_processed,
-        total_audio_seconds_processed: asrState.total_audio_seconds_processed,
-        last_window_latency_ms: asrState.last_window_latency_ms ?? null,
-        avg_window_latency_ms: asrState.avg_window_latency_ms ?? null,
-        avg_rtf: asrState.avg_rtf ?? null,
-        last_error: asrState.last_error
-      };
-    }
+  private async handleRealtimeAsrMessage(sessionId: string, streamRole: StreamRole, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    return handleRealtimeAsrMessageFn(sessionId, streamRole, data, this.realtimeAsrCtx);
+  }
 
-    if (this.asrProcessingByStream[streamRole] && !force) {
-      return {
-        generated: 0,
-        last_window_end_seq: asrState.last_window_end_seq,
-        utterance_count: utterances.length,
-        total_windows_processed: asrState.total_windows_processed,
-        total_audio_seconds_processed: asrState.total_audio_seconds_processed,
-        last_window_latency_ms: asrState.last_window_latency_ms ?? null,
-        avg_window_latency_ms: asrState.avg_window_latency_ms ?? null,
-        avg_rtf: asrState.avg_rtf ?? null,
-        last_error: asrState.last_error ?? null
-      };
-    }
+  private async ensureRealtimeAsrConnected(sessionId: string, streamRole: StreamRole): Promise<void> {
+    return ensureRealtimeAsrConnectedFn(sessionId, streamRole, this.realtimeAsrCtx);
+  }
 
-    const nowMs = Date.now();
-    if (!force && asrState.next_retry_after_ms > nowMs) {
-      return {
-        generated: 0,
-        last_window_end_seq: asrState.last_window_end_seq,
-        utterance_count: utterances.length,
-        total_windows_processed: asrState.total_windows_processed,
-        total_audio_seconds_processed: asrState.total_audio_seconds_processed,
-        last_window_latency_ms: asrState.last_window_latency_ms ?? null,
-        avg_window_latency_ms: asrState.avg_window_latency_ms ?? null,
-        avg_rtf: asrState.avg_rtf ?? null,
-        last_error: asrState.last_error ?? null
-      };
-    }
+  private async drainRealtimeQueue(sessionId: string, streamRole: StreamRole): Promise<void> {
+    return drainRealtimeQueueFn(sessionId, streamRole, this.realtimeAsrCtx);
+  }
 
-    this.asrProcessingByStream[streamRole] = true;
-    let generated = 0;
+  private async runFunAsrDashScope(wavBytes: Uint8Array, model: string) {
+    return runFunAsrDashScopeFn(this.env, wavBytes, model);
+  }
 
-    try {
-      const ingestByStream = await this.loadIngestByStream(sessionId);
-      const ingest = ingestByStream[streamRole];
-      let nextEndSeq = Math.max(asrState.last_window_end_seq + asrState.hop_seconds, asrState.window_seconds);
+  private async invokeInferenceResolve(sessionId: string, audio: AudioPayload, asrText: string | null, currentState: SessionState) {
+    return invokeInferenceResolveFn(this.inferenceCallCtx, sessionId, audio, asrText, currentState);
+  }
 
-      while (nextEndSeq <= ingest.last_seq && (maxWindows <= 0 || generated < maxWindows)) {
-        const startSeq = nextEndSeq - asrState.window_seconds + 1;
-        const chunkRange = await this.loadChunkRange(sessionId, streamRole, startSeq, nextEndSeq);
-        const pcm = concatUint8Arrays(chunkRange);
-        const wavBytes = pcm16ToWavBytes(pcm);
-        let result: { text: string; latencyMs: number };
-        const asrProviderType = this.getAsrProvider();
-        if (asrProviderType === "local-whisper" && this.localWhisperProvider) {
-          result = await this.localWhisperProvider.transcribeWindow(wavBytes);
-        } else {
-          result = await this.runFunAsrDashScope(wavBytes, asrState.model);
-        }
-
-        const createdAt = new Date().toISOString();
-        const startMs = (startSeq - 1) * 1000;
-        const endMs = nextEndSeq * 1000;
-
-        const utterance: UtteranceRaw = {
-          utterance_id: `${sessionId}-${streamRole}-${String(nextEndSeq).padStart(8, "0")}`,
-          session_id: sessionId,
-          stream_role: streamRole,
-          text: result.text,
-          start_seq: startSeq,
-          end_seq: nextEndSeq,
-          start_ms: startMs,
-          end_ms: endMs,
-          duration_ms: endMs - startMs,
-          asr_model: asrState.model,
-          asr_provider: asrProviderType === "local-whisper" ? "local-whisper" : "dashscope",
-          confidence: null,
-          created_at: createdAt,
-          latency_ms: result.latencyMs
-        };
-        utterances.push(utterance);
-
-        generated += 1;
-        asrState.total_windows_processed += 1;
-        asrState.total_audio_seconds_processed += asrState.window_seconds;
-        asrState.last_window_latency_ms = result.latencyMs;
-
-        const processed = asrState.total_windows_processed;
-        if (!asrState.avg_window_latency_ms || asrState.avg_window_latency_ms <= 0) {
-          asrState.avg_window_latency_ms = result.latencyMs;
-        } else {
-          asrState.avg_window_latency_ms =
-            (asrState.avg_window_latency_ms * (processed - 1) + result.latencyMs) / processed;
-        }
-
-        const windowDurationMs = asrState.window_seconds * 1000;
-        const currentRtf = windowDurationMs > 0 ? result.latencyMs / windowDurationMs : 0;
-        if (!asrState.avg_rtf || asrState.avg_rtf <= 0) {
-          asrState.avg_rtf = currentRtf;
-        } else {
-          asrState.avg_rtf = (asrState.avg_rtf * (processed - 1) + currentRtf) / processed;
-        }
-
-        asrState.last_window_end_seq = nextEndSeq;
-        asrState.utterance_count = utterances.length;
-        asrState.last_error = null;
-        asrState.last_success_at = createdAt;
-        asrState.consecutive_failures = 0;
-        asrState.next_retry_after_ms = 0;
-
-        if (streamRole === "students") {
-          try {
-            await this.autoResolveStudentsUtterance(sessionId, utterance, wavBytes);
-          } catch (error) {
-            const inferenceError = error instanceof InferenceRequestError ? error : null;
-            await this.appendSpeakerEvent({
-              ts: new Date().toISOString(),
-              stream_role: "students",
-              source: "inference_resolve",
-              utterance_id: utterance.utterance_id,
-              cluster_id: null,
-              speaker_name: null,
-              decision: "unknown",
-              evidence: null,
-              note: `students auto-resolve failed: ${getErrorMessage(error)}`,
-              backend: inferenceError ? inferenceError.health.active_backend : "primary",
-              fallback_reason: inferenceError ? "resolve_all_backends_failed" : null,
-              confidence_bucket: "unknown",
-              metadata: {
-                timeline: inferenceError?.timeline ?? null
-              }
-            });
-          }
-        } else if (streamRole === "teacher") {
-          await this.appendTeacherSpeakerEvent(sessionId, utterance);
-        }
-
-        // Persist state after every window to keep the DO I/O gate alive
-        // and prevent "Promise will never complete" in workerd runtime
-        asrByStream[streamRole] = asrState;
-        await this.storeAsrByStream(asrByStream);
-        utterancesByStream[streamRole] = utterances;
-        await this.storeUtterancesRawByStream(utterancesByStream);
-
-        if (generated % 5 === 0) {
-          log("info", "asr progress", { component: "asr", stream_role: streamRole, windows: generated, last_seq: nextEndSeq, total_seq: ingest.last_seq });
-        }
-
-        nextEndSeq += asrState.hop_seconds;
-      }
-
-      // Final merge after all windows
-      const mergedByStream = await this.loadUtterancesMergedByStream();
-      mergedByStream[streamRole] = mergeUtterances(utterances);
-      await this.storeUtterancesMergedByStream(mergedByStream);
-
-      return {
-        generated,
-        last_window_end_seq: asrState.last_window_end_seq,
-        utterance_count: utterances.length,
-        total_windows_processed: asrState.total_windows_processed,
-        total_audio_seconds_processed: asrState.total_audio_seconds_processed,
-        last_window_latency_ms: asrState.last_window_latency_ms ?? null,
-        avg_window_latency_ms: asrState.avg_window_latency_ms ?? null,
-        avg_rtf: asrState.avg_rtf ?? null,
-        last_error: asrState.last_error ?? null
-      };
-    } catch (error) {
-      asrState.consecutive_failures += 1;
-      asrState.last_error = getErrorMessage(error);
-      const backoffMs = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(asrState.consecutive_failures, 6));
-      asrState.next_retry_after_ms = Date.now() + backoffMs;
-      asrByStream[streamRole] = asrState;
-      await this.storeAsrByStream(asrByStream);
-
-      // Persist any utterances successfully transcribed before the error
-      if (generated > 0) {
-        utterancesByStream[streamRole] = utterances;
-        await this.storeUtterancesRawByStream(utterancesByStream);
-        const mergedByStream = await this.loadUtterancesMergedByStream();
-        mergedByStream[streamRole] = mergeUtterances(utterances);
-        await this.storeUtterancesMergedByStream(mergedByStream);
-        log("warn", "asr persisted partial utterances despite error", { component: "asr", stream_role: streamRole, windows: generated, error: getErrorMessage(error) });
-      }
-
-      return {
-        generated,
-        last_window_end_seq: asrState.last_window_end_seq,
-        utterance_count: utterances.length,
-        total_windows_processed: asrState.total_windows_processed,
-        total_audio_seconds_processed: asrState.total_audio_seconds_processed,
-        last_window_latency_ms: asrState.last_window_latency_ms ?? null,
-        avg_window_latency_ms: asrState.avg_window_latency_ms ?? null,
-        avg_rtf: asrState.avg_rtf ?? null,
-        last_error: asrState.last_error
-      };
-    } finally {
-      this.asrProcessingByStream[streamRole] = false;
-    }
+  private async maybeRunAsrWindows(sessionId: string, streamRole: StreamRole, force = false, maxWindows = 0): Promise<AsrRunResult> {
+    return maybeRunAsrWindowsFn(sessionId, streamRole, this.realtimeAsrCtx, force, maxWindows);
   }
 
   private async updateFinalizeV2Status(jobId: string, patch: Partial<FinalizeV2Status>): Promise<FinalizeV2Status | null> {

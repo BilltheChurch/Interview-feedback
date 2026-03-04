@@ -424,9 +424,9 @@ def main():
           f"{summary.get('avg_rtf', 0):.3f}")
 
     if summary.get("all_pass"):
-        print(f"\n✓ GATE 2 diarization benchmark: ALL PASS")
+        print("\n✓ GATE 2 diarization benchmark: ALL PASS")
     else:
-        print(f"\n✗ GATE 2 diarization benchmark: FAILED")
+        print("\n✗ GATE 2 diarization benchmark: FAILED")
 
     # Save results
     output_file = args.output or "gate2_diarization_results.json"

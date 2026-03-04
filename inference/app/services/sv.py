@@ -14,7 +14,8 @@ import numpy as np
 
 from app.exceptions import SVBackendError
 from app.services.audio import NormalizedAudio
-from app.services.device import DeviceType as SVDeviceType, detect_device as detect_sv_device
+from app.services.device import DeviceType as SVDeviceType
+from app.services.device import detect_device as detect_sv_device
 
 logger = logging.getLogger(__name__)
 

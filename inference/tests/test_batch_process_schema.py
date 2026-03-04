@@ -27,8 +27,6 @@ those expectations, including:
 from __future__ import annotations
 
 import base64
-import os
-import struct
 import tempfile
 import wave
 from pathlib import Path
@@ -38,9 +36,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
 from app.services.diarize_full import DiarizeResult, SpeakerSegment
-
+from app.services.whisper_batch import TranscriptResult, Utterance
 
 # ---------------------------------------------------------------------------
 # Fixtures

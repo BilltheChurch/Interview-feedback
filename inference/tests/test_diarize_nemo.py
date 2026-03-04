@@ -12,7 +12,7 @@ import os
 import tempfile
 import wave
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -25,7 +25,6 @@ import pytest
 # for most tests, and explicitly set to False for degradation tests.
 _mock_clustering_diarizer = MagicMock()
 
-import sys
 
 _nemo_modules = {
     "nemo": MagicMock(),
@@ -35,7 +34,6 @@ _nemo_modules = {
 }
 
 with patch.dict("sys.modules", _nemo_modules):
-    import importlib
     import app.services.diarize_nemo as _nemo_mod
 
     # Force NEMO_AVAILABLE = True for tests that need it
@@ -43,10 +41,9 @@ with patch.dict("sys.modules", _nemo_modules):
     _nemo_mod.ClusteringDiarizer = _mock_clustering_diarizer
 
     from app.services.diarize_nemo import (
-        NemoMSDDDiarizer,
         DiarizeResult,
+        NemoMSDDDiarizer,
         SpeakerSegment,
-        NEMO_AVAILABLE,
     )
 
 
@@ -564,6 +561,7 @@ class TestInterfaceConsistency:
     def test_nemo_diarizer_diarize_signature_matches(self):
         """diarize() must accept same kwargs as PyannoteFullDiarizer.diarize()."""
         import inspect
+
         from app.services.diarize_full import PyannoteFullDiarizer
 
         nemo_sig = inspect.signature(NemoMSDDDiarizer.diarize)
@@ -579,6 +577,7 @@ class TestInterfaceConsistency:
     def test_nemo_diarizer_diarize_pcm_signature_matches(self):
         """diarize_pcm() must accept same kwargs as PyannoteFullDiarizer.diarize_pcm()."""
         import inspect
+
         from app.services.diarize_full import PyannoteFullDiarizer
 
         nemo_sig = inspect.signature(NemoMSDDDiarizer.diarize_pcm)

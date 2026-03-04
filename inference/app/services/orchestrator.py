@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -284,7 +284,7 @@ class InferenceOrchestrator:
         cluster_id: str,
         participant_name: str,
         *,
-        source: BindingMeta["source"],
+        source: Literal["enrollment_match", "name_extract", "manual_map"],
         confidence: float,
         locked: bool,
         updated_at: str,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 from app.schemas import BindingMeta, ClusterState, ResolveEvidence, SessionState
 from app.services.name_resolver import NameCandidate

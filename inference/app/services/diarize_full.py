@@ -17,8 +17,9 @@ import logging
 import os
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
 from app.services.device import DeviceType, detect_device
 
 logger = logging.getLogger(__name__)
@@ -223,7 +224,6 @@ class PyannoteFullDiarizer:
 
         # pyannote 4.x: DiarizeOutput includes speaker_embeddings directly
         if hasattr(raw_output, "speaker_embeddings") and raw_output.speaker_embeddings is not None:
-            import numpy as np
 
             emb_array = raw_output.speaker_embeddings  # shape: (num_speakers, dim)
             unique_speakers = sorted(set(s.speaker_id for s in segments))

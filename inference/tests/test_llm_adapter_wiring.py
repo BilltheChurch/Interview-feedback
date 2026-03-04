@@ -1,5 +1,4 @@
 """Test LLM Adapter wiring — runtime uses DashScopeLLMAdapter, not DashScopeLLM directly."""
-import pytest
 from unittest.mock import MagicMock, patch
 
 
@@ -47,9 +46,10 @@ def test_runtime_no_direct_dashscope_llm_import():
 def test_adapter_generate_json_kwarg_compat():
     """Adapter's generate_json must accept keyword args system_prompt, user_prompt
     to be a drop-in replacement for DashScopeLLM."""
+    import inspect
+
     from app.services.backends.llm_dashscope import DashScopeLLMAdapter
     from app.services.backends.llm_protocol import LLMConfig
-    import inspect
 
     config = LLMConfig(api_key="test", model="qwen-turbo")
     adapter = DashScopeLLMAdapter(config=config, redis_client=None)
@@ -91,7 +91,7 @@ def test_call_dashscope_uses_keyword_args():
     mock_llm.generate_json.return_value = {"result": "ok"}
 
     with patch("app.services.dashscope_llm.DashScopeLLM", return_value=mock_llm):
-        result = adapter._call_dashscope("sys prompt", "user prompt", 30000)
+        adapter._call_dashscope("sys prompt", "user prompt", 30000)
 
     mock_llm.generate_json.assert_called_once_with(
         system_prompt="sys prompt", user_prompt="user prompt"

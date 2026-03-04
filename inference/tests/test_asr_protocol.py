@@ -1,5 +1,4 @@
 """Tests for ASR backend protocol compliance."""
-import pytest
 from app.services.backends.asr_protocol import ASRBackend, TranscriptSegment
 
 

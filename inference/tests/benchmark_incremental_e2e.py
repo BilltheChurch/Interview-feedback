@@ -35,9 +35,7 @@ import argparse
 import base64
 import io
 import json
-import os
 import sys
-import tempfile
 import time
 import wave
 from pathlib import Path
@@ -223,7 +221,7 @@ def run_benchmark(args):
     total_dur_ms = int(total_dur_s * 1000)
 
     print(f"\n{'='*60}")
-    print(f"INCREMENTAL PIPELINE E2E BENCHMARK")
+    print("INCREMENTAL PIPELINE E2E BENCHMARK")
     print(f"{'='*60}")
     print(f"Source          : {source_name}")
     print(f"Audio duration  : {total_dur_s/60:.1f} min ({total_dur_ms} ms)")
@@ -231,7 +229,7 @@ def run_benchmark(args):
     if gt_speakers:
         print(f"GT speakers     : {len(gt_speakers)} ({', '.join(sorted(gt_speakers))})")
     else:
-        print(f"GT speakers     : N/A (local file)")
+        print("GT speakers     : N/A (local file)")
     print(f"Language        : {args.language}")
     print(f"Locale          : {args.locale}")
     print(f"Mode            : {args.mode}")
@@ -402,7 +400,7 @@ def run_benchmark(args):
 
     # 5. Summary
     print(f"\n{'='*60}")
-    print(f"RESULTS SUMMARY")
+    print("RESULTS SUMMARY")
     print(f"{'='*60}")
 
     successful = [r for r in increment_results if "error" not in r]

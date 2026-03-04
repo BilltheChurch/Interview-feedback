@@ -1,5 +1,4 @@
 """Test WS route isolation when V1 is disabled."""
-import pytest
 from unittest.mock import MagicMock
 
 from app.routes.ws_incremental import register_ws_routes

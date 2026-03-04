@@ -2,9 +2,10 @@
 
 CAM++ is only invoked for low-confidence mappings to protect 60s SLA.
 """
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
-from unittest.mock import MagicMock
 
 from app.services.speaker_arbiter import SpeakerArbiter
 

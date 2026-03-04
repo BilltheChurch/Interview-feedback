@@ -23,7 +23,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from app.schemas import IncrementalProcessRequest
 from app.services.ws_protocol import (
-    SCHEMA_VERSION,
     ErrorFrame,
     ResultFrame,
     decode_pcm_frame,

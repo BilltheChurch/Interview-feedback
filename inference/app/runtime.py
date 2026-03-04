@@ -1,31 +1,31 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.config import Settings
+from app.services.asr_router import LanguageAwareASRRouter
+from app.services.backends.llm_dashscope import DashScopeLLMAdapter
+from app.services.backends.llm_protocol import LLMConfig
 from app.services.binder import BinderPolicy
 from app.services.checkpoint_analyzer import CheckpointAnalyzer
 from app.services.clustering import OnlineClusterer
-from app.services.backends.llm_dashscope import DashScopeLLMAdapter
-from app.services.backends.llm_protocol import LLMConfig
 from app.services.events_analyzer import EventsAnalyzer
+from app.services.improvement_generator import ImprovementGenerator
+from app.services.incremental_processor import IncrementalProcessor
 from app.services.name_resolver import NameResolver
 from app.services.orchestrator import InferenceOrchestrator
-from app.services.report_generator import ReportGenerator
-from app.services.improvement_generator import ImprovementGenerator
-from app.services.report_synthesizer import ReportSynthesizer
-from app.services.incremental_processor import IncrementalProcessor
-from app.services.speaker_arbiter import SpeakerArbiter
 from app.services.redis_state import RedisSessionState
+from app.services.report_generator import ReportGenerator
+from app.services.report_synthesizer import ReportSynthesizer
 from app.services.segmenters import DiarizationSegmenter, UnimplementedDiarizer, VADSegmenter
-from app.services.asr_router import LanguageAwareASRRouter
 from app.services.sensevoice_onnx import SenseVoiceOnnxTranscriber
 from app.services.sensevoice_transcriber import SenseVoiceTranscriber
+from app.services.speaker_arbiter import SpeakerArbiter
 from app.services.sv import ModelScopeSVBackend
 from app.services.sv_onnx import OnnxSVBackend
 from app.services.whisper_batch import WhisperBatchTranscriber
 
-import logging
 _logger = logging.getLogger(__name__)
 
 # SV backend union type (duck typing — both have extract_embedding, score_embeddings, health, device)

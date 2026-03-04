@@ -9,8 +9,8 @@ Tests verify:
 6. Schema compatibility with Whisper output
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from app.services.sensevoice_transcriber import SenseVoiceTranscriber
 from app.services.whisper_batch import TranscriptResult, Utterance
 

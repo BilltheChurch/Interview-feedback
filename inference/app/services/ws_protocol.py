@@ -14,8 +14,7 @@ from __future__ import annotations
 
 import struct
 import zlib
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 SCHEMA_VERSION = 1
 MAX_FRAME_PAYLOAD = 65536  # 64KB

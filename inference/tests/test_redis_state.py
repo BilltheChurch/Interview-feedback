@@ -3,6 +3,7 @@
 Uses fakeredis for unit testing (no real Redis needed).
 """
 import json
+
 import pytest
 
 try:
@@ -13,7 +14,7 @@ except ImportError:
 
 pytestmark = pytest.mark.skipif(not HAS_FAKEREDIS, reason="fakeredis not installed")
 
-from app.services.redis_state import RedisSessionState
+from app.services.redis_state import RedisSessionState  # noqa: E402
 
 
 @pytest.fixture

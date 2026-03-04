@@ -14,10 +14,10 @@ Tests cover:
 from __future__ import annotations
 
 import base64
+import io
 import time
 import wave
-import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -26,18 +26,16 @@ from app.config import Settings
 from app.schemas import (
     AnalysisReportResponse,
     CheckpointResponse,
+    DimensionClaim,
+    DimensionFeedback,
     IncrementalFinalizeRequest,
     IncrementalProcessRequest,
     MergedUtteranceOut,
     OverallFeedback,
     PersonFeedbackItem,
     PersonSummary,
-    DimensionFeedback,
-    DimensionClaim,
     ReportQualityMeta,
     SpeakerProfileOut,
-    SpeakerStat,
-    WordTimestampOut,
 )
 from app.services.diarize_full import DiarizeResult, SpeakerSegment
 from app.services.incremental_processor import (
@@ -46,8 +44,8 @@ from app.services.incremental_processor import (
     IncrementResult,
     SpeakerProfile,
 )
-from app.services.whisper_batch import TranscriptResult, Utterance as ASRUtterance, WordTimestamp
-
+from app.services.whisper_batch import TranscriptResult, WordTimestamp
+from app.services.whisper_batch import Utterance as ASRUtterance
 
 # ---------------------------------------------------------------------------
 # Helpers

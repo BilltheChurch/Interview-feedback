@@ -1,7 +1,4 @@
 """Tests for the A/B ASR benchmark framework."""
-import pytest
-from unittest.mock import MagicMock
-from app.services.backends.asr_protocol import TranscriptSegment
 
 
 def test_compute_wer():

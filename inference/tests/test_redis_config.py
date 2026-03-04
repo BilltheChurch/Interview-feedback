@@ -1,5 +1,4 @@
 """Tests for Redis configuration settings."""
-import pytest
 from app.config import Settings
 
 

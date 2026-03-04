@@ -3,10 +3,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas_v1 import (
+    SCHEMA_VERSION,
     FinalizeRequestV1,
     FinalizeResponseV1,
     R2AudioRef,
-    SCHEMA_VERSION,
 )
 
 

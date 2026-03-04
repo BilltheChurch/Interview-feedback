@@ -5,23 +5,21 @@ Tests use FastAPI TestClient with mocked Whisper and pyannote services.
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
-from app.services.diarize_full import DiarizeResult, SpeakerSegment
 from app.routes.batch import (
-    _find_best_speaker,
     _compute_speaker_stats,
+    _find_best_speaker,
     _merge_transcript_diarization,
 )
-
+from app.services.diarize_full import DiarizeResult, SpeakerSegment
+from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
 
 # ---------------------------------------------------------------------------
 # Fixtures

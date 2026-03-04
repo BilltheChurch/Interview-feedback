@@ -8,10 +8,7 @@ Tests verify:
 """
 
 import ast
-import os
 from pathlib import Path
-
-import pytest
 
 
 class TestNoTorchImport:

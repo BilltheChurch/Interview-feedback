@@ -5,11 +5,10 @@ the Worker (TypeScript) match what Inference (Python) expects.
 
 Run in CI to prevent field drift (the P0 bug that caused this redesign).
 """
-import json
 import pytest
 
-from app.schemas_v1 import FinalizeRequestV1, R2AudioRef, SCHEMA_VERSION
-from app.services.ws_protocol import StartFrame, validate_start_frame
+from app.schemas_v1 import SCHEMA_VERSION, FinalizeRequestV1
+from app.services.ws_protocol import validate_start_frame
 
 
 class TestIncrementContract:
@@ -79,7 +78,7 @@ class TestPCMFrameRoundtrip:
 
     def test_encode_decode_pcm_frame_roundtrip(self):
         """Encode a PCM frame, decode it, verify all fields survive the trip."""
-        from app.services.ws_protocol import encode_pcm_frame, decode_pcm_frame
+        from app.services.ws_protocol import decode_pcm_frame, encode_pcm_frame
 
         # 10ms of 16kHz mono PCM16 = 160 samples x 2 bytes = 320 bytes
         pcm_data = bytes(range(256)) + bytes(range(64))
@@ -97,7 +96,7 @@ class TestPCMFrameRoundtrip:
 
     def test_encode_decode_empty_payload(self):
         """Edge case: empty PCM frame (e.g. silence placeholder)."""
-        from app.services.ws_protocol import encode_pcm_frame, decode_pcm_frame
+        from app.services.ws_protocol import decode_pcm_frame, encode_pcm_frame
 
         encoded = encode_pcm_frame(0, b"")
         decoded = decode_pcm_frame(encoded)
@@ -107,8 +106,9 @@ class TestPCMFrameRoundtrip:
 
     def test_decode_rejects_corrupted_crc(self):
         """Corrupted CRC should raise ValueError."""
-        from app.services.ws_protocol import encode_pcm_frame, decode_pcm_frame
         import struct
+
+        from app.services.ws_protocol import decode_pcm_frame, encode_pcm_frame
 
         pcm_data = b"\x00" * 64
         encoded = bytearray(encode_pcm_frame(0, pcm_data))

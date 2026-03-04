@@ -10,7 +10,6 @@ import pytest
 from app.services.backends.llm_openai import OpenAILLMAdapter
 from app.services.backends.llm_protocol import LLMConfig
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -208,6 +207,7 @@ def test_config_provider_literal_accepts_dashscope() -> None:
 
 def test_config_provider_rejects_unknown() -> None:
     from pydantic import ValidationError
+
     from app.config import Settings
 
     with pytest.raises(ValidationError):

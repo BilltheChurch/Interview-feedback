@@ -1,7 +1,7 @@
 """Tests for LLM backend protocol and DashScope adapter with 6 constraints."""
 import json
+
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
 
 try:
     import fakeredis

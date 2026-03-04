@@ -28,7 +28,6 @@ import logging
 import os
 import tempfile
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,7 +49,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 from app.services.diarize_full import DiarizeResult, SpeakerSegment  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # NeMo MSDD Diarizer

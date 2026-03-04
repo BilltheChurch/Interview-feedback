@@ -8,12 +8,12 @@ Validates:
 - asyncio.to_thread wrapping (CPU-bound call doesn't block event loop)
 """
 import json
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.services.ws_protocol import encode_pcm_frame, SCHEMA_VERSION
+from app.services.ws_protocol import SCHEMA_VERSION, encode_pcm_frame
 
 
 def _make_mock_response():

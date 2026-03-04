@@ -9,12 +9,10 @@ import json
 import logging
 import threading
 import time
-from typing import Any
 
 from redis import Redis
 
 from app.services.backends.llm_protocol import (
-    LLMBackend,
     LLMConfig,
     LLMMetrics,
     LLMPool,

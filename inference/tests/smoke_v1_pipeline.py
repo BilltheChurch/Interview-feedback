@@ -17,7 +17,6 @@ Validates:
 """
 import base64
 import io
-import json
 import os
 import sys
 import time
@@ -132,10 +131,10 @@ def main():
         all_pass &= check("was_written=True", data.get("metrics", {}).get("was_written") is True)
         print(f"  Time: {elapsed:.1f}s, speakers={data.get('speakers_detected')}, utt={len(data.get('utterances', []))}")
     elif r.status_code == 404:
-        print(f"  [FAIL] V1 not enabled — check INCREMENTAL_V1_ENABLED=true in .env")
+        print("  [FAIL] V1 not enabled — check INCREMENTAL_V1_ENABLED=true in .env")
         sys.exit(1)
     elif r.status_code == 503:
-        print(f"  [FAIL] Redis unavailable — check redis-cli ping")
+        print("  [FAIL] Redis unavailable — check redis-cli ping")
         sys.exit(1)
     else:
         print(f"  Response: {r.text[:500]}")

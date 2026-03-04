@@ -1,6 +1,6 @@
 """Test CAM++ SpeakerArbiter integration with IncrementalProcessor."""
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
 import numpy as np
 
 from app.services.speaker_arbiter import SpeakerArbiter

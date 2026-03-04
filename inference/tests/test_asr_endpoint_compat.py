@@ -13,8 +13,9 @@ Edge Worker expects:
 }
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 

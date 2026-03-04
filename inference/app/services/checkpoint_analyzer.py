@@ -13,7 +13,6 @@ from app.schemas import (
     CheckpointSpeakerNote,
     DimensionClaim,
     DimensionFeedback,
-    EvidenceRef,
     MergeCheckpointsRequest,
     OverallFeedback,
     PersonFeedbackItem,

@@ -1,5 +1,4 @@
 """Test Parakeet TDT ASR backend (mocked — NeMo requires CUDA)."""
-import pytest
 from unittest.mock import MagicMock, patch
 
 
@@ -51,6 +50,7 @@ def test_parakeet_backend_fallback_on_import_error():
 def test_parakeet_no_nemo_falls_back_with_log(caplog):
     """Without NeMo/CUDA, Parakeet must fallback and log warning."""
     import logging
+
     from app.config import Settings
     s = Settings(
         _env_file=None,

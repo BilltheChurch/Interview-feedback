@@ -10,13 +10,11 @@ import os
 import tempfile
 import wave
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from app.services.speaker_arbiter import SpeakerArbiter
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -100,7 +98,7 @@ class FakeDiarizeResult:
 def test_arbiter_extract_embedding_called_for_low_confidence():
     """When mapping confidence < 0.50, arbiter MUST call sv.extract_embedding()."""
     # Create two distinct embeddings so cosine sim is low
-    emb_local = _make_embedding(seed=1)
+    _make_embedding(seed=1)
     emb_global = _make_embedding(seed=99)  # different → low sim
 
     sv = MagicMock()
@@ -124,7 +122,7 @@ def test_arbiter_extract_embedding_called_for_low_confidence():
         profiles["global_0"].speaker_id = "global_0"
         profiles["global_1"].speaker_id = "global_1"
 
-        result = arbiter.arbitrate(mapping, confidences, audio_segments, profiles)
+        arbiter.arbitrate(mapping, confidences, audio_segments, profiles)
 
         # Key assertion: CAM++ was actually called
         assert sv.extract_embedding.call_count > 0, (
@@ -196,7 +194,7 @@ def test_pass3_slices_real_audio_for_low_confidence():
             },
         )
 
-        mapping = proc._match_speakers(
+        proc._match_speakers(
             diarize_result, session, increment_index=1,
             audio_start_ms=0, audio_end_ms=3000,
             wav_path=wav_path,

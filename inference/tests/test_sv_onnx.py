@@ -9,10 +9,10 @@ Tests verify:
 """
 
 import ast
+from pathlib import Path
 
 import numpy as np
 import pytest
-from pathlib import Path
 
 
 class TestNoModelScopeImport:
@@ -84,16 +84,16 @@ class TestOnnxSVBackendProperties:
 
 class TestErrorHandling:
     def test_empty_audio_raises(self):
-        from app.services.sv_onnx import OnnxSVBackend
         from app.exceptions import SVBackendError
+        from app.services.sv_onnx import OnnxSVBackend
 
         b = OnnxSVBackend(model_path="/fake/path")
         with pytest.raises(SVBackendError, match="empty audio"):
             b.extract_embedding(np.array([], dtype=np.float32))
 
     def test_score_empty_embeddings_raises(self):
-        from app.services.sv_onnx import OnnxSVBackend
         from app.exceptions import SVBackendError
+        from app.services.sv_onnx import OnnxSVBackend
 
         b = OnnxSVBackend(model_path="/fake/path")
         empty = np.array([], dtype=np.float32)
@@ -132,8 +132,8 @@ class TestCosineScoring:
         assert abs(score - (-1.0)) < 1e-6
 
     def test_zero_norm_raises(self):
-        from app.services.sv_onnx import OnnxSVBackend
         from app.exceptions import SVBackendError
+        from app.services.sv_onnx import OnnxSVBackend
 
         b = OnnxSVBackend.__new__(OnnxSVBackend)
         zero = np.zeros(3, dtype=np.float32)

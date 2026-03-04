@@ -13,24 +13,26 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.config import get_settings
 from app.schemas import (
     MergedUtteranceOut as _SharedMergedUtteranceOut,
-    WordTimestampOut as _SharedWordTimestampOut,
 )
-from app.services.whisper_batch import (
-    TranscriptResult,
-    Utterance as WhisperUtterance,
+from app.schemas import (
+    WordTimestampOut as _SharedWordTimestampOut,
 )
 from app.services.diarize_full import (
     DiarizeResult,
     SpeakerSegment,
+)
+from app.services.whisper_batch import (
+    TranscriptResult,
+)
+from app.services.whisper_batch import (
+    Utterance as WhisperUtterance,
 )
 
 logger = logging.getLogger(__name__)

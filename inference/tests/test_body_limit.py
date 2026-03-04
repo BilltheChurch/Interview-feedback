@@ -1,6 +1,4 @@
 """Test body limit and window validation."""
-import pytest
-from pydantic import ValidationError as PydanticValidationError
 
 from app.config import Settings
 
@@ -17,7 +15,7 @@ def test_default_body_limit_is_15mb():
 
 def test_window_hard_limit_enforced():
     """Process-chunk should reject windows > 360s."""
-    from app.schemas_v1 import ProcessChunkRequestV1, SCHEMA_VERSION
+    from app.schemas_v1 import ProcessChunkRequestV1
 
     # 360s window should be accepted
     req = ProcessChunkRequestV1(

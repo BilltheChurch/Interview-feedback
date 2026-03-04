@@ -13,32 +13,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
-from app.config import get_settings
-
 # ── Observability: OpenTelemetry + Prometheus ─────────────────────────
 try:
     from opentelemetry import trace
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.resources import Resource
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
     _otel_available = True
 except ImportError:
     _otel_available = False
 
 try:
     from prometheus_client import (
+        CONTENT_TYPE_LATEST,
         Counter,
         Histogram,
         generate_latest,
-        CONTENT_TYPE_LATEST,
     )
     _prom_available = True
 except ImportError:
     _prom_available = False
-from app.routes.asr import router as asr_router
-from app.routes.batch import router as batch_router
-from app.routes.incremental_v1 import v1_router
-from app.routes.ws_incremental import register_ws_routes
+
+from app.config import get_settings
 from app.exceptions import (
     AudioDecodeError,
     NotImplementedServiceError,
@@ -47,36 +43,40 @@ from app.exceptions import (
     UnauthorizedError,
     ValidationError,
 )
+from app.routes.asr import router as asr_router
+from app.routes.batch import router as batch_router
+from app.routes.incremental_v1 import v1_router
+from app.routes.ws_incremental import register_ws_routes
 from app.runtime import build_runtime
 from app.schemas import (
-    CheckpointRequest,
-    CheckpointResponse,
-    DeviceInfo,
-    EnrollRequest,
-    EnrollResponse,
-    DiarizeRequest,
-    DiarizeResponse,
-    ErrorResponse,
-    ExtractEmbeddingRequest,
-    ExtractEmbeddingResponse,
     AnalysisEventsRequest,
     AnalysisEventsResponse,
     AnalysisReportRequest,
     AnalysisReportResponse,
+    CheckpointRequest,
+    CheckpointResponse,
+    DeviceInfo,
+    DiarizeRequest,
+    DiarizeResponse,
+    EnrollRequest,
+    EnrollResponse,
+    ErrorResponse,
+    ExtractEmbeddingRequest,
+    ExtractEmbeddingResponse,
+    HealthResponse,
+    ImprovementRequest,
+    ImprovementResponse,
     MergeCheckpointsRequest,
-    ModelStatus,
     ModelsStatusResponse,
+    ModelStatus,
     RegenerateClaimRequest,
     RegenerateClaimResponse,
-    HealthResponse,
     ResolveRequest,
     ResolveResponse,
     ScoreRequest,
     ScoreResponse,
     SpeakerTrack,
     SynthesizeReportRequest,
-    ImprovementRequest,
-    ImprovementResponse,
 )
 from app.security import SlidingWindowRateLimiter, extract_client_ip, rate_limit_headers
 

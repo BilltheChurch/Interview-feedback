@@ -444,7 +444,6 @@ class WhisperBatchTranscriber:
         Returns:
             TranscriptResult with utterances.
         """
-        import struct
         import wave
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:

@@ -8,12 +8,10 @@ from __future__ import annotations
 import base64
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

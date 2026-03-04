@@ -1,19 +1,14 @@
 """Tests for WebSocket binary frame protocol."""
-import json
-import struct
-import zlib
 import pytest
 
 from app.services.ws_protocol import (
-    StartFrame,
-    EndFrame,
-    PCMFrame,
-    ResultFrame,
-    ErrorFrame,
-    encode_pcm_frame,
-    decode_pcm_frame,
-    validate_start_frame,
     SCHEMA_VERSION,
+    EndFrame,
+    ErrorFrame,
+    ResultFrame,
+    decode_pcm_frame,
+    encode_pcm_frame,
+    validate_start_frame,
 )
 
 

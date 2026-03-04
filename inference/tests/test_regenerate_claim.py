@@ -127,7 +127,7 @@ def test_regenerate_claim_confidence_varies_by_type() -> None:
 def test_regenerate_empty_allowed_evidence_ids_raises_error() -> None:
     """Pydantic should reject empty allowed_evidence_ids before it reaches
     the method, but the method also validates."""
-    gen = ReportGenerator(llm=MockLLMForRegenerate())
+    ReportGenerator(llm=MockLLMForRegenerate())
     # Build request manually to bypass Pydantic validation
     from pydantic import ValidationError as PydanticValidationError
 
@@ -137,7 +137,7 @@ def test_regenerate_empty_allowed_evidence_ids_raises_error() -> None:
 
 def test_regenerate_whitespace_only_allowed_ids_raises_error() -> None:
     """allowed_evidence_ids with only whitespace strings should fail."""
-    gen = ReportGenerator(llm=MockLLMForRegenerate())
+    ReportGenerator(llm=MockLLMForRegenerate())
     # Pydantic field_validator strips and filters, so [" ", ""] → [] → error
     from pydantic import ValidationError as PydanticValidationError
 

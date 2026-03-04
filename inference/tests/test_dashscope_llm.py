@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.exceptions import ValidationError
-from app.services.dashscope_llm import DashScopeLLM, _get_shared_client, _shared_client
+from app.services.dashscope_llm import DashScopeLLM, _get_shared_client
 
 
 def _llm(api_key: str = "test-key", timeout_ms: int = 5000) -> DashScopeLLM:

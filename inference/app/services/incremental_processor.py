@@ -43,7 +43,6 @@ from app.schemas import (
     IncrementalProcessResponse,
     MergeCheckpointsRequest,
     MergedUtteranceOut,
-    Memo,
     SpeakerProfileOut,
     SpeakerStat,
     TranscriptUtterance,
@@ -52,7 +51,8 @@ from app.schemas import (
 from app.services.checkpoint_analyzer import CheckpointAnalyzer
 from app.services.diarize_full import DiarizeResult, PyannoteFullDiarizer, SpeakerSegment
 from app.services.name_resolver import NameResolver
-from app.services.whisper_batch import TranscriptResult, Utterance as ASRUtterance
+from app.services.whisper_batch import TranscriptResult
+from app.services.whisper_batch import Utterance as ASRUtterance
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +300,7 @@ class IncrementalProcessor:
                     )
 
         # Merge similar global speaker profiles before collecting utterances
-        merge_map = self._merge_similar_profiles(session)
+        self._merge_similar_profiles(session)
 
         # Collect all utterances across increments
         all_utterances = self._collect_all_utterances(session)
@@ -1336,9 +1336,9 @@ class IncrementalProcessor:
         # Start with the last cumulative increment (it contains all prior audio)
         if last_cumulative_idx >= 0 and last_cumulative_idx < len(session.increment_results):
             all_utterances.extend(session.increment_results[last_cumulative_idx].utterances)
-            last_end_ms = session.increment_results[last_cumulative_idx].audio_end_ms
+            session.increment_results[last_cumulative_idx].audio_end_ms
         else:
-            last_end_ms = 0
+            pass
 
         # Append chunk-mode increments, skipping overlap region
         for result in session.increment_results[last_cumulative_idx + 1:]:

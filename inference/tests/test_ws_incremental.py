@@ -4,14 +4,12 @@ Uses FastAPI TestClient + mock processor to test the WS handshake,
 frame protocol, and error handling without real models.
 """
 import json
-import struct
-import zlib
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.services.ws_protocol import encode_pcm_frame, SCHEMA_VERSION
+from app.services.ws_protocol import SCHEMA_VERSION, encode_pcm_frame
 
 
 def _make_mock_response():

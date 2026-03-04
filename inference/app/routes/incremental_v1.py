@@ -19,7 +19,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -429,7 +428,7 @@ async def finalize_v1(req: FinalizeRequestV1, request: Request):
     report = None
     if transcript and speaker_stats:
         try:
-            from app.schemas import SynthesizeReportRequest, Memo, SpeakerStat, EvidenceRef
+            from app.schemas import EvidenceRef, Memo, SpeakerStat, SynthesizeReportRequest
             memos = [Memo(**m) if isinstance(m, dict) else m for m in req.memos]
             stats_objs = [SpeakerStat(**s) if isinstance(s, dict) else s for s in req.stats]
             evidence = [EvidenceRef(**e) if isinstance(e, dict) else e for e in req.evidence]

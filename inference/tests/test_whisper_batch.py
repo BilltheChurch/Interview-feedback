@@ -14,14 +14,12 @@ import numpy as np
 import pytest
 
 from app.services.whisper_batch import (
-    WhisperBatchTranscriber,
     TranscriptResult,
     Utterance,
+    WhisperBatchTranscriber,
     WordTimestamp,
-    detect_device,
     select_backend,
 )
-
 
 # ---------------------------------------------------------------------------
 # Device detection

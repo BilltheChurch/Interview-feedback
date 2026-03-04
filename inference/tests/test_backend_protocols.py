@@ -1,13 +1,12 @@
 """Tests for Diarization and SV backend protocols."""
 import numpy as np
-import pytest
 
 from app.services.backends.diarization_protocol import (
     DiarizationBackend,
     DiarizationResult,
     SpeakerSegment,
 )
-from app.services.backends.sv_protocol import SVBackend, EmbeddingResult
+from app.services.backends.sv_protocol import EmbeddingResult, SVBackend
 
 
 def test_diarization_segment():

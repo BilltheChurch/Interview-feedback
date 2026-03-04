@@ -102,6 +102,7 @@ def test_recompute_utterance_model_error_propagates():
 def test_runtime_has_recompute_asr_field():
     """AppRuntime must have recompute_asr attribute."""
     import dataclasses
+
     from app.runtime import AppRuntime
     fields = {f.name for f in dataclasses.fields(AppRuntime)}
     assert "recompute_asr" in fields
@@ -110,6 +111,7 @@ def test_runtime_has_recompute_asr_field():
 def test_config_has_recompute_settings():
     """Settings must have recompute_asr_enabled, model_size, device."""
     from unittest.mock import patch
+
     from app.config import Settings
     with patch.dict("os.environ", {
         "RECOMPUTE_ASR_ENABLED": "false",

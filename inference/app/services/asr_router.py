@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 
 from app.services.whisper_batch import TranscriptResult
 

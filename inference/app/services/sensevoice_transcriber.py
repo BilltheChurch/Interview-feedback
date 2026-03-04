@@ -15,10 +15,7 @@ import tempfile
 import threading
 import time
 import wave
-from dataclasses import dataclass, field
 from typing import Any
-
-import numpy as np
 
 from app.services.device import DeviceType, detect_device
 from app.services.whisper_batch import TranscriptResult, Utterance, WordTimestamp

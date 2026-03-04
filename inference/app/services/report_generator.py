@@ -25,7 +25,6 @@ from app.schemas import (
 )
 from app.services.backends.llm_dashscope import DashScopeLLMAdapter
 
-
 DIMENSIONS: tuple[str, ...] = (
     "leadership",
     "collaboration",

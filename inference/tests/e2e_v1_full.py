@@ -259,7 +259,7 @@ def main():
     print(f"  Report            : {'generated' if report else 'skipped'}")
     print(f"  Redis utterances  : {metrics.get('redis_utterances')}")
     print(f"  Merged speakers   : {metrics.get('merged_speaker_count')}")
-    print(f"\n  Recompute metrics:")
+    print("\n  Recompute metrics:")
     print(f"    requested       : {metrics.get('recompute_requested')}")
     print(f"    succeeded       : {metrics.get('recompute_succeeded')}")
     print(f"    skipped         : {metrics.get('recompute_skipped')}")
@@ -267,7 +267,7 @@ def main():
 
     # ── Summary ──
     print(f"\n{'=' * 65}")
-    print(f"RESULTS SUMMARY")
+    print("RESULTS SUMMARY")
     print(f"{'=' * 65}")
     print(f"Audio              : {total_ms/60000:.1f} min")
     print(f"Increments         : {idx} ({idx} ok)")
@@ -284,7 +284,7 @@ def main():
 
     # ── Speaker stats ──
     if stats:
-        print(f"\nSpeaker Stats:")
+        print("\nSpeaker Stats:")
         for s in sorted(stats, key=lambda x: x.get("talk_time_ms", 0), reverse=True):
             print(f"  {s.get('speaker_key', '?'):10s} "
                   f"  talk={s.get('talk_time_ms', 0)/1000:.0f}s"

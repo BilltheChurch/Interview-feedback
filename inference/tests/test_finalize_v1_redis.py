@@ -1,13 +1,11 @@
 """Test Redis merge-only finalize helpers."""
-import numpy as np
-import pytest
 
 from app.routes.incremental_v1 import (
-    _merge_redis_profiles,
-    _remap_utterances,
     _build_transcript,
     _compute_stats,
     _merge_checkpoints,
+    _merge_redis_profiles,
+    _remap_utterances,
 )
 
 

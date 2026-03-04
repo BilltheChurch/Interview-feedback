@@ -6,13 +6,10 @@ Uses FastAPI TestClient with mock runtime (no real models).
 from __future__ import annotations
 
 import base64
-import json
-import struct
-import wave
 import io
+import wave
+from unittest.mock import MagicMock
 
-import pytest
-from unittest.mock import MagicMock, PropertyMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

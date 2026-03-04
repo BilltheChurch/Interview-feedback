@@ -4,16 +4,13 @@ import re
 import pytest
 
 from app.schemas import (
-    AnalysisReportResponse,
     DimensionPreset,
     EvidenceRef,
     Memo,
-    MemoSpeakerBinding,
     RubricDimension,
     RubricTemplate,
     SessionContext,
     SpeakerStat,
-    StageDescription,
     SynthesizeReportRequest,
     TranscriptUtterance,
 )
@@ -1036,11 +1033,6 @@ def test_v2_not_applicable_dimension() -> None:
 def test_v2_custom_dimension_presets() -> None:
     """When session_context has dimension_presets, use those instead of defaults."""
 
-    custom_dims = [
-        {"key": "technical", "label_zh": "技术能力", "description": "技术深度和广度"},
-        {"key": "communication", "label_zh": "沟通能力", "description": "表达清晰度和沟通效果"},
-        {"key": "teamwork", "label_zh": "团队协作", "description": "团队配合和协作精神"},
-    ]
 
     class MockLLMCustomDims:
         def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict:

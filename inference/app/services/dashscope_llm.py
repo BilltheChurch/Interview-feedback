@@ -59,8 +59,6 @@ class DashScopeLLM:
 
         retryable_codes = {429, 502, 503}
         max_retries = 2
-        last_status = 0
-        last_body = ""
 
         for attempt in range(max_retries + 1):
             try:
@@ -71,8 +69,7 @@ class DashScopeLLM:
                     continue
                 raise ValidationError("Report generation service timed out after retries")
 
-            last_status = response.status_code
-            last_body = response.text[:500]
+            response.text[:500]
 
             if response.status_code < 400:
                 break
