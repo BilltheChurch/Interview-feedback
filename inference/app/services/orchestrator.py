@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+import time
 from datetime import datetime, timezone
+from typing import Any
 
 import numpy as np
 
@@ -17,6 +20,46 @@ from app.services.segmenters.base import Segmenter
 from app.services.sv import ModelScopeSVBackend
 
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingCache:
+    """LRU cache for speaker embeddings keyed by audio content hash with TTL expiry.
+
+    Avoids redundant CAM++ inference when the same audio payload is submitted
+    multiple times within a session (e.g. re-resolve after enrollment).
+    """
+
+    def __init__(self, maxsize: int = 256, ttl_seconds: float = 60.0) -> None:
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._maxsize = maxsize
+        self._ttl = ttl_seconds
+
+    @staticmethod
+    def _hash_audio(audio_bytes: bytes) -> str:
+        return hashlib.sha256(audio_bytes).hexdigest()[:16]
+
+    def get(self, audio_bytes: bytes) -> np.ndarray | None:
+        key = self._hash_audio(audio_bytes)
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        ts, embedding = entry
+        if time.monotonic() - ts < self._ttl:
+            return embedding
+        del self._cache[key]
+        return None
+
+    def put(self, audio_bytes: bytes, embedding: np.ndarray) -> None:
+        now = time.monotonic()
+        # Evict expired entries first.
+        expired = [k for k, (ts, _) in self._cache.items() if now - ts >= self._ttl]
+        for k in expired:
+            del self._cache[k]
+        # Evict oldest entry if still at capacity.
+        while len(self._cache) >= self._maxsize:
+            oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
+            del self._cache[oldest_key]
+        self._cache[self._hash_audio(audio_bytes)] = (now, embedding)
 
 
 class InferenceOrchestrator:
@@ -35,6 +78,7 @@ class InferenceOrchestrator:
         self._clusterer = clusterer
         self._name_resolver = name_resolver
         self._binder = binder
+        self._embedding_cache = EmbeddingCache(maxsize=256, ttl_seconds=60.0)
 
     def _normalize_audio(self, audio_payload):
         return normalize_audio_payload(
@@ -65,7 +109,14 @@ class InferenceOrchestrator:
 
     def extract_embedding(self, audio_payload) -> np.ndarray:
         audio = self._normalize_audio(audio_payload)
-        return self._sv_backend.extract_embedding_from_audio(audio)
+        audio_bytes = audio.samples.tobytes()
+        cached = self._embedding_cache.get(audio_bytes)
+        if cached is not None:
+            logger.debug("embedding cache hit (audio_hash=%s)", hashlib.sha256(audio_bytes).hexdigest()[:8])
+            return cached
+        embedding = self._sv_backend.extract_embedding_from_audio(audio)
+        self._embedding_cache.put(audio_bytes, embedding)
+        return embedding
 
     def score(self, audio_payload_a, audio_payload_b) -> float:
         audio_a = self._normalize_audio(audio_payload_a)

@@ -132,22 +132,59 @@ def build_runtime(settings: Settings) -> AppRuntime:
 
     asr = build_asr_backend(settings)
 
-    llm_config = LLMConfig(
-        api_key=settings.dashscope_api_key.get_secret_value(),
-        model=settings.report_model_name,
-    )
-    report_llm = DashScopeLLMAdapter(config=llm_config, redis_client=None)
+    # Redis for V1 incremental state — initialize BEFORE LLM adapter so we can
+    # pass redis_client at construction time (avoids private-attribute mutation).
+    redis_state: RedisSessionState | None = None
+    redis_client = None
+    try:
+        import redis
+        rc = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        rc.ping()
+        redis_state = RedisSessionState(rc, ttl_s=settings.redis_session_ttl_s)
+        redis_client = rc
+        _logger.info("Redis connected: %s", settings.redis_url)
+    except Exception as exc:
+        _logger.warning(
+            "Redis unavailable (%s), V1 incremental endpoints will degrade: %s",
+            settings.redis_url, exc,
+        )
+
+    # LLM backend factory — redis_client passed at construction (Constraint 4)
+    if settings.report_model_provider == "openai":
+        from app.services.backends.llm_openai import OpenAILLMAdapter
+        llm_config = LLMConfig(
+            api_key=settings.openai_api_key.get_secret_value(),
+            model=settings.openai_model_name,
+        )
+        report_llm = OpenAILLMAdapter(
+            config=llm_config,
+            redis_client=redis_client,
+            base_url=settings.openai_base_url,
+        )
+    else:
+        llm_config = LLMConfig(
+            api_key=settings.dashscope_api_key.get_secret_value(),
+            model=settings.report_model_name,
+        )
+        report_llm = DashScopeLLMAdapter(config=llm_config, redis_client=redis_client)
 
     checkpoint_analyzer = CheckpointAnalyzer(llm=report_llm)
 
     # Diarizer for incremental processor (lazy-loaded, same as batch endpoint)
-    from app.services.diarize_full import PyannoteFullDiarizer
-    diarizer = PyannoteFullDiarizer(
-        device=settings.pyannote_device,
-        hf_token=settings.hf_token.get_secret_value(),
-        model_id=settings.pyannote_model_id,
-        embedding_model_id=settings.pyannote_embedding_model_id,
-    )
+    if settings.diarization_backend == "nemo":
+        from app.services.diarize_nemo import NemoMSDDDiarizer
+        diarizer = NemoMSDDDiarizer(
+            model_name=settings.nemo_model_name,
+            device=settings.nemo_device,
+        )
+    else:
+        from app.services.diarize_full import PyannoteFullDiarizer
+        diarizer = PyannoteFullDiarizer(
+            device=settings.pyannote_device,
+            hf_token=settings.hf_token.get_secret_value(),
+            model_id=settings.pyannote_model_id,
+            embedding_model_id=settings.pyannote_embedding_model_id,
+        )
 
     arbiter = SpeakerArbiter(sv_backend=sv_backend, confidence_threshold=0.50)
 
@@ -158,26 +195,6 @@ def build_runtime(settings: Settings) -> AppRuntime:
         checkpoint_analyzer=checkpoint_analyzer,
         arbiter=arbiter,
     )
-
-    # Redis for V1 incremental state — graceful degradation on connection failure
-    redis_state: RedisSessionState | None = None
-    try:
-        import redis
-        rc = redis.Redis.from_url(settings.redis_url, decode_responses=True)
-        rc.ping()
-        redis_state = RedisSessionState(rc, ttl_s=settings.redis_session_ttl_s)
-        import logging
-        logging.getLogger(__name__).info("Redis connected: %s", settings.redis_url)
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning(
-            "Redis unavailable (%s), V1 incremental endpoints will degrade: %s",
-            settings.redis_url, exc,
-        )
-
-    # Inject Redis into LLM adapter for idempotency cache (Constraint 4)
-    if redis_state is not None:
-        report_llm._redis = redis_state._redis
 
     # Recompute ASR for finalize-time low-confidence correction (lazy-loaded)
     recompute_asr = None

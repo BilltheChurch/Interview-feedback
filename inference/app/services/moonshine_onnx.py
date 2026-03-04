@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import struct
-import tempfile
 import threading
 import time
 import wave
@@ -147,12 +146,45 @@ class MoonshineOnnxTranscriber:
         samples = [s / 32768.0 for s in pcm16]
         return samples, sample_rate
 
-    def transcribe(self, audio_path: str, language: str = "en") -> TranscriptResult:
-        """Transcribe an audio file. Returns TranscriptResult."""
-        recognizer = _get_recognizer(self._model_dir)
-        start = time.perf_counter()
+    @staticmethod
+    def _pcm_to_samples(pcm_data: bytes) -> list[float]:
+        """Convert raw PCM16 bytes to float32 samples in-memory (no disk I/O)."""
+        n_samples = len(pcm_data) // 2
+        pcm16 = struct.unpack(f"<{n_samples}h", pcm_data)
+        return [s / 32768.0 for s in pcm16]
 
-        samples, sample_rate = self._read_wave(audio_path)
+    @staticmethod
+    def _extract_confidence(stream_result) -> float:
+        """Extract calibrated confidence from a sherpa-onnx stream result.
+
+        Moonshine is an encoder-decoder model; sherpa-onnx exposes token strings
+        via result.tokens. We use token density as a confidence proxy:
+        empty transcript → 0.0, non-empty with tokens → scaled [0.8, 1.0].
+        Falls back to 1.0 if token list is unavailable.
+        """
+        text = stream_result.text.strip()
+        if not text:
+            return 0.0
+
+        tokens = getattr(stream_result, "tokens", None)
+        if not tokens:
+            return 1.0
+
+        # Filter out whitespace-only tokens (common in BPE tokenizers).
+        meaningful = sum(1 for t in tokens if t.strip())
+        ratio = meaningful / len(tokens)
+        # Scale to [0.8, 1.0]: Moonshine is English-only so token noise is lower.
+        confidence = 0.8 + 0.2 * ratio
+        return max(0.0, min(1.0, confidence))
+
+    def _transcribe_samples(
+        self,
+        samples: list[float],
+        sample_rate: int,
+        start_timer: float,
+    ) -> TranscriptResult:
+        """Shared transcription logic given pre-decoded float32 samples."""
+        recognizer = _get_recognizer(self._model_dir)
         duration_ms = int(len(samples) / sample_rate * 1000)
 
         stream = recognizer.create_stream()
@@ -160,7 +192,8 @@ class MoonshineOnnxTranscriber:
         recognizer.decode_stream(stream)
 
         text = stream.result.text.strip()
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        elapsed_ms = int((time.perf_counter() - start_timer) * 1000)
+        confidence = self._extract_confidence(stream.result)
 
         utterances = []
         if text:
@@ -171,7 +204,7 @@ class MoonshineOnnxTranscriber:
                 end_ms=duration_ms,
                 words=[],
                 language="en",
-                confidence=1.0,
+                confidence=confidence,
             ))
 
         return TranscriptResult(
@@ -183,22 +216,16 @@ class MoonshineOnnxTranscriber:
             model_size="MoonshineBase-onnx",
         )
 
+    def transcribe(self, audio_path: str, language: str = "en") -> TranscriptResult:
+        """Transcribe an audio file. Returns TranscriptResult."""
+        start = time.perf_counter()
+        samples, sample_rate = self._read_wave(audio_path)
+        return self._transcribe_samples(samples, sample_rate, start)
+
     def transcribe_pcm(
         self, pcm_data: bytes, sample_rate: int = 16000, language: str = "en"
     ) -> TranscriptResult:
-        """Transcribe raw PCM16 data."""
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            with wave.open(tmp, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(pcm_data)
-            tmp_path = tmp.name
-
-        try:
-            return self.transcribe(tmp_path, language=language)
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        """Transcribe raw PCM16 data in-memory (no temp file, no disk I/O)."""
+        start = time.perf_counter()
+        samples = self._pcm_to_samples(pcm_data)
+        return self._transcribe_samples(samples, sample_rate, start)

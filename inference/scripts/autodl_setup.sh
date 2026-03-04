@@ -57,9 +57,20 @@ echo "[4/7] Installing Python dependencies..."
 pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 
-# NeMo for Parakeet (not in requirements.txt — heavy dependency)
-echo "Installing NeMo toolkit for Parakeet..."
-pip install --quiet nemo_toolkit[asr]>=2.0.0
+# NeMo for Parakeet ASR + MSDD Diarization (not in requirements.txt — heavy dependency)
+echo "Installing NeMo toolkit for Parakeet + MSDD..."
+pip install --quiet "nemo_toolkit[asr]>=2.0.0"
+
+# Pre-download NeMo MSDD diarization model to shared storage
+echo "Pre-downloading NeMo MSDD model..."
+python3 -c "
+try:
+    from nemo.collections.asr.models import ClusteringDiarizer
+    model = ClusteringDiarizer.from_pretrained('diar_msdd_telephonic')
+    print('  NeMo MSDD model downloaded successfully')
+except Exception as e:
+    print(f'  NeMo MSDD download skipped: {e}')
+" 2>/dev/null || echo "  NeMo model pre-download skipped (will lazy-load on first request)"
 
 # ── 5. Write production .env ──
 echo ""
@@ -69,14 +80,14 @@ APP_NAME=interview-inference
 APP_HOST=0.0.0.0
 APP_PORT=6006
 LOG_LEVEL=INFO
+TRUST_PROXY_HEADERS=false
 
 # === CHANGE THIS: Generate with `python -c "import secrets; print(secrets.token_hex(32))"` ===
 INFERENCE_API_KEY=CHANGE_ME_TO_RANDOM_KEY
 
-# Speaker Verification — CAM++ on CUDA
-SV_MODEL_ID=iic/speech_campplus_sv_zh_en_16k-common_advanced
-SV_MODEL_REVISION=v1.0.0
-SV_BACKEND=modelscope
+# ── Speaker Verification — CAM++ ONNX on CUDA ──
+SV_BACKEND=onnx
+SV_ONNX_MODEL_PATH=/root/autodl-fs/models/campplus-onnx/campplus.onnx
 SV_DEVICE=cuda
 SV_T_LOW=0.60
 SV_T_HIGH=0.70
@@ -110,6 +121,7 @@ RATE_LIMIT_ENABLED=true
 RATE_LIMIT_REQUESTS=120
 RATE_LIMIT_WINDOW_SECONDS=60
 
+REPORT_MODEL_PROVIDER=dashscope
 REPORT_MODEL_NAME=qwen-flash
 REPORT_TIMEOUT_MS=100000
 
@@ -118,14 +130,16 @@ ASR_BACKEND=parakeet
 PARAKEET_MODEL_NAME=nvidia/parakeet-tdt-0.6b-v2
 PARAKEET_DEVICE=cuda
 
-# Fallback ASR (if Parakeet fails to load)
+# Fallback ASR: SenseVoice ONNX (if Parakeet fails to load)
 ASR_ONNX_MODEL_PATH=/root/autodl-fs/models/sensevoice-onnx/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
 
-# Speaker Diarization — pyannote on CUDA
-PYANNOTE_MODEL_ID=pyannote/speaker-diarization-community-1
-PYANNOTE_DEVICE=cuda
-# === CHANGE THIS: Your HuggingFace token (needs pyannote license) ===
-HF_TOKEN=CHANGE_ME
+# Moonshine ONNX for English-only ASR fallback
+MOONSHINE_MODEL_PATH=/root/autodl-fs/models/moonshine-onnx/sherpa-onnx-moonshine-base-en-int8
+
+# ── Speaker Diarization — NeMo MSDD on CUDA ──
+DIARIZATION_BACKEND=nemo
+NEMO_MODEL_NAME=diar_msdd_telephonic
+NEMO_DEVICE=cuda
 
 # ── Incremental V1 Pipeline ──
 INCREMENTAL_V1_ENABLED=true
@@ -141,7 +155,7 @@ WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
 ENVEOF
 
-echo "  .env written. IMPORTANT: Edit INFERENCE_API_KEY, DASHSCOPE_API_KEY, HF_TOKEN!"
+echo "  .env written. IMPORTANT: Edit INFERENCE_API_KEY and DASHSCOPE_API_KEY!"
 
 # ── 6. Install and start Redis ──
 echo ""
@@ -149,8 +163,22 @@ echo "[6/7] Setting up Redis..."
 if ! command -v redis-server &>/dev/null; then
     apt-get update -qq && apt-get install -y -qq redis-server
 fi
-redis-server --daemonize yes --save "" --appendonly no
-redis-cli ping
+REDIS_PASSWORD=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+echo "  Generated Redis password (also written to .env)"
+
+# Write requirepass to redis.conf before starting
+REDIS_CONF="/etc/redis/redis.conf"
+if [ -f "$REDIS_CONF" ]; then
+    sed -i "s/^# requirepass .*/requirepass $REDIS_PASSWORD/" "$REDIS_CONF" 2>/dev/null || true
+    grep -q "^requirepass" "$REDIS_CONF" || echo "requirepass $REDIS_PASSWORD" >> "$REDIS_CONF"
+fi
+
+redis-server --daemonize yes --save "" --appendonly no --requirepass "$REDIS_PASSWORD"
+redis-cli -a "$REDIS_PASSWORD" ping
+
+# Patch REDIS_URL in .env with the generated password
+sed -i "s|REDIS_URL=redis://localhost|REDIS_URL=redis://:${REDIS_PASSWORD}@localhost|" .env
+echo "  REDIS_URL updated in .env with generated password"
 
 # ── 7. Verify setup ──
 echo ""
@@ -160,6 +188,8 @@ from app.config import Settings
 s = Settings()
 print(f'ASR_BACKEND:            {s.asr_backend}')
 print(f'PARAKEET_DEVICE:        {s.parakeet_device}')
+print(f'SV_BACKEND:             {s.sv_backend}')
+print(f'DIARIZATION_BACKEND:    {s.diarization_backend}')
 print(f'INCREMENTAL_V1_ENABLED: {s.incremental_v1_enabled}')
 print(f'RECOMPUTE_ASR_ENABLED:  {s.recompute_asr_enabled}')
 print(f'RECOMPUTE_ASR_MODEL:    {s.recompute_asr_model_size}')
@@ -174,7 +204,7 @@ echo "  Setup complete!"
 echo "============================================"
 echo ""
 echo "Next steps:"
-echo "  1. Edit .env: set INFERENCE_API_KEY, DASHSCOPE_API_KEY, HF_TOKEN"
+echo "  1. Edit .env: set INFERENCE_API_KEY and DASHSCOPE_API_KEY"
 echo "  2. Start service:"
 echo "     screen -S inference"
 echo "     uvicorn app.main:app --host 0.0.0.0 --port 6006"
