@@ -40,8 +40,18 @@ desktop/sidecar/pyannote-rs-server/target/
 # Git worktrees
 .worktrees/
 
-# Benchmark output artifacts (selective recompute ASR)
+# Benchmark & E2E output artifacts
 inference/tests/benchmark_incremental_report.json
 inference/tests/benchmark_incremental_results.json
 inference/tests/benchmark_incremental_transcript.json
 inference/tests/benchmark_incremental_transcript.txt
+inference/tests/e2e_v1_results.json
+inference/tests/e2e_v1_transcript.txt
+
+# Agent state (oh-my-claudecode)
+.omc/
+**/.omc/
+
+# Desktop icon build artifacts
+desktop/build/icons/icon.iconset/
+desktop/icon_1024.png
