@@ -549,6 +549,7 @@ export interface Env {
   INCREMENTAL_ANALYSIS_INTERVAL?: string;
   RESULT_BUCKET: R2Bucket;
   MEETING_SESSION: DurableObjectNamespace;
+  DB?: D1Database;
 }
 
 // ── Default state ───────────────────────────────────────────────────

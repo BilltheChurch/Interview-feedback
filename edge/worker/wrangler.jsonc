@@ -78,6 +78,14 @@
     }
   ],
 
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chorus-meta",
+      "database_id": "REPLACE_AFTER_CREATE"
+    }
+  ],
+
   // ── Staging environment ─────────────────────────────────────────────
   // Deploy: npx wrangler deploy --env staging
   "env": {
@@ -100,6 +108,13 @@
         {
           "binding": "RESULT_BUCKET",
           "bucket_name": "interview-feedback-results-staging"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "chorus-meta-staging",
+          "database_id": "REPLACE_AFTER_CREATE"
         }
       ]
     }

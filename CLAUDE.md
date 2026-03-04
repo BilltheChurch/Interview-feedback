@@ -208,7 +208,7 @@ node scripts/eval_speaker_accuracy.mjs
 - `docs/plans/2026-02-15-ux-elevation-design.md` — Competitor analysis + UX specs
 
 ### Global Requirements
-- Use **Neon** exclusively for database operations (no Firebase)
+- Use **Cloudflare D1** (serverless SQLite) for structured data (no Firebase). D1 shares the Cloudflare ecosystem with Workers/DO/R2.
 - Keep **OpenSpec** documentation synchronized with code changes
 - Maintain separate `.env` files for dev/staging/production
 - Use **Lucide React** for icons (no emojis as UI icons)
