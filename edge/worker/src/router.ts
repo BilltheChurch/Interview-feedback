@@ -87,7 +87,10 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     return jsonResponse({ detail: "not implemented", phase: 2 }, 501);
   }
 
-  // ── Auth gate (skipped for /health, skipped when WORKER_API_KEY is empty) ──
+  // ── Auth gate (skipped for /health) ──
+  if (!env.WORKER_API_KEY) {
+    log("warn", "WORKER_API_KEY is empty — all requests are unauthenticated (dev mode)", { action: "auth_warning" });
+  }
   const authError = validateApiKey(request, env as unknown as Record<string, unknown>);
   if (authError) return authError;
 

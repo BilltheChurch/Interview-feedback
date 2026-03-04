@@ -255,6 +255,15 @@ export function setupWebSocketPair(
   // First-message auth gate. True once auth frame is validated.
   let authenticated = false;
 
+  // Auth timeout: close connection if no auth frame within 10 seconds.
+  const authTimeoutMs = 10_000;
+  const authTimer = setTimeout(() => {
+    if (!authenticated) {
+      ctx.sendWsError(server, "auth timeout");
+      server.close(4401, "auth timeout");
+    }
+  }, authTimeoutMs);
+
   let messageQueue: Promise<void> = Promise.resolve();
 
   server.addEventListener("message", (event) => {
@@ -271,6 +280,7 @@ export function setupWebSocketPair(
               return;
             }
             authenticated = true;
+            clearTimeout(authTimer);
             ctx.sendWsJson(server, { type: "auth_ok" });
             return;
           }
@@ -284,6 +294,7 @@ export function setupWebSocketPair(
   });
 
   server.addEventListener("close", () => {
+    clearTimeout(authTimer);
     if (ctx.asrRealtimeEnabled()) {
       ctx
         .closeRealtimeAsrSession(connectionRole, "ingest-ws-closed", false)

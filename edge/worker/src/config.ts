@@ -728,6 +728,9 @@ export function safeSessionId(raw: string): string {
   if (!decoded || decoded.length > 128) {
     throw new Error("session_id must be 1..128 chars");
   }
+  if (!/^[A-Za-z0-9._-]+$/.test(decoded)) {
+    throw new Error("session_id contains invalid characters");
+  }
   return decoded;
 }
 
