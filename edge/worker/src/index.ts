@@ -1,32 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
 import { runFunAsrDashScope as runFunAsrDashScopeFn } from "./dashscope-asr";
 import {
-  attachEvidenceToMemos,
-  buildEvidence,
-  buildMemoFirstReport,
   buildMultiEvidence,
   buildReportExportMarkdown,
   buildReportExportText,
-  buildResultV2,
-  buildSynthesizePayload,
-  collectEnrichedContext,
   computeSpeakerStats,
-  computeUnknownRatio,
-  enforceQualityGates,
-  enrichEvidencePack,
-  extractMemoNames,
-  generateStatsObservations,
-  addStageMetadata,
-  memoAssistedBinding,
-  backfillSupportingUtterances,
   validatePersonFeedbackEvidence
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
 import { filterMemos, nextMemoId, parseMemoPayload } from "./memos";
-import { emptySpeakerLogs, mergeSpeakerLogs, parseSpeakerLogsPayload } from "./speaker_logs";
+import { mergeSpeakerLogs, parseSpeakerLogsPayload } from "./speaker_logs";
 import {
   InferenceFailoverClient,
-  InferenceRequestError,
   type DependencyHealthSnapshot,
   type InferenceBackendTimelineItem,
   type InferenceEndpointKey
@@ -36,10 +21,7 @@ import {
   bytesToBase64,
   concatUint8Arrays,
   pcm16ToWavBytes,
-  truncatePcm16WavToSeconds,
-  tailPcm16BytesToWavForSeconds,
   buildDocxBytesFromText,
-  encodeUtf8,
   TARGET_SAMPLE_RATE,
   TARGET_CHANNELS,
   ONE_SECOND_PCM_BYTES
@@ -49,12 +31,8 @@ import {
   resolveStudentBinding
 } from "./reconcile";
 import { EmbeddingCache } from "./embedding-cache";
-import { globalCluster, mapClustersToRoster } from "./global-cluster";
-import type { CachedEmbedding, GlobalClusterResult, CaptionEvent } from "./providers/types";
+import type { CaptionEvent } from "./providers/types";
 import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
-import { ACSCaptionASRProvider } from "./providers/asr-acs-caption";
-import { ACSCaptionDiarizationProvider } from "./providers/diarization-acs-caption";
-import type { RosterParticipant } from "./global-cluster";
 import type {
   CheckpointRequestPayload,
   CheckpointResult,
@@ -65,7 +43,6 @@ import type {
   SessionPhase,
   StoredUtterance,
   MemoItem,
-  MemoSpeakerBinding,
   MergeCheckpointsRequestPayload,
   PersonFeedbackItem,
   ReportQualityMeta,
@@ -77,19 +54,12 @@ import type {
   Tier2Status,
   CaptionSource,
   DimensionPresetItem,
-  OverallFeedback,
-  ImprovementReport,
-  SessionContextMeta
+  OverallFeedback
 } from "./types_v2";
 import {
-  createDefaultIncrementalStatus,
   shouldScheduleIncremental,
-  parseProcessChunkResponse,
-  incrementalAnalysisInterval
 } from "./incremental";
-import { buildFinalizePayloadV1 } from "./incremental_v1";
-import type { R2AudioRefV1, RecomputeSegment } from "./incremental_v1";
-import { persistSessionToD1 } from "./d1-helpers";
+
 import {
   runIncrementalJob as runIncrementalJobFn,
   runIncrementalFinalize as runIncrementalFinalizeFn,
@@ -293,19 +263,15 @@ import {
   WS_INGEST_ROUTE_REGEX,
   WS_INGEST_ROLE_ROUTE_REGEX,
   STORAGE_KEY_STATE,
-  STORAGE_KEY_EVENTS,
   STORAGE_KEY_UPDATED_AT,
   STORAGE_KEY_FINALIZED_AT,
   STORAGE_KEY_RESULT_KEY,
   STORAGE_KEY_RESULT_KEY_V2,
   STORAGE_KEY_FINALIZE_V2_STATUS,
   STORAGE_KEY_FINALIZE_LOCK,
-  STORAGE_KEY_TIER2_STATUS,
   STORAGE_KEY_TIER2_ALARM_TAG,
   STORAGE_KEY_INCREMENTAL_STATUS,
   STORAGE_KEY_INCREMENTAL_ALARM_TAG,
-  STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES,
-  STORAGE_KEY_INCREMENTAL_CHECKPOINT,
   STORAGE_KEY_MEMOS,
   STORAGE_KEY_SPEAKER_LOGS,
   STORAGE_KEY_ASR_CURSOR_BY_STREAM,
@@ -322,29 +288,13 @@ import {
   STORAGE_KEY_LAST_CHECKPOINT_AT,
   STORAGE_KEY_CAPTION_SOURCE,
   STORAGE_KEY_CAPTION_BUFFER,
-  STORAGE_KEY_INCREMENTAL_UTTERANCES,
-  MAX_STORED_UTTERANCES,
   TARGET_FORMAT,
   INFERENCE_MAX_AUDIO_SECONDS,
-  DASHSCOPE_DEFAULT_WS_URL,
-  DASHSCOPE_DEFAULT_MODEL,
-  FEEDBACK_REFRESH_INTERVAL_MS,
   FEEDBACK_TOTAL_BUDGET_MS,
-  FEEDBACK_ASSEMBLE_BUDGET_MS,
-  FEEDBACK_EVENTS_BUDGET_MS,
-  FEEDBACK_REPORT_BUDGET_MS,
-  FEEDBACK_VALIDATE_BUDGET_MS,
-  FEEDBACK_PERSIST_FETCH_BUDGET_MS,
   HISTORY_PREFIX,
   HISTORY_MAX_LIMIT,
   HISTORY_REVERSE_EPOCH_MAX,
-  DASHSCOPE_TIMEOUT_CAP_MS,
-  DEFAULT_ASR_TIMEOUT_MS,
-  DRAIN_TIMEOUT_CAP_MS,
-  WS_CLOSE_REASON_MAX_LEN,
   R2_LIST_LIMIT,
-  MAX_BACKOFF_MS,
-  MAX_CONSECUTIVE_FAILURES,
   ACCEPTED_REPORT_SOURCES,
   getErrorMessage,
   calcTranscriptDurationMs,
@@ -396,7 +346,6 @@ import {
   log,
   DEFAULT_DATA_RETENTION_DAYS,
   STORAGE_KEY_SESSION_PHASE,
-  STORAGE_KEY_FINALIZE_STAGE_DATA,
   transitionSessionPhase
 } from "./config";
 
@@ -1532,9 +1481,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return triggerImprovementGenerationImpl(sessionId, resultV2, transcript, resultV2Key, {
       doCtx: this.ctx,
       env: this.env,
+      currentIsoTs: () => this.currentIsoTs(),
       loadFeedbackCache: (sid) => this.loadFeedbackCache(sid),
       storeFeedbackCache: (cache) => this.storeFeedbackCache(cache),
-    } as FinalizeJobContext);
+    });
   }
 
   // ── Tier 2 Status Management ───────────────────────────────────────────

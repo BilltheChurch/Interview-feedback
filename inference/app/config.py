@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     # WebSocket server
     ws_port: int = Field(default=8001, alias="WS_PORT")
 
+    # CORS
+    cors_allowed_origins: str = Field(
+        default="http://localhost:5173,http://localhost:3000",
+        alias="CORS_ALLOWED_ORIGINS",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

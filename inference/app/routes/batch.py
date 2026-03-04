@@ -129,6 +129,8 @@ async def _resolve_audio(audio_url: str) -> str:
             suffix = ext
 
     # Security: block internal/private network SSRF
+    import ipaddress
+    import socket
     from urllib.parse import urlparse
     parsed_url = urlparse(audio_url)
     if parsed_url.scheme not in ("http", "https"):
@@ -138,6 +140,16 @@ async def _resolve_audio(audio_url: str) -> str:
        hostname.startswith(("10.", "192.168.")) or \
        (hostname.startswith("172.") and 16 <= int(hostname.split(".")[1]) <= 31 if hostname.count(".") >= 1 and hostname.split(".")[1].isdigit() else False):
         raise HTTPException(status_code=400, detail="Internal URLs not allowed")
+
+    # DNS rebinding protection: resolve hostname and verify the IP is not private
+    try:
+        resolved_ips = socket.getaddrinfo(hostname, None)
+        for _family, _type, _proto, _canonname, sockaddr in resolved_ips:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise HTTPException(status_code=400, detail="Internal URLs not allowed")
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="Could not resolve hostname")
 
     try:
         async with httpx.AsyncClient(timeout=_DOWNLOAD_TIMEOUT_S) as client:
@@ -152,7 +164,8 @@ async def _resolve_audio(audio_url: str) -> str:
             tmp.close()
             return tmp.name
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to download audio: {exc}")
+        logger.error("Failed to download audio from URL: %s", exc)
+        raise HTTPException(status_code=502, detail="Failed to download audio")
 
 
 # ---------------------------------------------------------------------------

@@ -481,6 +481,68 @@ class ReportGenerator:
         )
 
     def generate(self, req: AnalysisReportRequest) -> AnalysisReportResponse:
+        """Memo-first report generation.
+
+        MEMO-FIRST MERGE CONTRACT
+        =========================
+        SYNC: This algorithm is duplicated in
+          edge/worker/src/finalize_v2.ts → buildMemoFirstReport()
+          Changes here MUST be mirrored there (and vice versa).
+
+        Known intentional divergences (do NOT blindly sync these):
+          1. Speaker resolution: Python uses alias map (speaker_key + alias normalization);
+             TypeScript uses inferMemoSpeakerKey() (display_name → cluster_id → "unknown").
+          2. Single-person fallback: Python auto-assigns memo to sole speaker when no refs resolve;
+             TypeScript skips unresolved memos (no auto-assign).
+          3. Template text: Python uses stat-aware templates (turns/interruptions/talk_time_ms);
+             TypeScript uses static DEFAULT_DIMENSION_TEXT strings.
+          4. LLM polish: Python optionally polishes the memo-first output via _polish_report_with_llm();
+             TypeScript does not (LLM synthesis is handled separately in the finalize pipeline).
+          5. Overall section: Python includes last 8 memos + last 6 events; TypeScript uses last 6 memos only.
+
+        Input format:
+          - req.memos:    List of Memo objects, each with: type, text, tags, anchors
+                          (anchors.mode = "utterance" | "time"; carries utterance_ids or time_range_ms).
+          - req.evidence: List of EvidenceRef, each with evidence_id, speaker_key, time_range_ms.
+          - req.stats:    List of SpeakerStat (speaker_key, speaker_name). Defines the person roster.
+                          Falls back to transcript speakers when empty; further falls back to "unknown".
+          - req.transcript: Used to build person stats and alias maps only.
+
+        Merge algorithm:
+          1. Build lookup maps: evidence_by_id, utterance_to_evidence, evidence_by_person (alias-resolved),
+             all_refs (list of all evidence IDs).
+          2. For each person in stats:
+             Initialize claims_by_person[speaker_key][dimension][bucket] = [].
+          3. For each memo:
+             a. Resolve evidence refs via _memo_refs() (utterance anchor → utterance_to_evidence lookup;
+                time anchor → overlap scan against all evidence).
+             b. Resolve speaker keys via _speaker_keys_from_memo_refs() (evidence.speaker_key + alias map).
+                If no speakers resolved and exactly 1 person in session, assign to that person.
+             c. Classify dimension: keyword scan on tags+text (DIMENSION_KEYWORDS), then
+                type-based fallback (question→logic, decision→structure, score→initiative, else→collaboration).
+             d. Classify bucket: question→risks, decision|score→actions, else→strengths.
+             e. For each resolved speaker: append DimensionClaim to claims_by_person[speaker][dimension][bucket].
+                Refs = memo_refs[:2] if non-empty, else fallback_refs_for_person (up to 2 person-specific refs).
+          4. For each person in stats:
+             a. Get fallback_refs (up to 2 person-specific evidence IDs, or [] if none).
+             b. If no fallback_refs: emit PersonFeedbackItem with all empty dimensions (resilient path).
+             c. Else: call _ensure_dimensions() — for each of 5 dimensions, for each empty bucket,
+                fill with one template claim (_build_template_claim_text uses stat.turns, interruptions,
+                talk_time_ms to pick wording) using fallback_refs.
+             d. Build PersonSummary: first claim text from each dimension, up to 3 per bucket.
+          5. Build overall via _build_overall():
+             - summary_sections: last 8 memo texts as "Teacher Memos" bullets +
+               last 6 events as "Key Events" bullets (with Chinese placeholders when empty).
+             - team_dynamics: collected from per_person strengths/risks.
+          6. Attempt LLM polish via _polish_report_with_llm() (non-fatal; sets report_source accordingly).
+
+        Output format:
+          AnalysisReportResponse with:
+            session_id, overall (OverallFeedback), per_person (list[PersonFeedbackItem]), quality
+          Each PersonFeedbackItem: person_key, display_name, dimensions, summary
+          Each DimensionFeedback:  dimension, strengths[], risks[], actions[]
+          Each DimensionClaim:     claim_id, text, evidence_refs[], confidence
+        """
         started_at = datetime.now(timezone.utc)
         stats = self._person_stats(req)
         aliases = self._person_alias_map(stats)

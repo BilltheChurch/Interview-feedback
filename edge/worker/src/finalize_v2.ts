@@ -1037,6 +1037,64 @@ function inferMemoSpeakerKey(
   return "unknown";
 }
 
+/*
+ * MEMO-FIRST MERGE CONTRACT
+ * =========================
+ * SYNC: This algorithm is duplicated in
+ *   inference/app/services/report_generator.py → ReportGenerator.generate()
+ *   Changes here MUST be mirrored there (and vice versa).
+ *
+ * Known intentional divergences (do NOT blindly sync these):
+ *   1. Speaker resolution: Python uses alias map (speaker_key + alias normalization);
+ *      TypeScript uses inferMemoSpeakerKey() (display_name → cluster_id → "unknown").
+ *   2. Single-person fallback: Python auto-assigns memo to sole speaker when no refs resolve;
+ *      TypeScript skips unresolved memos (no auto-assign).
+ *   3. Template text: Python uses stat-aware templates (turns/interruptions/talk_time_ms);
+ *      TypeScript uses static DEFAULT_DIMENSION_TEXT strings.
+ *   4. LLM polish: Python optionally polishes the memo-first output via _polish_report_with_llm();
+ *      TypeScript does not (LLM synthesis is handled separately in the finalize pipeline).
+ *   5. Overall section: Python includes last 8 memos + last 6 events; TypeScript uses last 6 memos only.
+ *
+ * Input format:
+ *   - memos:    Array of MemoItem (with evidence_ids already attached via attachEvidenceToMemos).
+ *               Each memo has: type, text, tags, evidence_ids.
+ *   - evidence: Array of EvidenceItem, each with evidence_id, speaker.display_name/cluster_id,
+ *               confidence, weak flag.
+ *   - stats:    Array of SpeakerStatItem (speaker_key, speaker_name). Defines the person roster.
+ *               Falls back to a single "unknown" entry when empty.
+ *   - transcript: Used only by helper functions (buildEvidence, buildWeakEvidenceUtteranceSet).
+ *                 Not consumed directly inside buildMemoFirstReport.
+ *
+ * Merge algorithm:
+ *   1. Build lookup maps: evidenceById (Map<id, EvidenceItem>),
+ *      evidenceBySpeaker (Map<displayName|clusterId, evidenceId[]>),
+ *      globalEvidenceRefs (all evidence IDs in order).
+ *   2. For each person in stats (personKey = speaker_name ?? speaker_key):
+ *      a. Collect speaker-specific evidence IDs (fallbackBySpeaker).
+ *      b. Filter memos to those attributed to this person via inferMemoSpeakerKey()
+ *         (resolves display_name → cluster_id → "unknown" from evidence refs).
+ *      c. Initialize 5 dimension slots (leadership/collaboration/logic/structure/initiative),
+ *         each with empty strengths/risks/actions arrays.
+ *      d. For each attributed memo:
+ *         - Classify dimension: keyword scan on tags+text (DIMENSION_KEYWORDS), then
+ *           type-based fallback (question→logic, decision→structure, score→initiative, else→collaboration).
+ *         - Classify bucket: question→risks, decision|score→actions, evidence|other→strengths.
+ *         - Resolve evidence refs: memo.evidence_ids → fallbackBySpeaker[0] → globalEvidenceRefs[0].
+ *         - Push DimensionClaim (claim_id, normalized text, evidence_refs, confidence).
+ *      e. For each dimension with an empty bucket (strengths/risks/actions):
+ *         - Fill with one template claim from DEFAULT_DIMENSION_TEXT using the same
+ *           evidence resolution (fallbackBySpeaker → globalEvidenceRefs).
+ *      f. Build summary: first claim text from each dimension, up to 3 per bucket.
+ *   3. Build overall:
+ *      - summary_sections: last 6 memo texts as bullets (fallback: generic Chinese placeholder).
+ *      - team_dynamics: first strength/risk from each person, up to 3 total.
+ *
+ * Output format:
+ *   { overall: { summary_sections, team_dynamics }, per_person: PersonFeedbackItem[] }
+ *   Each PersonFeedbackItem: { person_key, display_name, dimensions[], summary }
+ *   Each DimensionFeedback: { dimension, score, strengths[], risks[], actions[] }
+ *   Each DimensionClaim:    { claim_id, text, evidence_refs[], confidence }
+ */
 export function buildMemoFirstReport(options: {
   transcript: TranscriptItem[];
   memos: Array<MemoItem & { evidence_ids?: string[] }>;

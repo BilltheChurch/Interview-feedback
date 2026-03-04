@@ -116,19 +116,35 @@ import {
 import { buildFinalizePayloadV1 } from "./incremental_v1";
 import type { RecomputeSegment } from "./incremental_v1";
 
-// ── Context interface ──────────────────────────────────────────────────────
+// ── Context sub-interfaces ────────────────────────────────────────────────
 
-export interface FinalizeJobContext {
+/** Core DO state and environment. */
+export interface FinalizeCoreContext {
   doCtx: DurableObjectState;
   env: Env;
-  // Mutable instance field accessors
+  currentIsoTs: () => string;
+}
+
+/** Mutable caption field accessors and audio-related objects. */
+export interface FinalizeAudioContext {
   getCaptionSource: () => CaptionSource;
   setCaptionSource: (source: CaptionSource) => void;
   getCaptionBuffer: () => CaptionEvent[];
   setCaptionBuffer: (buffer: CaptionEvent[]) => void;
   embeddingCache: EmbeddingCache;
   localWhisperProvider: LocalWhisperASRProvider | null;
-  // Storage helpers (from session-manager)
+  maybeRunAsrWindows: (sessionId: string, streamRole: StreamRole, force?: boolean, maxWindows?: number) => Promise<AsrRunResult>;
+  drainRealtimeQueue: (sessionId: string, streamRole: StreamRole) => Promise<void>;
+  replayGapFromR2: (sessionId: string, streamRole: StreamRole) => Promise<void>;
+  closeRealtimeAsrSession: (streamRole: StreamRole, reason: string, waitForDrain: boolean, scheduleAlarm: boolean) => Promise<void>;
+  refreshAsrStreamMetrics: (sessionId: string, streamRole: StreamRole) => Promise<void>;
+  extractEmbeddingsForTurns: (sessionId: string, speakerLogs: SpeakerLogs, streamRole?: "students" | "teacher") => Promise<{ extracted: number; skipped: number; failed: number }>;
+  getAsrProvider: () => "funASR" | "local-whisper";
+  checkpointIntervalMs: () => number;
+}
+
+/** DO storage helpers for session data. */
+export interface FinalizeStorageContext {
   loadIngestByStream: (sessionId: string) => Promise<Record<StreamRole, IngestState>>;
   loadAsrByStream: () => Promise<Record<StreamRole, AsrState>>;
   storeAsrByStream: (state: Record<StreamRole, AsrState>) => Promise<void>;
@@ -153,29 +169,32 @@ export interface FinalizeJobContext {
   loadLastCheckpointAt: () => Promise<number>;
   storeLastCheckpointAt: (ms: number) => Promise<void>;
   storeTier2Status: (status: Tier2Status) => Promise<void>;
-  // Finalize-specific helpers
+  appendSpeakerEvent: (event: SpeakerEvent) => Promise<void>;
+}
+
+/** Finalization lifecycle control. */
+export interface FinalizeLifecycleContext {
   updateFinalizeV2Status: (jobId: string, patch: Partial<FinalizeV2Status>) => Promise<FinalizeV2Status | null>;
   setFinalizeLock: (locked: boolean) => Promise<void>;
   ensureFinalizeJobActive: (jobId: string) => Promise<void>;
   isFinalizeTerminal: (status: FinalizeV2Status["status"]) => boolean;
   finalizeTimeoutMs: () => number;
   setSessionPhase: (target: SessionPhase) => Promise<SessionPhase>;
-  // ASR/Audio helpers
-  maybeRunAsrWindows: (sessionId: string, streamRole: StreamRole, force?: boolean, maxWindows?: number) => Promise<AsrRunResult>;
-  drainRealtimeQueue: (sessionId: string, streamRole: StreamRole) => Promise<void>;
-  replayGapFromR2: (sessionId: string, streamRole: StreamRole) => Promise<void>;
-  closeRealtimeAsrSession: (streamRole: StreamRole, reason: string, waitForDrain: boolean, scheduleAlarm: boolean) => Promise<void>;
-  refreshAsrStreamMetrics: (sessionId: string, streamRole: StreamRole) => Promise<void>;
-  extractEmbeddingsForTurns: (sessionId: string, speakerLogs: SpeakerLogs, streamRole?: "students" | "teacher") => Promise<{ extracted: number; skipped: number; failed: number }>;
-  getAsrProvider: () => "funASR" | "local-whisper";
-  checkpointIntervalMs: () => number;
-  // Inference helpers
+  tier2Enabled: () => boolean;
+  tier2AutoTrigger: () => boolean;
+}
+
+/** Inference backend call wrappers. */
+export interface FinalizeInferenceContext {
   invokeInferenceAnalysisEvents: (payload: Record<string, unknown>) => Promise<{ events: Record<string, unknown>[]; backend_used: string; degraded: boolean; warnings: string[]; timeline: InferenceBackendTimelineItem[]; fallback_reason: string | null }>;
   invokeInferenceAnalysisReport: (payload: Record<string, unknown>) => Promise<{ data: Record<string, unknown>; backend_used: string; degraded: boolean; warnings: string[]; timeline: InferenceBackendTimelineItem[] }>;
   invokeInferenceSynthesizeReport: (payload: SynthesizeRequestPayload) => Promise<{ data: Record<string, unknown>; backend_used: string; degraded: boolean; warnings: string[]; timeline: InferenceBackendTimelineItem[] }>;
   invokeInferenceCheckpoint: (payload: CheckpointRequestPayload) => Promise<{ data: CheckpointResult; backend_used: string; degraded: boolean; warnings: string[]; timeline: InferenceBackendTimelineItem[] }>;
   invokeInferenceMergeCheckpoints: (payload: MergeCheckpointsRequestPayload) => Promise<{ data: Record<string, unknown>; backend_used: string; degraded: boolean; warnings: string[]; timeline: InferenceBackendTimelineItem[] }>;
-  // Feedback/report helpers
+}
+
+/** Feedback quality, report assembly, and speaker analysis helpers. */
+export interface FinalizeFeedbackContext {
   sanitizeClaimEvidenceRefs: (perPerson: PersonFeedbackItem[], evidence: ResultV2["evidence"]) => { sanitized: PersonFeedbackItem[]; strippedCount: number };
   validateClaimEvidenceRefs: (report: ResultV2) => { valid: boolean; claimCount: number; invalidCount: number; needsEvidenceCount: number; failures: string[] };
   evaluateFeedbackQualityGates: (params: { unknownRatio: number; ingestP95Ms: number | null; claimValidationFailures: string[] }) => { passed: boolean; failures: string[] };
@@ -183,21 +202,33 @@ export interface FinalizeJobContext {
   buildEvidenceIndex: (perPerson: PersonFeedbackItem[]) => Record<string, string[]>;
   buildQualityMetrics: (transcript: TranscriptItem[], captureByStream: Record<StreamRole, CaptureState>) => { unknown_ratio: number; students_utterance_count: number; students_unknown_count: number; echo_suppressed_chunks: number; echo_suppression_recent_rate: number; echo_leak_rate: number; suppression_false_positive_rate: number | undefined };
   speechBackendMode: (state: SessionState, dependencyHealth: DependencyHealthSnapshot) => string;
-  // Speaker helpers
   deriveSpeakerLogsFromTranscript: (nowIso: string, transcript: TranscriptItem[], state: SessionState, existing: SpeakerLogs, source?: "cloud" | "edge") => SpeakerLogs;
   buildEdgeSpeakerLogsForFinalize: (nowIso: string, existing: SpeakerLogs, state: SessionState) => SpeakerLogs;
-  // Incremental helpers
   runIncrementalJob: (sessionId: string) => Promise<void>;
   runIncrementalFinalize: (sessionId: string, memos: MemoItem[], stats: SpeakerStatItem[], evidence: ResultV2["evidence"], locale: string, nameAliases: Record<string, string[]>) => Promise<boolean>;
   loadIncrementalStatus: () => Promise<import("./types_v2").IncrementalStatus>;
-  // Improvement generation
   triggerImprovementGeneration: (sessionId: string, resultV2: ResultV2, transcript: TranscriptItem[], resultV2Key: string) => Promise<void>;
-  // Tier 2
-  tier2Enabled: () => boolean;
-  tier2AutoTrigger: () => boolean;
-  // Misc
-  currentIsoTs: () => string;
-  appendSpeakerEvent: (event: SpeakerEvent) => Promise<void>;
+}
+
+/**
+ * Full context for runFinalizeV2Job — composed from all sub-interfaces.
+ * Use the sub-interfaces directly when only a subset is needed (e.g. ImprovementContext).
+ */
+export type FinalizeJobContext =
+  & FinalizeCoreContext
+  & FinalizeAudioContext
+  & FinalizeStorageContext
+  & FinalizeLifecycleContext
+  & FinalizeInferenceContext
+  & FinalizeFeedbackContext;
+
+/**
+ * Minimal context for triggerImprovementGenerationImpl.
+ * Avoids the unsafe `as FinalizeJobContext` cast at the call site.
+ */
+export interface ImprovementContext extends FinalizeCoreContext {
+  loadFeedbackCache: (sessionId: string) => Promise<FeedbackCache>;
+  storeFeedbackCache: (cache: FeedbackCache) => Promise<void>;
 }
 
 export async function runFinalizeV2Job(
@@ -1595,7 +1626,7 @@ export async function triggerImprovementGenerationImpl(
   resultV2: ResultV2,
   transcript: Array<{ utterance_id: string; speaker_name?: string | null; text: string; start_ms: number; end_ms: number; duration_ms: number }>,
   resultV2Key: string,
-  ctx: FinalizeJobContext
+  ctx: ImprovementContext
 ): Promise<void> {
   const inferenceBase = (ctx.env.INFERENCE_BASE_URL ?? "").trim() || "http://127.0.0.1:8000";
   const apiKey = (ctx.env.INFERENCE_API_KEY ?? "").trim();
