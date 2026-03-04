@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
 import type { FeedbackReport, Memo } from '../components/feedback/types';
 
@@ -493,7 +493,7 @@ export interface FeedbackDataResult {
   handleRetryFinalize: () => Promise<void>;
   handleRegenerate: (mode?: 'full' | 'report-only') => Promise<void>;
   handleInlineEdit: (fieldPath: string, newValue: string) => void;
-  setApiReport: (report: FeedbackReport | null) => void;
+  setApiReport: React.Dispatch<React.SetStateAction<FeedbackReport | null>>;
 }
 
 /* ─── useFeedbackData ─────────────────────────────────────────────────────── */

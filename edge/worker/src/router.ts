@@ -6,6 +6,7 @@
  */
 
 import { validateApiKey } from "./auth";
+import { log } from "./config";
 import {
   type Env,
   type StreamRole,
@@ -27,6 +28,7 @@ import {
   HISTORY_PREFIX,
   HISTORY_MAX_LIMIT
 } from "./config";
+import { listSessionsD1, getSessionScoresD1 } from "./d1-helpers";
 
 export async function proxyToDO(request: Request, env: Env, sessionId: string, action: string): Promise<Response> {
   const id = env.MEETING_SESSION.idFromName(sessionId);
@@ -105,7 +107,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
       sessionId = safeSessionId(rawSessionId);
       streamRole = parseStreamRole(rawRole, "mixed");
     } catch (error) {
-      console.error("ws-ingest-v2 session/role parse error:", error);
+      log("error", "ws-ingest-v2: session/role parse error", { action: "ws_ingest_v2", error: String(error) });
       return badRequest("Request processing failed");
     }
 
@@ -126,7 +128,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      console.error("ws-ingest session parse error:", error);
+      log("error", "ws-ingest: session parse error", { action: "ws_ingest", error: String(error) });
       return badRequest("Request processing failed");
     }
 
@@ -144,7 +146,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      console.error("purge-data session parse error:", error);
+      log("error", "purge-data: session parse error", { action: "purge_data", error: String(error) });
       return badRequest("Request processing failed");
     }
     return proxyToDO(request, env, sessionId, "purge-data");
@@ -157,7 +159,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      console.error("enrollment session parse error:", error);
+      log("error", "enrollment: session parse error", { action: "enrollment", error: String(error) });
       return badRequest("Request processing failed");
     }
 
@@ -184,7 +186,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      console.error("finalize-status session parse error:", error);
+      log("error", "finalize-status: session parse error", { action: "finalize_status", error: String(error) });
       return badRequest("Request processing failed");
     }
     if (request.method !== "GET") {
@@ -200,7 +202,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      console.error("tier2-status session parse error:", error);
+      log("error", "tier2-status: session parse error", { action: "tier2_status", error: String(error) });
       return badRequest("Request processing failed");
     }
     if (request.method !== "GET") {
@@ -216,13 +218,56 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
     try {
       sessionId = safeSessionId(rawSessionId);
     } catch (error) {
-      console.error("incremental-status session parse error:", error);
+      log("error", "incremental-status: session parse error", { action: "incremental_status", error: String(error) });
       return badRequest("Request processing failed");
     }
     if (request.method !== "GET") {
       return jsonResponse({ detail: "method not allowed" }, 405);
     }
     return proxyToDO(request, env, sessionId, "incremental-status");
+  }
+
+  // ── D1: list sessions with pagination + filtering ──
+  if (path === "/v1/sessions" && request.method === "GET") {
+    if (!env.DB) {
+      return jsonResponse({ detail: "D1 not configured" }, 501);
+    }
+    const orgId = url.searchParams.get("org_id") ?? undefined;
+    const phase = url.searchParams.get("phase") ?? undefined;
+    const limitRaw = Number(url.searchParams.get("limit") ?? "20");
+    const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+    const orderBy = (url.searchParams.get("order_by") ?? "created_at") as "created_at" | "finalized_at" | "score_avg";
+    const orderDir = (url.searchParams.get("order_dir") ?? "DESC") as "ASC" | "DESC";
+    const limit = Math.max(1, Math.min(100, Number.isFinite(limitRaw) ? limitRaw : 20));
+    const offset = Math.max(0, Number.isFinite(offsetRaw) ? offsetRaw : 0);
+    try {
+      const result = await listSessionsD1(env.DB, { orgId, phase, limit, offset, orderBy, orderDir });
+      return jsonResponse(result);
+    } catch (err) {
+      log("error", "D1 list sessions error", { action: "list_sessions", error: String(err) });
+      return jsonResponse({ detail: "database query failed" }, 500);
+    }
+  }
+
+  // ── D1: get dimension scores for a session ──
+  const scoresMatch = path.match(/^\/v1\/sessions\/([^/]+)\/scores$/);
+  if (scoresMatch && request.method === "GET") {
+    if (!env.DB) {
+      return jsonResponse({ detail: "D1 not configured" }, 501);
+    }
+    let sessionId: string;
+    try {
+      sessionId = safeSessionId(scoresMatch[1]);
+    } catch {
+      return badRequest("Invalid session ID");
+    }
+    try {
+      const scores = await getSessionScoresD1(env.DB, sessionId);
+      return jsonResponse({ session_id: sessionId, scores });
+    } catch (err) {
+      log("error", "D1 get scores error", { action: "get_scores", error: String(err) });
+      return jsonResponse({ detail: "database query failed" }, 500);
+    }
   }
 
   if (SESSION_HISTORY_ROUTE_REGEX.test(path)) {
@@ -268,7 +313,7 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
   try {
     sessionId = safeSessionId(rawSessionId);
   } catch (error) {
-    console.error("session action parse error:", error);
+    log("error", "session action parse error", { action: "session_action", error: String(error) });
     return badRequest("Request processing failed");
   }
 

@@ -89,6 +89,7 @@ import {
 } from "./incremental";
 import { buildFinalizePayloadV1 } from "./incremental_v1";
 import type { R2AudioRefV1, RecomputeSegment } from "./incremental_v1";
+import { persistSessionToD1 } from "./d1-helpers";
 
 import { handleWorkerFetch } from "./router";
 import {
@@ -1954,9 +1955,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const eventName = String(headerObject?.event ?? "");
 
     if (this.asrDebugEnabled() && ["task-started", "result-generated", "task-finished", "task-failed"].includes(eventName)) {
-      console.log(
-        `[asr-debug] session=${sessionId} stream=${streamRole} event=${eventName} payload=${JSON.stringify(payloadObject).slice(0, 400)}`
-      );
+      log("debug", "asr-debug event", { sessionId, streamRole, eventName, payload: JSON.stringify(payloadObject).slice(0, 400) });
     }
 
     const runtime = this.asrRealtimeByStream[streamRole];
@@ -3027,15 +3026,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.storeCheckpoints(checkpoints);
       await this.storeLastCheckpointAt(latestUtteranceEndMs);
 
-      console.log(
-        `[checkpoint] session=${sessionId} index=${checkpointIndex} utterances=${recentUtterances.length} stored OK`
-      );
+      log("info", "checkpoint stored", { sessionId, action: "checkpoint", checkpointIndex, utteranceCount: recentUtterances.length });
     } catch (error) {
       // Checkpoint failures are non-fatal — log and continue
-      console.error(
-        `[checkpoint] session=${sessionId} failed:`,
-        getErrorMessage(error)
-      );
+      log("error", "checkpoint failed", { sessionId, action: "checkpoint", error: getErrorMessage(error) });
     }
   }
 
@@ -3539,12 +3533,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
           for (const role of ["teacher", "students"] as const) {
             const ingest = role === "teacher" ? diagIngest.teacher : diagIngest.students;
             if (ingest.last_seq <= 0) {
-              console.log(`[finalize-v2] local-whisper skip ${role}: no audio (last_seq=${ingest.last_seq})`);
+                log("info", "finalize-v2: local-whisper skip (no audio)", { sessionId, action: "local_asr", streamRole: role, lastSeq: ingest.last_seq });
               continue;
             }
 
             const estimatedWindows = Math.floor(ingest.last_seq / (diagAsr[role].hop_seconds || 10));
-            console.log(`[finalize-v2] local-whisper starting ${role}: ~${estimatedWindows} windows`);
+            log("info", "finalize-v2: local-whisper starting", { sessionId, action: "local_asr", streamRole: role, estimatedWindows });
             let roleGenerated = 0;
             let roleFailures = 0;
 
@@ -3672,14 +3666,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
               });
 
               clusterRosterMapping = mapClustersToRoster(globalClusterResult, rosterParticipants, 0.65);
-              console.log(
-                `[finalize-v2] global clustering: ${embeddings.length} embeddings → ${globalClusterResult.clusters.size} clusters, confidence=${globalClusterResult.confidence.toFixed(2)}`
-              );
+              log("info", "finalize-v2: global clustering complete", { sessionId, action: "cluster", embeddingCount: embeddings.length, clusterCount: globalClusterResult.clusters.size, confidence: globalClusterResult.confidence });
             } else if (embeddings.length > 0) {
-              console.log(`[finalize-v2] only ${embeddings.length} embedding(s), skipping clustering`);
+              log("info", "finalize-v2: skipping clustering (too few embeddings)", { sessionId, action: "cluster", embeddingCount: embeddings.length });
             }
           } catch (clusterErr) {
-            console.warn(`[finalize-v2] clustering failed (non-fatal): ${getErrorMessage(clusterErr)}`);
+            log("warn", "finalize-v2: clustering failed (non-fatal)", { sessionId, action: "cluster", error: getErrorMessage(clusterErr) });
             finalizeWarnings.push(`clustering degraded: ${getErrorMessage(clusterErr)}`);
             finalizeDegraded = true;
           }
@@ -3758,7 +3750,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         );
         await this.storeSpeakerLogs(speakerLogs);
 
-        console.log(`[finalize-v2] caption mode: ${utterances.length} utterances from ${Object.keys(speakerMap).length} speakers`);
+        log("info", "finalize-v2: caption mode transcript built", { sessionId, action: "reconcile", utteranceCount: utterances.length, speakerCount: Object.keys(speakerMap).length });
       } else {
         // ── Original audio-based reconciliation path ──
         const [stateRaw, events, rawByStream, mergedByStream, memosLoaded, speakerLogsLoaded, asrByStreamLoaded] = await Promise.all([
@@ -3915,9 +3907,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       if (!memoFirstValidation.valid || !memoFirstStrictValidation.valid) {
         // Non-fatal: memo-first baseline has invalid evidence refs (common when drain
         // was degraded). Continue to LLM synthesis which may produce valid refs.
-        console.warn(
-          `[finalize-v2] memo-first evidence validation failed (non-fatal): claims=${memoFirstStrictValidation.claimCount} invalid=${memoFirstStrictValidation.invalidCount}`
-        );
+        log("warn", "finalize-v2: memo-first evidence validation failed (non-fatal)", { sessionId, action: "report", claimCount: memoFirstStrictValidation.claimCount, invalidCount: memoFirstStrictValidation.invalidCount });
         finalizeWarnings.push(`memo-first evidence invalid: ${memoFirstStrictValidation.invalidCount}/${memoFirstStrictValidation.claimCount} claims`);
         finalizeDegraded = true;
       }
@@ -4012,9 +4002,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
         if (useCheckpointMerge) {
           // ── Checkpoint merge path: merge pre-computed checkpoint summaries ──
-          console.log(
-            `[finalize] session=${sessionId} using checkpoint merge: ${storedCheckpoints.length} checkpoints`
-          );
+          log("info", "finalize: using checkpoint merge", { sessionId, action: "report", checkpointCount: storedCheckpoints.length });
           const mergePayload: MergeCheckpointsRequestPayload = {
             session_id: sessionId,
             checkpoints: storedCheckpoints,
@@ -4378,6 +4366,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // E5: Clear stage checkpoint on success — no longer needed
       await this.clearFinalizeStageCheckpoint();
 
+      // ── D1: persist session metadata + dimension scores (non-blocking) ──
+      if (this.env.DB) {
+        persistSessionToD1(this.env.DB, sessionId, resultV2, resultV2Key).catch(err => {
+          log("warn", "finalize-v2: D1 persist failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err) });
+        });
+      }
+
       // ── Async: generate improvement suggestions (non-blocking) ──
       this.triggerImprovementGeneration(sessionId, resultV2, transcript, resultV2Key).catch(err => {
         log("warn", "finalize-v2: improvements generation failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err) });
@@ -4396,16 +4391,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
             const tailGapMs = totalAudioMs - lastProcessedMs;
 
             if (tailGapMs > 30_000) {
-              console.log(
-                `[incremental-v1] tail gap detected: ${tailGapMs}ms unprocessed ` +
-                `(total=${totalAudioMs}ms, lastProcessed=${lastProcessedMs}ms), ` +
-                `running tail chunk for session=${sessionId}`
-              );
+              log("info", "incremental-v1: tail gap detected, running tail chunk", { sessionId, action: "incremental", tailGapMs, totalAudioMs, lastProcessedMs });
               // 运行一次额外的 process-chunk 来覆盖尾部音频
               try {
                 await this.runIncrementalJob(sessionId);
               } catch (tailErr) {
-                console.warn(`[incremental-v1] tail chunk failed (non-fatal): ${getErrorMessage(tailErr)}`);
+                log("warn", "incremental-v1: tail chunk failed (non-fatal)", { sessionId, action: "incremental", error: getErrorMessage(tailErr) });
               }
             }
           }
@@ -4450,11 +4441,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           const tag = `tier2_${sessionId}_${Date.now()}`;
           await this.ctx.storage.put(STORAGE_KEY_TIER2_ALARM_TAG, tag);
           await this.ctx.storage.setAlarm(Date.now() + 2_000);
-          console.log(`[finalize-v2] tier2 scheduled for session=${sessionId}`);
+          log("info", "finalize-v2: tier2 scheduled", { sessionId, action: "tier2" });
         } catch (tier2ScheduleErr) {
-          console.warn(
-            `[finalize-v2] failed to schedule tier2 (non-fatal): ${getErrorMessage(tier2ScheduleErr)}`
-          );
+          log("warn", "finalize-v2: failed to schedule tier2 (non-fatal)", { sessionId, action: "tier2", error: getErrorMessage(tier2ScheduleErr) });
         }
       }
     } catch (error) {
@@ -4898,6 +4887,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
         httpMetadata: { contentType: "application/json" }
       });
 
+      // D1: update session metadata with Tier 2 refined results
+      if (this.env.DB) {
+        persistSessionToD1(this.env.DB, sessionId, tier2ResultV2, resultKey).catch(err => {
+          log("warn", "tier2: D1 persist failed (non-blocking)", { component: "tier2", session_id: sessionId, error: getErrorMessage(err) });
+        });
+      }
+
       // Update feedback cache
       const cache = await this.loadFeedbackCache(sessionId);
       cache.updated_at = tier2FinalizedAt;
@@ -5038,7 +5034,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       });
 
       if (rangeKeys.length === 0) {
-        console.warn(`[incremental] no chunks found for range [${decision.startMs},${decision.endMs}) session=${sessionId}`);
+        log("warn", "incremental: no chunks found for range", { sessionId, action: "incremental", startMs: decision.startMs, endMs: decision.endMs });
         await this.updateIncrementalStatus({
           status: "recording",
           increments_failed: status.increments_failed + 1,
@@ -5150,13 +5146,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         error: null
       });
 
-      console.log(
-        `[incremental] increment ${decision.incrementIndex} completed for session=${sessionId}` +
-        ` speakers=${parsed.speakersDetected} utterances=${parsed.utterances.length}`
-      );
+      log("info", "incremental: increment completed", { sessionId, action: "incremental", incrementIndex: decision.incrementIndex, speakersDetected: parsed.speakersDetected, utteranceCount: parsed.utterances.length });
     } catch (err) {
       const message = getErrorMessage(err);
-      console.warn(`[incremental] increment ${decision.incrementIndex} failed (non-fatal) session=${sessionId}: ${message}`);
+      log("warn", "incremental: increment failed (non-fatal)", { sessionId, action: "incremental", incrementIndex: decision.incrementIndex, error: message });
       await this.updateIncrementalStatus({
         status: "recording",
         increments_failed: status.increments_failed + 1,
@@ -5209,7 +5202,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       allChunkKeys.sort();
 
       if (allChunkKeys.length === 0) {
-        console.warn(`[incremental] finalize: no audio chunks found for session=${sessionId}`);
+        log("warn", "incremental: finalize found no audio chunks", { sessionId, action: "incremental_finalize" });
         await this.updateIncrementalStatus({ status: "failed", error: "no audio chunks" });
         return false;
       }
@@ -5473,7 +5466,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
             await this.scheduleIncrementalAlarm(sessionId);
           }
         })().catch((err) => {
-          console.warn(`[incremental] scheduling check failed (non-fatal) session=${sessionId}: ${getErrorMessage(err)}`);
+          log("warn", "incremental: scheduling check failed (non-fatal)", { sessionId, action: "incremental", error: getErrorMessage(err) });
         })
       );
     }
@@ -5662,7 +5655,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
             if (src === "acs-teams" || src === "none") {
               this.captionSource = src;
               this.ctx.storage.put(STORAGE_KEY_CAPTION_SOURCE, src).catch((err) => {
-                console.warn(`[caption-persist] captionSource flush failed: ${getErrorMessage(err)}`);
+                log("warn", "caption-persist: captionSource flush failed", { sessionId, action: "caption_persist", error: getErrorMessage(err) });
               });
             }
             return;
@@ -5725,7 +5718,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(headerRole, "mixed");
       } catch (error) {
-        console.error("ingest-ws stream role parse error:", error);
+        log("error", "ingest-ws: stream role parse error", { sessionId, action: "ingest_ws", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       return this.handleWebSocketRequest(request, sessionId, streamRole);
@@ -5810,7 +5803,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<SessionConfigRequest>(request);
       } catch (error) {
-        console.error("config request parse error:", error);
+        log("error", "config: request parse error", { sessionId, action: "config", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 
@@ -5887,7 +5880,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
         this.ctx.waitUntil(
           this.maybeRefreshFeedbackCache(sessionId, true).catch((error) => {
-            console.error(`feedback cache refresh after config failed session=${sessionId}:`, error);
+            log("error", "feedback cache refresh after config failed", { sessionId, action: "config", error: getErrorMessage(error) });
           })
         );
 
@@ -5905,7 +5898,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<EnrollmentStartRequest>(request);
       } catch (error) {
-        console.error("enrollment-start request parse error:", error);
+        log("error", "enrollment-start: request parse error", { sessionId, action: "enrollment_start", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       return this.enqueueMutation(async () => {
@@ -5991,7 +5984,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<typeof payload>(request);
       } catch (error) {
-        console.error("enrollment-profiles request parse error:", error);
+        log("error", "enrollment-profiles: request parse error", { sessionId, action: "enrollment_profiles", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       if (!Array.isArray(payload.participant_profiles) || payload.participant_profiles.length === 0) {
@@ -6046,7 +6039,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<Record<string, unknown>>(request);
       } catch (error) {
-        console.error("memos request parse error:", error);
+        log("error", "memos: request parse error", { sessionId, action: "memos", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       return this.enqueueMutation(async () => {
@@ -6057,7 +6050,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         try {
           item = parseMemoPayload(payload, { memoId, createdAtMs: nowMs });
         } catch (error) {
-          console.error("memos payload parse error:", error);
+          log("error", "memos: payload parse error", { sessionId, action: "memos", error: getErrorMessage(error) });
           return badRequest("Request processing failed");
         }
         memos.push(item);
@@ -6147,7 +6140,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<FeedbackRegenerateClaimRequest>(request);
       } catch (error) {
-        console.error("feedback-regenerate-claim request parse error:", error);
+        log("error", "feedback-regenerate-claim: request parse error", { sessionId, action: "feedback_regenerate_claim", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       const personKey = String(payload.person_key || "").trim();
@@ -6305,7 +6298,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<FeedbackClaimEvidenceRequest>(request);
       } catch (error) {
-        console.error("feedback-claim-evidence request parse error:", error);
+        log("error", "feedback-claim-evidence: request parse error", { sessionId, action: "feedback_claim_evidence", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       const personKey = String(payload.person_key || "").trim();
@@ -6436,7 +6429,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<Record<string, unknown>>(request);
       } catch (error) {
-        console.error("speaker-logs request parse error:", error);
+        log("error", "speaker-logs: request parse error", { sessionId, action: "speaker_logs", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       return this.enqueueMutation(async () => {
@@ -6446,7 +6439,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         try {
           parsed = parseSpeakerLogsPayload(payload, now);
         } catch (error) {
-          console.error("speaker-logs payload parse error:", error);
+          log("error", "speaker-logs: payload parse error", { sessionId, action: "speaker_logs", error: getErrorMessage(error) });
           return badRequest("Request processing failed");
         }
         const merged = mergeSpeakerLogs(current, parsed);
@@ -6511,7 +6504,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<ClusterMapRequest>(request);
       } catch (error) {
-        console.error("cluster-map request parse error:", error);
+        log("error", "cluster-map: request parse error", { sessionId, action: "cluster_map", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
       const streamRole = parseStreamRole(payload.stream_role ?? "students", "students");
@@ -6648,7 +6641,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         try {
           filteredRole = parseStreamRole(streamRoleRaw, "mixed");
         } catch (error) {
-          console.error("events stream role parse error:", error);
+          log("error", "events: stream role parse error", { sessionId, action: "events", error: getErrorMessage(error) });
           return badRequest("Request processing failed");
         }
       }
@@ -6676,7 +6669,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        console.error("utterances stream role parse error:", error);
+        log("error", "utterances: stream role parse error", { sessionId, action: "utterances", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 
@@ -6721,7 +6714,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        console.error("asr-run stream role parse error:", error);
+        log("error", "asr-run: stream role parse error", { sessionId, action: "asr_run", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 
@@ -6740,7 +6733,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        console.error("asr-reset stream role parse error:", error);
+        log("error", "asr-reset: stream role parse error", { sessionId, action: "asr_reset", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 
@@ -6823,7 +6816,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         streamRole = parseStreamRole(url.searchParams.get("stream_role"), "mixed");
       } catch (error) {
-        console.error("resolve stream role parse error:", error);
+        log("error", "resolve: stream role parse error", { sessionId, action: "resolve", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 
@@ -6840,7 +6833,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<ResolveRequest>(request);
       } catch (error) {
-        console.error("resolve request parse error:", error);
+        log("error", "resolve: request parse error", { sessionId, action: "resolve", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 
@@ -6867,7 +6860,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           resolveWarnings = resolveCall.warnings;
           resolveTimeline = resolveCall.timeline;
         } catch (error) {
-          console.error(`inference resolve failed session=${sessionId}:`, error);
+          log("error", "inference resolve failed", { sessionId, action: "resolve", error: getErrorMessage(error) });
           return jsonResponse({ detail: "Speaker resolution temporarily unavailable" }, 502);
         }
 
@@ -6920,7 +6913,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         payload = await readJson<FinalizeRequest>(request);
       } catch (error) {
-        console.error("finalize request parse error:", error);
+        log("error", "finalize: request parse error", { sessionId, action: "finalize", error: getErrorMessage(error) });
         return badRequest("Request processing failed");
       }
 

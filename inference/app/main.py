@@ -6,6 +6,7 @@ import hmac
 import logging
 import time
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,7 +93,24 @@ rate_limiter = (
     if settings.rate_limit_enabled
     else None
 )
-app = FastAPI(title=settings.app_name, version="0.1.0")
+
+_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Expand asyncio thread pool so concurrent SV model calls don't starve other endpoints.
+    asyncio.get_running_loop().set_default_executor(_thread_pool)
+    # Log ASR backend info at startup. Model is lazy-loaded on first transcribe call.
+    try:
+        asr = runtime.asr_backend
+        logger.info("ASR backend ready: backend=%s, device=%s, model=%s", asr.backend, asr.device, asr.model_size)
+    except Exception as exc:
+        logger.warning("ASR backend info unavailable: %s", exc)
+    yield
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -131,25 +149,6 @@ if _prom_available:
         ["method", "endpoint"],
         buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
     )
-
-_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-
-
-@app.on_event("startup")
-async def _expand_thread_pool() -> None:
-    """Expand asyncio thread pool so concurrent SV model calls don't starve other endpoints."""
-    asyncio.get_running_loop().set_default_executor(_thread_pool)
-
-
-@app.on_event("startup")
-async def _warmup_asr() -> None:
-    """Log ASR backend info at startup. Model is lazy-loaded on first transcribe call."""
-    try:
-        asr = runtime.asr_backend
-        logger.info("ASR backend ready: backend=%s, device=%s, model=%s", asr.backend, asr.device, asr.model_size)
-    except Exception as exc:
-        logger.warning("ASR backend info unavailable: %s", exc)
-
 
 @app.middleware("http")
 async def prometheus_metrics(request: Request, call_next: Callable) -> Response:
