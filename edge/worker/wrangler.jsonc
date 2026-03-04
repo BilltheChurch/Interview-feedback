@@ -78,11 +78,16 @@
     }
   ],
 
+  // ── D1 Database (session metadata index) ────────────────────────────────
+  // Stores lightweight metadata; full results + audio live in R2.
+  // Setup: run `./scripts/deploy-d1.sh` to create the database and migrate.
+  // Then replace database_id below with the value printed by that script.
+  // Migration: npx wrangler d1 execute chorus-meta --file=migrations/0001_init.sql --remote
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "chorus-meta",
-      "database_id": "REPLACE_AFTER_CREATE"
+      "database_id": "REPLACE_AFTER_CREATE"   // run ./scripts/deploy-d1.sh to get this value
     }
   ],
 
@@ -110,11 +115,12 @@
           "bucket_name": "interview-feedback-results-staging"
         }
       ],
+      // Staging D1 — run ./scripts/deploy-d1.sh to get the staging database_id
       "d1_databases": [
         {
           "binding": "DB",
           "database_name": "chorus-meta-staging",
-          "database_id": "REPLACE_AFTER_CREATE"
+          "database_id": "REPLACE_AFTER_CREATE"   // run ./scripts/deploy-d1.sh to get this value
         }
       ]
     }
