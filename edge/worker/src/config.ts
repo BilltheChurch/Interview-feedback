@@ -768,9 +768,9 @@ export function historyObjectKey(sessionId: string, finalizedAtMs: number): stri
 export function chunkObjectKey(sessionId: string, streamRole: StreamRole, seq: number): string {
   const seqPart = String(seq).padStart(8, "0");
   if (streamRole === "mixed") {
-    return `sessions/${safeObjectSegment(sessionId)}/chunks/${seqPart}.pcm`;
+    return `chunks/${safeObjectSegment(sessionId)}/${seqPart}.pcm`;
   }
-  return `sessions/${safeObjectSegment(sessionId)}/chunks/${streamRole}/${seqPart}.pcm`;
+  return `chunks/${safeObjectSegment(sessionId)}/${streamRole}/${seqPart}.pcm`;
 }
 
 export async function readJson<T>(request: Request): Promise<T> {

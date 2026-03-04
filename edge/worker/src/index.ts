@@ -520,7 +520,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
     // Phase 1: Delete audio chunks after AUDIO_RETENTION_HOURS
     if (ageMs > audioRetentionMs) {
-      const chunksPrefix = `${sessionPrefix}/chunks/`;
+      const sessionId = sessionPrefix.replace(/^sessions\//, "");
+      const chunksPrefix = `chunks/${sessionId}/`;
       let cursor: string | undefined;
       let deletedCount = 0;
       do {

@@ -70,8 +70,7 @@ export async function runIncrementalJob(sessionId: string, ctx: IncrementalConte
   });
 
   try {
-    const sessionPrefix = `sessions/${sessionId}`;
-    const chunksPrefix = `${sessionPrefix}/chunks/`;
+    const chunksPrefix = `chunks/${sessionId}/`;
 
     const allChunkKeys: string[] = [];
     let cursor: string | undefined;
@@ -263,8 +262,7 @@ export async function runIncrementalFinalize(
 
     await updateIncrementalStatus({ status: "finalizing" });
 
-    const sessionPrefix = `sessions/${sessionId}`;
-    const chunksPrefix = `${sessionPrefix}/chunks/`;
+    const chunksPrefix = `chunks/${sessionId}/`;
     const allChunkKeys: string[] = [];
     let cursor: string | undefined;
     do {

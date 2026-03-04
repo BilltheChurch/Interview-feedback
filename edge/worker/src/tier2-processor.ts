@@ -133,7 +133,8 @@ export async function runTier2Job(sessionId: string, ctx: Tier2Context): Promise
       throw new Error("no result key found — tier1 may not have completed");
     }
     const sessionPrefix = resultKey.replace(/\/result_v2\.json$/, "");
-    const chunksPrefix = `${sessionPrefix}/chunks/`;
+    const sessionId = sessionPrefix.replace(/^sessions\//, "");
+    const chunksPrefix = `chunks/${sessionId}/`;
 
     const chunkKeys: string[] = [];
     let cursor: string | undefined;
