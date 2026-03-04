@@ -3,6 +3,7 @@ import {
   persistSessionToD1,
   listSessionsD1,
   getSessionScoresD1,
+  updateSessionPhaseD1,
 } from "../src/d1-helpers";
 import type { ResultV2 } from "../src/types_v2";
 
@@ -441,5 +442,118 @@ describe("getSessionScoresD1", () => {
     await getSessionScoresD1(db, "sess-1");
     expect(stmtMock.all).toHaveBeenCalledOnce();
     expect(stmtMock.run).not.toHaveBeenCalled();
+  });
+});
+
+// ── updateSessionPhaseD1 ─────────────────────────────────────────────────────
+
+describe("updateSessionPhaseD1", () => {
+  function makeRunMock() {
+    const stmtMock = {
+      bind: vi.fn(),
+      run: vi.fn().mockResolvedValue({ success: true }),
+      all: vi.fn(),
+      first: vi.fn(),
+    };
+    stmtMock.bind.mockReturnValue(stmtMock);
+    const db = {
+      prepare: vi.fn().mockReturnValue(stmtMock),
+      batch: vi.fn(),
+      exec: vi.fn(),
+      dump: vi.fn(),
+    } as unknown as D1Database;
+    return { db, stmtMock };
+  }
+
+  it("calls db.prepare and .run() for phase update", async () => {
+    const { db, stmtMock } = makeRunMock();
+    await updateSessionPhaseD1(db, "sess-1", "archived");
+    expect(db.prepare).toHaveBeenCalledOnce();
+    expect(stmtMock.run).toHaveBeenCalledOnce();
+  });
+
+  it("uses archived_at column when phase is 'archived'", async () => {
+    const { db } = makeRunMock();
+    await updateSessionPhaseD1(db, "sess-1", "archived");
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(sql).toContain("archived_at");
+    expect(sql).not.toContain("finalized_at");
+  });
+
+  it("uses finalized_at column for non-archived phases", async () => {
+    const { db } = makeRunMock();
+    await updateSessionPhaseD1(db, "sess-1", "finalized");
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(sql).toContain("finalized_at");
+    expect(sql).not.toContain("archived_at");
+  });
+
+  it("binds phase and sessionId to the statement", async () => {
+    const { db, stmtMock } = makeRunMock();
+    await updateSessionPhaseD1(db, "sess-xyz", "archived");
+    expect(stmtMock.bind).toHaveBeenCalledWith("archived", "sess-xyz");
+  });
+});
+
+// ── listSessionsD1 — order validation ────────────────────────────────────────
+
+describe("listSessionsD1 order validation", () => {
+  function makeOrderMock() {
+    const countStmt = { bind: vi.fn(), all: vi.fn(), run: vi.fn(), first: vi.fn() };
+    countStmt.bind.mockReturnValue(countStmt);
+    const listStmt = { bind: vi.fn(), all: vi.fn(), run: vi.fn(), first: vi.fn() };
+    listStmt.bind.mockReturnValue(listStmt);
+    let call = 0;
+    const db = {
+      prepare: vi.fn().mockImplementation(() => call++ === 0 ? countStmt : listStmt),
+      batch: vi.fn().mockResolvedValue([{ results: [{ total: 0 }] }, { results: [] }]),
+      exec: vi.fn(),
+      dump: vi.fn(),
+    } as unknown as D1Database;
+    return { db };
+  }
+
+  it("uses created_at as default orderBy", async () => {
+    const { db } = makeOrderMock();
+    await listSessionsD1(db, {});
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(sql).toContain("ORDER BY created_at");
+  });
+
+  it("falls back to created_at for invalid orderBy (SQL injection guard)", async () => {
+    const { db } = makeOrderMock();
+    await listSessionsD1(db, { orderBy: "malicious; DROP TABLE sessions" as never });
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(sql).toContain("ORDER BY created_at");
+    expect(sql).not.toContain("malicious");
+  });
+
+  it("allows finalized_at as valid orderBy", async () => {
+    const { db } = makeOrderMock();
+    await listSessionsD1(db, { orderBy: "finalized_at" });
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(sql).toContain("ORDER BY finalized_at");
+  });
+
+  it("allows score_avg as valid orderBy", async () => {
+    const { db } = makeOrderMock();
+    await listSessionsD1(db, { orderBy: "score_avg" });
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(sql).toContain("ORDER BY score_avg");
+  });
+
+  it("defaults orderDir to DESC and accepts ASC", async () => {
+    const { db } = makeOrderMock();
+    await listSessionsD1(db, { orderDir: "ASC" });
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(sql).toContain("ASC");
+  });
+
+  it("falls back to DESC for invalid orderDir", async () => {
+    const { db } = makeOrderMock();
+    await listSessionsD1(db, { orderDir: "INVALID" as never });
+    const sql = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+    expect(sql).toContain("DESC");
+    expect(sql).not.toContain("INVALID");
   });
 });

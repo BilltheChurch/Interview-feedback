@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { runFunAsrDashScope as runFunAsrDashScopeFn } from "./dashscope-asr";
 import {
   attachEvidenceToMemos,
   buildEvidence,
@@ -30,7 +31,6 @@ import {
   type InferenceBackendTimelineItem,
   type InferenceEndpointKey
 } from "./inference_client";
-import { analyzeEventsLocally } from "./local_events_analyzer";
 import {
   decodeBase64ToBytes,
   bytesToBase64,
@@ -90,6 +90,12 @@ import {
 import { buildFinalizePayloadV1 } from "./incremental_v1";
 import type { R2AudioRefV1, RecomputeSegment } from "./incremental_v1";
 import { persistSessionToD1 } from "./d1-helpers";
+import {
+  runIncrementalJob as runIncrementalJobFn,
+  runIncrementalFinalize as runIncrementalFinalizeFn,
+  type IncrementalContext,
+  type IncrementalFinalizeContext
+} from "./incremental-processor";
 
 import {
   loadIngestByStream as loadIngestByStreamFn,
@@ -142,6 +148,36 @@ import {
 } from "./websocket-handler";
 
 import { handleWorkerFetch } from "./router";
+import {
+  runTier2Job as runTier2JobFn,
+  tier2Enabled as tier2EnabledFn,
+  tier2AutoTrigger as tier2AutoTriggerFn,
+  tier2BatchEndpoint as tier2BatchEndpointFn,
+  isTier2Terminal as isTier2TerminalFn,
+  type Tier2Context
+} from "./tier2-processor";
+import {
+  runFinalizeV2Job as runFinalizeV2JobFn,
+  triggerImprovementGenerationImpl,
+  type FinalizeJobContext,
+} from "./finalize-orchestrator";
+import {
+  maybeRefreshFeedbackCache as maybeRefreshFeedbackCacheFn,
+  type FeedbackCacheRefreshContext,
+} from "./feedback-cache-refresh";
+import {
+  callInferenceWithFailover as callInferenceWithFailoverFn,
+  invokeInferenceResolve as invokeInferenceResolveFn,
+  invokeInferenceEnroll as invokeInferenceEnrollFn,
+  invokeInferenceAnalysisEvents as invokeInferenceAnalysisEventsFn,
+  invokeInferenceAnalysisReport as invokeInferenceAnalysisReportFn,
+  invokeInferenceSynthesizeReport as invokeInferenceSynthesizeReportFn,
+  invokeInferenceCheckpoint as invokeInferenceCheckpointFn,
+  invokeInferenceMergeCheckpoints as invokeInferenceMergeCheckpointsFn,
+  invokeInferenceRegenerateClaim as invokeInferenceRegenerateClaimFn,
+  invokeInferenceExtractEmbedding as invokeInferenceExtractEmbeddingFn,
+  type InferenceCallContext
+} from "./inference-helpers";
 import {
   buildEvidenceIndex as buildEvidenceIndexFn,
   findClaimInReport as findClaimInReportFn,
@@ -647,35 +683,21 @@ export class MeetingSessionDO extends DurableObject<Env> {
     updateUnassignedEnrollmentByClusterFn(state, clusterId, durationSeconds, this.currentIsoTs());
   }
 
+  private get inferenceCallCtx(): InferenceCallContext {
+    return {
+      inferenceClient: this.inferenceClient,
+      env: this.env,
+      storeDependencyHealth: (h) => this.storeDependencyHealth(h),
+    };
+  }
+
   private async callInferenceWithFailover<T>(params: {
     endpoint: InferenceEndpointKey;
     path: string;
     body: unknown;
     timeoutMs?: number;
-  }): Promise<{
-    data: T;
-    backend: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    try {
-      const response = await this.inferenceClient.callJson<T>({
-        endpoint: params.endpoint,
-        path: params.path,
-        body: params.body,
-        timeoutMs: params.timeoutMs
-      });
-      await this.storeDependencyHealth(response.health);
-      return response;
-    } catch (error) {
-      if (error instanceof InferenceRequestError) {
-        await this.storeDependencyHealth(error.health);
-      } else {
-        await this.storeDependencyHealth(this.inferenceClient.snapshot());
-      }
-      throw error;
-    }
+  }) {
+    return callInferenceWithFailoverFn<T>(this.inferenceCallCtx, params);
   }
 
   private async callInferenceEnroll(
@@ -683,33 +705,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     participantName: string,
     audio: AudioPayload,
     state: SessionState
-  ): Promise<{
-    payload: InferenceEnrollResponse;
-    backend: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const enrollPath = this.env.INFERENCE_ENROLL_PATH ?? "/speaker/enroll";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS);
-    const response = await this.callInferenceWithFailover<InferenceEnrollResponse>({
-      endpoint: "enroll",
-      path: enrollPath,
-      timeoutMs,
-      body: {
-        session_id: sessionId,
-        participant_name: participantName,
-        audio,
-        state
-      } satisfies InferenceEnrollRequest
-    });
-    return {
-      payload: response.data,
-      backend: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  ) {
+    return invokeInferenceEnrollFn(this.inferenceCallCtx, sessionId, participantName, audio, state);
   }
 
   /**
@@ -757,17 +754,9 @@ export class MeetingSessionDO extends DurableObject<Env> {
           channels: TARGET_CHANNELS
         };
 
-        const response = await this.callInferenceWithFailover<{ embedding: number[] }>({
-          endpoint: "sv_extract_embedding",
-          path: this.env.INFERENCE_EXTRACT_EMBEDDING_PATH ?? "/sv/extract_embedding",
-          body: {
-            session_id: sessionId,
-            audio: audioPayload
-          },
-          timeoutMs: 10_000
-        });
+        const embeddingData = await invokeInferenceExtractEmbeddingFn(this.inferenceCallCtx, sessionId, audioPayload);
 
-        const embedding = new Float32Array(response.data.embedding);
+        const embedding = new Float32Array(embeddingData.embedding);
         const added = this.embeddingCache.addEmbedding({
           segment_id: segmentId,
           embedding,
@@ -1006,304 +995,26 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async maybeRefreshFeedbackCache(sessionId: string, force = false): Promise<FeedbackCache> {
-    const current = await this.loadFeedbackCache(sessionId);
-    const nowMs = Date.now();
-    const updatedMs = Date.parse(current.updated_at);
-    if (!force && Number.isFinite(updatedMs) && nowMs - updatedMs < FEEDBACK_REFRESH_INTERVAL_MS) {
-      return current;
-    }
-
-    // ── Guard: do not rebuild cache while finalizeV2 is actively running ──
-    // maybeRefreshFeedbackCache uses an audio-only transcript path that is
-    // unaware of caption mode.  If finalizeV2 is in progress it will build
-    // the definitive caption-aware cache; rebuilding here with empty audio
-    // data would produce a broken cache that overwrites the correct one.
-    const v2Status = await this.loadFinalizeV2Status();
-    if (v2Status && (v2Status.status === "running" || v2Status.status === "queued")) {
-      return current;
-    }
-
-    // Rehydrate captionSource from DO storage (survives DO eviction)
-    if (this.captionSource === "none") {
-      const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
-      if (persisted === "acs-teams") this.captionSource = persisted;
-    }
-
-    // ── Guard: caption-mode sessions must NEVER use the audio-only rebuild
-    // path below.  The audio-only transcript builder (buildTranscriptForFeedback)
-    // is unaware of captionBuffer and will produce an empty transcript that
-    // overwrites the correct cache stored by finalizeV2.
-    //
-    // • finalize running/queued → return current (wait for it to finish)
-    // • finalize succeeded/failed → return current (cache already has the result)
-    // • finalize never started (idle) → return current (nothing to rebuild from)
-    if (this.captionSource === "acs-teams") {
-      return current;
-    }
-
-    const totalStart = Date.now();
-    const assembleStart = Date.now();
-    const [stateRaw, events, rawByStream, memos, speakerLogsStored, asrByStream] = await Promise.all([
-      this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
-      this.loadSpeakerEvents(),
-      this.loadUtterancesRawByStream(),
-      this.loadMemos(),
-      this.loadSpeakerLogs(),
-      this.loadAsrByStream()
-    ]);
-    const state = normalizeSessionState(stateRaw);
-    const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
-    const transcript = this.buildTranscriptForFeedback(state, rawByStream, events, speakerLogsStored, diarizationBackend);
-    const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
-    const evidence = buildEvidence({ memos, transcript });
-    const memosWithEvidence = attachEvidenceToMemos(memos, evidence);
-    const memoFirst = buildMemoFirstReport({
-      transcript,
-      memos: memosWithEvidence,
-      evidence,
-      stats
-    });
-    const assembleMs = Date.now() - assembleStart;
-
-    const locale = getSessionLocale(state, this.env);
-    const eventsStart = Date.now();
-    const eventsPayload = {
-      session_id: sessionId,
-      transcript,
-      memos: memosWithEvidence,
-      stats,
-      locale
-    };
-    const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
-    const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
-    const eventsMs = Date.now() - eventsStart;
-
-    let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" = "memo_first";
-    let reportModel: string | null = null;
-    let reportError: string | null = null;
-    let reportBlockingReason: string | null = null;
-    let finalOverall = memoFirst.overall;
-    let finalPerPerson = memoFirst.per_person;
-    let reportTimeline: InferenceBackendTimelineItem[] = [];
-    const reportStart = Date.now();
-    try {
-      const reportResult = await this.invokeInferenceAnalysisReport({
-        session_id: sessionId,
-        transcript,
-        memos: memosWithEvidence,
-        stats,
-        evidence,
-        events: analysisEvents,
-        locale
-      });
-      reportTimeline = reportResult.timeline;
-      const payload = reportResult.data;
-      const candidatePerPerson = Array.isArray(payload?.per_person) ? (payload.per_person as PersonFeedbackItem[]) : [];
-      const candidateOverall = (payload?.overall ?? memoFirst.overall) as unknown;
-      const candidateQuality =
-        payload?.quality && typeof payload.quality === "object" ? (payload.quality as Partial<ReportQualityMeta>) : null;
-      if (candidatePerPerson.length > 0) {
-        const candidateValidation = this.validateClaimEvidenceRefs({
-          evidence,
-          per_person: candidatePerPerson
-        } as ResultV2);
-        if (candidateValidation.valid) {
-          finalPerPerson = candidatePerPerson;
-          finalOverall = candidateOverall;
-          reportSource = "llm_enhanced";
-          const source = String(candidateQuality?.report_source || "").trim();
-          if (source === "llm_failed") {
-            reportSource = "llm_failed";
-          }
-          if (source === "memo_first") {
-            reportSource = "memo_first";
-          }
-          reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
-          reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
-        } else {
-          reportSource = "llm_failed";
-          reportBlockingReason = `analysis/report invalid evidence refs: ${candidateValidation.failures[0] || "unknown"}`;
-        }
-      } else {
-        reportSource = "llm_failed";
-        reportBlockingReason = "analysis/report returned empty per_person";
-      }
-    } catch (error) {
-      reportSource = "llm_failed";
-      reportError = getErrorMessage(error);
-      reportBlockingReason = `analysis/report failed: ${getErrorMessage(error)}`;
-    }
-    const reportMs = Date.now() - reportStart;
-
-    const validateStart = Date.now();
-    const finalValidation = this.validateClaimEvidenceRefs({
-      evidence,
-      per_person: finalPerPerson
-    } as ResultV2);
-    const validation = validatePersonFeedbackEvidence(finalPerPerson);
-    const validationMs = Date.now() - validateStart;
-
-    const unresolvedClusterCount = state.clusters.filter((cluster) => {
-      const bound = state.bindings[cluster.cluster_id];
-      const meta = state.cluster_binding_meta[cluster.cluster_id];
-      return !bound || !meta || !meta.locked;
-    }).length;
-    const totalClusters = state.clusters.length;
-    const unresolvedRatio = totalClusters > 0 ? unresolvedClusterCount / totalClusters : 0;
-    const confidenceLevel: "high" | "medium" | "low" =
-      unresolvedRatio === 0 ? "high" :
-      unresolvedRatio <= 0.25 ? "medium" : "low";
-    const qualityMetrics = this.buildQualityMetrics(transcript, state.capture_by_stream ?? defaultCaptureByStream());
-    const ingestP95Ms =
-      typeof asrByStream.students.ingest_to_utterance_p95_ms === "number"
-        ? asrByStream.students.ingest_to_utterance_p95_ms
-        : null;
-    const gateSeedFailures = [...finalValidation.failures];
-    if (reportSource !== "llm_enhanced") {
-      gateSeedFailures.push(reportBlockingReason || "llm enhanced report unavailable");
-    }
-    const gateEvaluation = this.evaluateFeedbackQualityGates({
-      unknownRatio: qualityMetrics.unknown_ratio,
-      ingestP95Ms,
-      claimValidationFailures: gateSeedFailures
-    });
-    const tentative = confidenceLevel === "low" || !gateEvaluation.passed;
-    const finalizedAt = this.currentIsoTs();
-    const quality: ReportQualityMeta = {
-      ...validation.quality,
-      generated_at: finalizedAt,
-      build_ms: assembleMs + eventsMs + reportMs,
-      validation_ms: validationMs,
-      claim_count: finalValidation.claimCount,
-      invalid_claim_count: finalValidation.invalidCount,
-      needs_evidence_count: finalValidation.needsEvidenceCount,
-      report_source: reportSource,
-      report_model: reportModel,
-      report_degraded: reportSource !== "llm_enhanced",
-      report_error: reportError
-    };
-
-    const backendTimeline: InferenceBackendTimelineItem[] = [
-      ...eventsResult.timeline,
-      ...reportTimeline
-    ];
-    const qualityGateSnapshot = {
-      finalize_success_target: 0.995,
-      students_unknown_ratio_target: 0.25,
-      sv_top1_target: 0.90,
-      echo_reduction_target: 0.8,
-      observed_unknown_ratio: qualityMetrics.unknown_ratio,
-      observed_students_turns: qualityMetrics.students_utterance_count,
-      observed_students_unknown: qualityMetrics.students_unknown_count,
-      observed_echo_suppressed_chunks: qualityMetrics.echo_suppressed_chunks,
-      observed_echo_recent_rate: qualityMetrics.echo_suppression_recent_rate,
-      observed_echo_leak_rate: qualityMetrics.echo_leak_rate,
-      observed_suppression_false_positive_rate: qualityMetrics.suppression_false_positive_rate
-    };
-
-    const result = buildResultV2({
-      sessionId,
-      finalizedAt,
-      tentative,
-      confidenceLevel,
-      unresolvedClusterCount,
-      diarizationBackend,
+    const refreshCtx: FeedbackCacheRefreshContext = {
+      env: this.env,
+      storage: this.ctx.storage,
       captionSource: this.captionSource,
-      transcript,
-      speakerLogs:
-        diarizationBackend === "edge"
-          ? this.buildEdgeSpeakerLogsForFinalize(finalizedAt, speakerLogsStored, state)
-          : this.deriveSpeakerLogsFromTranscript(finalizedAt, transcript, state, speakerLogsStored, "cloud"),
-      stats,
-      memos,
-      evidence,
-      overall: finalOverall,
-      perPerson: finalPerPerson,
-      quality,
-      finalizeJobId: `feedback-open-${crypto.randomUUID()}`,
-      modelVersions: {
-        asr: DASHSCOPE_DEFAULT_MODEL,
-        analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
-        analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report",
-        summary_mode: "memo_first_with_llm_polish"
-      },
-      thresholds: {
-        feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
-        feedback_assemble_budget_ms: FEEDBACK_ASSEMBLE_BUDGET_MS,
-        feedback_events_budget_ms: FEEDBACK_EVENTS_BUDGET_MS,
-        feedback_report_budget_ms: FEEDBACK_REPORT_BUDGET_MS,
-        feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
-        feedback_persist_fetch_budget_ms: FEEDBACK_PERSIST_FETCH_BUDGET_MS
-      },
-      backendTimeline,
-      qualityGateSnapshot,
-      reportPipeline: {
-        mode: "memo_first_with_llm_polish",
-        source: reportSource,
-        llm_attempted: true,
-        llm_success: reportSource === "llm_enhanced",
-        llm_elapsed_ms: reportMs,
-        blocking_reason: reportBlockingReason
-      },
-      qualityGateFailures: gateEvaluation.failures
-    });
-
-    const nextCache: FeedbackCache = {
-      session_id: sessionId,
-      updated_at: finalizedAt,
-      ready: false,
-      person_summary_cache: finalPerPerson,
-      overall_summary_cache: finalOverall,
-      evidence_index_cache: this.buildEvidenceIndex(finalPerPerson),
-      report: result,
-      quality,
-      timings: {
-        assemble_ms: assembleMs,
-        events_ms: eventsMs,
-        report_ms: reportMs,
-        validation_ms: validationMs,
-        persist_ms: 0,
-        total_ms: 0
-      },
-      report_source: reportSource,
-      blocking_reason: reportBlockingReason,
-      quality_gate_passed: false
+      setCaptionSource: (s) => { this.captionSource = s; },
+      loadFeedbackCache: (sid) => this.loadFeedbackCache(sid),
+      storeFeedbackCache: (c) => this.storeFeedbackCache(c),
+      loadFinalizeV2Status: () => this.loadFinalizeV2Status(),
+      loadSpeakerEvents: () => this.loadSpeakerEvents(),
+      loadUtterancesRawByStream: () => this.loadUtterancesRawByStream(),
+      loadMemos: () => this.loadMemos(),
+      loadSpeakerLogs: () => this.loadSpeakerLogs(),
+      loadAsrByStream: () => this.loadAsrByStream(),
+      currentIsoTs: () => this.currentIsoTs(),
+      invokeInferenceAnalysisEvents: (p) => this.invokeInferenceAnalysisEvents(p),
+      invokeInferenceAnalysisReport: (p) => this.invokeInferenceAnalysisReport(p),
+      deriveSpeakerLogsFromTranscript: (...args) => this.deriveSpeakerLogsFromTranscript(...args),
+      buildEdgeSpeakerLogsForFinalize: (...args) => this.buildEdgeSpeakerLogsForFinalize(...args),
     };
-    const persistStart = Date.now();
-    await this.storeFeedbackCache(nextCache);
-    const persistMs = Date.now() - persistStart;
-    const totalMs = Date.now() - totalStart;
-    const meetsBudget =
-      totalMs <= FEEDBACK_TOTAL_BUDGET_MS &&
-      assembleMs <= FEEDBACK_ASSEMBLE_BUDGET_MS &&
-      eventsMs <= FEEDBACK_EVENTS_BUDGET_MS &&
-      reportMs <= FEEDBACK_REPORT_BUDGET_MS &&
-      validationMs <= FEEDBACK_VALIDATE_BUDGET_MS &&
-      persistMs <= FEEDBACK_PERSIST_FETCH_BUDGET_MS;
-    const gatePassed = gateEvaluation.passed && meetsBudget;
-    const budgetReason = meetsBudget
-      ? null
-      : `feedback budgets exceeded (total=${totalMs} assemble=${assembleMs} events=${eventsMs} report=${reportMs} validate=${validationMs} persist=${persistMs})`;
-    nextCache.timings.persist_ms = persistMs;
-    nextCache.timings.total_ms = totalMs;
-    nextCache.ready = gatePassed;
-    nextCache.quality_gate_passed = gatePassed;
-    if (!meetsBudget && nextCache.report) {
-      const failures = Array.isArray(nextCache.report.trace.quality_gate_failures)
-        ? [...nextCache.report.trace.quality_gate_failures]
-        : [];
-      failures.push(
-        `feedback_budget gate failed: total=${totalMs} assemble=${assembleMs} events=${eventsMs} report=${reportMs} validate=${validationMs} persist=${persistMs}`
-      );
-      nextCache.report.trace.quality_gate_failures = failures;
-    }
-    if (!nextCache.ready && !nextCache.blocking_reason) {
-      nextCache.blocking_reason = gateEvaluation.failures[0] || budgetReason || "feedback quality gate failed";
-    } else if (budgetReason) {
-      nextCache.blocking_reason = budgetReason;
-    }
-    await this.storeFeedbackCache(nextCache);
-    return nextCache;
+    return maybeRefreshFeedbackCacheFn(refreshCtx, sessionId, force);
   }
 
   private async loadFinalizeV2Status(): Promise<FinalizeV2Status | null> {
@@ -2032,186 +1743,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return "funASR";
   }
 
-  private async runFunAsrDashScope(wavBytes: Uint8Array, model: string): Promise<{ text: string; latencyMs: number }> {
-    const apiKey = (this.env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim();
-    if (!apiKey) {
-      throw new Error("ALIYUN_DASHSCOPE_API_KEY is missing");
-    }
-
-    const wsUrl = this.env.ASR_WS_URL ?? DASHSCOPE_DEFAULT_WS_URL;
-    const handshakeUrl = toWebSocketHandshakeUrl(wsUrl);
-    const timeoutMs = parseTimeoutMs(this.env.ASR_TIMEOUT_MS ?? "45000");
-    const taskId = `asr-${crypto.randomUUID()}`;
-    const startedAt = Date.now();
-
-    const response = await fetch(handshakeUrl, {
-      method: "GET",
-      headers: {
-        Authorization: `bearer ${apiKey}`,
-        Upgrade: "websocket"
-      }
-    });
-
-    if (response.status !== 101 || !response.webSocket) {
-      throw new Error(`dashscope websocket handshake failed: HTTP ${response.status}`);
-    }
-
-    const ws = response.webSocket;
-    ws.accept();
-
-    let readyResolve: (() => void) | null = null;
-    let readyReject: ((error: Error) => void) | null = null;
-    let finishedResolve: (() => void) | null = null;
-    let finishedReject: ((error: Error) => void) | null = null;
-    let readyDone = false;
-    let finishedDone = false;
-    let latestText = "";
-
-    const readyPromise = new Promise<void>((resolve, reject) => {
-      readyResolve = resolve;
-      readyReject = reject;
-    });
-    const finishedPromise = new Promise<void>((resolve, reject) => {
-      finishedResolve = resolve;
-      finishedReject = reject;
-    });
-
-    const rejectAll = (error: Error): void => {
-      if (!readyDone) {
-        readyDone = true;
-        readyReject?.(error);
-      }
-      if (!finishedDone) {
-        finishedDone = true;
-        finishedReject?.(error);
-      }
-    };
-
-    ws.addEventListener("message", (event) => {
-      if (typeof event.data !== "string") return;
-
-      let payload: unknown;
-      try {
-        payload = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-
-      const messageObject = payload as Record<string, unknown>;
-      const headerObject = (messageObject.header ?? null) as Record<string, unknown> | null;
-      const payloadObject = messageObject.payload ?? null;
-      const eventName = String(headerObject?.event ?? "");
-      if (eventName === "task-started") {
-        if (!readyDone) {
-          readyDone = true;
-          readyResolve?.();
-        }
-        return;
-      }
-
-      if (eventName === "result-generated") {
-        const text = extractFirstString(payloadObject);
-        if (text) {
-          latestText = text;
-        }
-        return;
-      }
-
-      if (eventName === "task-finished") {
-        const text = extractFirstString(payloadObject);
-        if (text) {
-          latestText = text;
-        }
-        if (!finishedDone) {
-          finishedDone = true;
-          finishedResolve?.();
-        }
-        return;
-      }
-
-      if (eventName === "task-failed") {
-        rejectAll(new Error(`dashscope task failed: ${JSON.stringify(payload)}`));
-      }
-    });
-
-    ws.addEventListener("error", () => {
-      rejectAll(new Error("dashscope websocket error"));
-    });
-
-    ws.addEventListener("close", (event) => {
-      if (!finishedDone) {
-        rejectAll(new Error(`dashscope websocket closed early: code=${event.code} reason=${event.reason || "none"}`));
-      }
-    });
-
-    ws.send(
-      JSON.stringify({
-        header: {
-          action: "run-task",
-          task_id: taskId,
-          streaming: "duplex"
-        },
-        payload: {
-          task_group: "audio",
-          task: "asr",
-          function: "recognition",
-          model,
-          input: {},
-          parameters: {
-            format: "wav",
-            sample_rate: TARGET_SAMPLE_RATE
-          }
-        }
-      })
-    );
-
-    const readyTimer = setTimeout(() => {
-      rejectAll(new Error("dashscope task-started timeout"));
-    }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
-    await readyPromise;
-    clearTimeout(readyTimer);
-
-    const streamChunkBytes = parsePositiveInt(this.env.ASR_STREAM_CHUNK_BYTES, 12800);
-    const pacingMs = Number.isFinite(Number(this.env.ASR_SEND_PACING_MS))
-      ? Math.max(0, Number(this.env.ASR_SEND_PACING_MS))
-      : 0;
-    for (let offset = 0; offset < wavBytes.byteLength; offset += streamChunkBytes) {
-      const end = Math.min(offset + streamChunkBytes, wavBytes.byteLength);
-      ws.send(wavBytes.slice(offset, end));
-      if (pacingMs > 0) {
-        await sleep(pacingMs);
-      }
-    }
-
-    ws.send(
-      JSON.stringify({
-        header: {
-          action: "finish-task",
-          task_id: taskId,
-          streaming: "duplex"
-        },
-        payload: {
-          input: {}
-        }
-      })
-    );
-
-    const finishedTimer = setTimeout(() => {
-      rejectAll(new Error("dashscope task-finished timeout"));
-    }, timeoutMs);
-    await finishedPromise;
-    clearTimeout(finishedTimer);
-
-    try {
-      ws.close(1000, "done");
-    } catch {
-      // ignore
-    }
-
-    return {
-      text: latestText.trim(),
-      latencyMs: Date.now() - startedAt
-    };
+  private async runFunAsrDashScope(wavBytes: Uint8Array, model: string) {
+    return runFunAsrDashScopeFn(this.env, wavBytes, model);
   }
 
   private async invokeInferenceResolve(
@@ -2219,33 +1752,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     audio: AudioPayload,
     asrText: string | null,
     currentState: SessionState
-  ): Promise<{
-    resolved: ResolveResponse;
-    backend: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const resolvePath = this.env.INFERENCE_RESOLVE_PATH ?? "/speaker/resolve";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS);
-    const response = await this.callInferenceWithFailover<ResolveResponse>({
-      endpoint: "resolve",
-      path: resolvePath,
-      timeoutMs,
-      body: {
-        session_id: sessionId,
-        audio,
-        asr_text: asrText,
-        state: currentState
-      }
-    });
-    return {
-      resolved: response.data,
-      backend: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  ) {
+    return invokeInferenceResolveFn(this.inferenceCallCtx, sessionId, audio, asrText, currentState);
   }
 
   private async autoResolveStudentsUtterance(
@@ -2661,167 +2169,24 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return next;
   }
 
-  private async invokeInferenceAnalysisEvents(payload: Record<string, unknown>): Promise<{
-    events: Record<string, unknown>[];
-    backend_used: "primary" | "secondary" | "local";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-    fallback_reason: string | null;
-  }> {
-    const path = this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
-    try {
-      const response = await this.callInferenceWithFailover<{ events?: Record<string, unknown>[] }>({
-        endpoint: "analysis_events",
-        path,
-        timeoutMs,
-        body: payload
-      });
-      const events = Array.isArray(response.data?.events) ? response.data.events : [];
-      return {
-        events,
-        backend_used: response.backend,
-        degraded: response.degraded,
-        warnings: response.warnings,
-        timeline: response.timeline,
-        fallback_reason: null
-      };
-    } catch (error) {
-      if (!(error instanceof InferenceRequestError)) {
-        throw error;
-      }
-      const sessionId = String(payload.session_id ?? "unknown-session");
-      const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
-      const memos = Array.isArray(payload.memos) ? payload.memos : [];
-      const stats = Array.isArray(payload.stats) ? payload.stats : [];
-      const localEvents = analyzeEventsLocally({
-        sessionId,
-        transcript: transcript as Array<{
-          utterance_id: string;
-          stream_role: "mixed" | "teacher" | "students";
-          cluster_id?: string | null;
-          speaker_name?: string | null;
-          text: string;
-          start_ms: number;
-          end_ms: number;
-          duration_ms: number;
-        }>,
-        memos: memos as Array<{
-          memo_id: string;
-          created_at_ms: number;
-          type: "observation" | "evidence" | "question" | "decision" | "score";
-          text: string;
-          anchors?: { mode: "time" | "utterance"; time_range_ms?: [number, number]; utterance_ids?: string[] };
-        }>,
-        stats: stats as Array<{ speaker_key: string; talk_time_ms: number; turns: number }>
-      });
-      const warning = `analysis/events fallback local analyzer: ${error.message}`;
-      return {
-        events: localEvents as unknown as Record<string, unknown>[],
-        backend_used: "local",
-        degraded: true,
-        warnings: [warning],
-        timeline: error.timeline,
-        fallback_reason: "analysis_events_all_backends_failed"
-      };
-    }
+  private async invokeInferenceAnalysisEvents(payload: Record<string, unknown>) {
+    return invokeInferenceAnalysisEventsFn(this.inferenceCallCtx, payload);
   }
 
-  private async invokeInferenceAnalysisReport(payload: Record<string, unknown>): Promise<{
-    data: Record<string, unknown>;
-    backend_used: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const path = this.env.INFERENCE_REPORT_PATH ?? "/analysis/report";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
-    const response = await this.callInferenceWithFailover<Record<string, unknown>>({
-      endpoint: "analysis_report",
-      path,
-      timeoutMs,
-      body: payload
-    });
-    return {
-      data: response.data,
-      backend_used: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  private async invokeInferenceAnalysisReport(payload: Record<string, unknown>) {
+    return invokeInferenceAnalysisReportFn(this.inferenceCallCtx, payload);
   }
 
-  private async invokeInferenceSynthesizeReport(payload: SynthesizeRequestPayload): Promise<{
-    data: Record<string, unknown>;
-    backend_used: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const path = this.env.INFERENCE_SYNTHESIZE_PATH ?? "/analysis/synthesize";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "45000");
-    const response = await this.callInferenceWithFailover<Record<string, unknown>>({
-      endpoint: "analysis_synthesize",
-      path,
-      timeoutMs,
-      body: payload
-    });
-    return {
-      data: response.data,
-      backend_used: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  private async invokeInferenceSynthesizeReport(payload: SynthesizeRequestPayload) {
+    return invokeInferenceSynthesizeReportFn(this.inferenceCallCtx, payload);
   }
 
-  private async invokeInferenceCheckpoint(payload: CheckpointRequestPayload): Promise<{
-    data: CheckpointResult;
-    backend_used: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const path = this.env.INFERENCE_CHECKPOINT_PATH ?? "/analysis/checkpoint";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "30000");
-    const response = await this.callInferenceWithFailover<CheckpointResult>({
-      endpoint: "analysis_checkpoint",
-      path,
-      timeoutMs,
-      body: payload
-    });
-    return {
-      data: response.data,
-      backend_used: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  private async invokeInferenceCheckpoint(payload: CheckpointRequestPayload) {
+    return invokeInferenceCheckpointFn(this.inferenceCallCtx, payload);
   }
 
-  private async invokeInferenceMergeCheckpoints(payload: MergeCheckpointsRequestPayload): Promise<{
-    data: Record<string, unknown>;
-    backend_used: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const path = this.env.INFERENCE_MERGE_CHECKPOINTS_PATH ?? "/analysis/merge-checkpoints";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "45000");
-    const response = await this.callInferenceWithFailover<Record<string, unknown>>({
-      endpoint: "analysis_merge_checkpoints",
-      path,
-      timeoutMs,
-      body: payload
-    });
-    return {
-      data: response.data,
-      backend_used: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  private async invokeInferenceMergeCheckpoints(payload: MergeCheckpointsRequestPayload) {
+    return invokeInferenceMergeCheckpointsFn(this.inferenceCallCtx, payload);
   }
 
   private async loadCheckpoints(): Promise<CheckpointResult[]> {
@@ -2933,28 +2298,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
-  private async invokeInferenceRegenerateClaim(payload: InferenceRegenerateClaimRequest): Promise<{
-    data: InferenceRegenerateClaimResponse;
-    backend_used: "primary" | "secondary";
-    degraded: boolean;
-    warnings: string[];
-    timeline: InferenceBackendTimelineItem[];
-  }> {
-    const path = this.env.INFERENCE_REGENERATE_CLAIM_PATH ?? "/analysis/regenerate-claim";
-    const timeoutMs = parseTimeoutMs(this.env.INFERENCE_TIMEOUT_MS ?? "15000");
-    const response = await this.callInferenceWithFailover<InferenceRegenerateClaimResponse>({
-      endpoint: "analysis_regenerate_claim",
-      path,
-      timeoutMs,
-      body: payload
-    });
-    return {
-      data: response.data,
-      backend_used: response.backend,
-      degraded: response.degraded,
-      warnings: response.warnings,
-      timeline: response.timeline
-    };
+  private async invokeInferenceRegenerateClaim(payload: InferenceRegenerateClaimRequest) {
+    return invokeInferenceRegenerateClaimFn(this.inferenceCallCtx, payload);
   }
 
   private deriveSpeakerLogsFromTranscript(
@@ -2987,1387 +2332,78 @@ export class MeetingSessionDO extends DurableObject<Env> {
     metadata: Record<string, unknown>,
     mode: 'full' | 'report-only' = 'full'
   ): Promise<void> {
-    const finalizeWarnings: string[] = [];
-    const backendTimeline: InferenceBackendTimelineItem[] = [];
-    let finalizeBackendUsed: FinalizeV2Status["backend_used"] = "primary";
-    let finalizeDegraded = false;
-
-    // Global timeout guard — abort all operations if finalization exceeds budget
-    const globalTimeoutMs = this.finalizeTimeoutMs();
-    const abortController = new AbortController();
-    const globalTimer = setTimeout(() => {
-      abortController.abort(new Error(`Finalization exceeded global timeout of ${globalTimeoutMs}ms`));
-    }, globalTimeoutMs);
-
-    // Rehydrate captionSource from DO storage in case DO was evicted
-    if (this.captionSource === "none") {
-      const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
-      if (persisted === "acs-teams") this.captionSource = persisted;
-    }
-
-    const startedAt = this.currentIsoTs();
-    await this.updateFinalizeV2Status(jobId, {
-      status: "running",
-      stage: "freeze",
-      progress: 5,
-      started_at: startedAt,
-      warnings: [],
-      degraded: false,
-      backend_used: "primary"
-    });
-    await this.setFinalizeLock(true);
-
-    try {
-      await this.ensureFinalizeJobActive(jobId);
-      const timeoutMs = this.finalizeTimeoutMs();
-      const ingestByStream = await this.loadIngestByStream(sessionId);
-      const cutoff = {
-        mixed: ingestByStream.mixed.last_seq,
-        teacher: ingestByStream.teacher.last_seq,
-        students: ingestByStream.students.last_seq
-      };
-
-      // Rehydrate captionSource from DO storage if still default (DO was evicted)
-      if (this.captionSource === "none") {
-        const persisted = await this.ctx.storage.get<string>(STORAGE_KEY_CAPTION_SOURCE);
-        if (persisted === "acs-teams") this.captionSource = persisted;
-      }
-      // Rehydrate captionBuffer from DO storage if empty (DO was evicted or re-generate)
-      if (this.captionSource === "acs-teams" && this.captionBuffer.length === 0) {
-        const stored = await this.ctx.storage.get<CaptionEvent[]>(STORAGE_KEY_CAPTION_BUFFER);
-        if (Array.isArray(stored) && stored.length > 0) {
-          this.captionBuffer = stored;
-          log("info", "finalize-v2: restored captions from DO storage", { component: "finalize-v2", caption_count: stored.length });
-        }
-      }
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      // ── report-only mode: skip audio stages, reload existing transcript from R2 ──
-      if (mode === 'report-only') {
-        await this.updateFinalizeV2Status(jobId, {
-          status: "running",
-          stage: "reconcile",
-          progress: 42,
-          started_at: startedAt,
-          warnings: [],
-          degraded: false,
-          backend_used: "primary"
-        });
-        await this.setFinalizeLock(true);
-
-        try {
-          // Load existing ResultV2 from R2
-          const existingKey = resultObjectKeyV2(sessionId);
-          const existingObj = await this.env.RESULT_BUCKET.get(existingKey);
-          if (!existingObj) {
-            throw new Error("report-only: no existing ResultV2 in R2");
-          }
-          const existingResult = JSON.parse(await existingObj.text()) as ResultV2;
-
-          // Extract previously computed data
-          const transcript = existingResult.transcript;
-          const speakerLogs = existingResult.speaker_logs;
-          const stats = existingResult.stats;
-          const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-          const memos = await this.loadMemos();
-          const locale = getSessionLocale(state, this.env);
-
-          // Merge any new metadata memos
-          if (Array.isArray((metadata as Record<string, unknown>)?.memos)) {
-            const incomingMemos = (metadata as Record<string, unknown>).memos as Array<Record<string, unknown>>;
-            const existingIds = new Set(memos.map((m) => m.memo_id));
-            for (const raw of incomingMemos) {
-              const memoId = typeof raw.memo_id === "string" ? raw.memo_id : `m_meta_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-              if (existingIds.has(memoId)) continue;
-              memos.push({
-                memo_id: memoId,
-                created_at_ms: typeof raw.created_at_ms === "number" ? raw.created_at_ms : Date.now(),
-                author_role: "teacher",
-                type: (["observation", "evidence", "question", "decision", "score"].includes(raw.type as string) ? raw.type : "observation") as MemoItem["type"],
-                tags: Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === "string") : [],
-                text: typeof raw.text === "string" ? raw.text : "",
-                stage: typeof raw.stage === "string" ? raw.stage : undefined,
-                stage_index: typeof raw.stage_index === "number" ? raw.stage_index : undefined,
-              });
-              existingIds.add(memoId);
-            }
-            await this.storeMemos(memos);
-          }
-
-          // Re-run events → report → persist (reuse transcript + stats)
-          // Jump to events stage
-          await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 55 });
-          await this.ensureFinalizeJobActive(jobId);
-
-          const knownSpeakers = stats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
-          const memoBindings = extractMemoNames(memos, knownSpeakers);
-          const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
-          const enrichedMemos = addStageMetadata(memos, configStages);
-          let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
-          const enrichedEvidence = enrichEvidencePack(transcript, stats);
-          evidence = [...evidence, ...enrichedEvidence];
-
-          const legacyEvidence = buildEvidence({ memos, transcript });
-          const memosWithEvidence = attachEvidenceToMemos(memos, legacyEvidence);
-
-          const eventsPayload = {
-            session_id: sessionId,
-            transcript,
-            memos: memosWithEvidence,
-            stats,
-            locale
-          };
-          const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
-          const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
-          if (eventsResult.warnings.length > 0) finalizeWarnings.push(...eventsResult.warnings);
-          if (eventsResult.degraded) finalizeDegraded = true;
-          finalizeBackendUsed = eventsResult.backend_used === "local" ? "local" : eventsResult.backend_used;
-
-          // Report stage
-          await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 75 });
-          await this.ensureFinalizeJobActive(jobId);
-
-          const audioDurationMs = calcTranscriptDurationMs(transcript);
-          const statsObservations = generateStatsObservations(stats, audioDurationMs);
-          const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats });
-          let finalOverall = memoFirstReport.overall;
-          let finalPerPerson = memoFirstReport.per_person;
-          let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
-          let reportModel: string | null = null;
-          let reportError: string | null = null;
-          let reportBlockingReason: string | null = null;
-          let pipelineMode: "memo_first_with_llm_polish" | "llm_core_synthesis" = "memo_first_with_llm_polish";
-
-          // Try LLM synthesis
-          const storedCheckpoints = await this.loadCheckpoints();
-          try {
-            const fullConfig = (state.config ?? {}) as Record<string, unknown>;
-            const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
-              sessionConfig: {
-                mode: fullConfig.mode as "1v1" | "group" | undefined,
-                interviewer_name: fullConfig.interviewer_name as string | undefined,
-                position_title: fullConfig.position_title as string | undefined,
-                company_name: fullConfig.company_name as string | undefined,
-                stages: configStages,
-                free_form_notes: fullConfig.free_form_notes as string | undefined,
-                rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
-              },
-            });
-
-            // Augment sessionContext with dimension presets from config
-            if (sessionContext) {
-              const it = fullConfig.interview_type;
-              if (typeof it === "string" && it) sessionContext.interview_type = it;
-              const dp = fullConfig.dimension_presets;
-              if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
-            }
-
-            const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
-            const synthPayload = buildSynthesizePayload({
-              sessionId,
-              transcript,
-              memos: enrichedMemos,
-              evidence,
-              stats,
-              events: analysisEvents.map((evt: Record<string, unknown>) => ({
-                event_id: String(evt.event_id ?? ""),
-                event_type: String(evt.event_type ?? ""),
-                actor: evt.actor != null ? String(evt.actor) : null,
-                target: evt.target != null ? String(evt.target) : null,
-                time_range_ms: Array.isArray(evt.time_range_ms) ? (evt.time_range_ms as number[]) : [],
-                utterance_ids: Array.isArray(evt.utterance_ids) ? (evt.utterance_ids as string[]) : [],
-                quote: evt.quote != null ? String(evt.quote) : null,
-                confidence: typeof evt.confidence === "number" ? evt.confidence : 0.5,
-                rationale: evt.rationale != null ? String(evt.rationale) : null,
-              })),
-              bindings: memoBindings,
-              rubric,
-              sessionContext,
-              freeFormNotes,
-              historical: [],
-              stages: contextStages.length > 0 ? contextStages : configStages,
-              locale,
-              nameAliases: configNameAliases,
-              statsObservations,
-            });
-
-            const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
-            const synthData = synthResult.data;
-            if (synthResult.warnings.length > 0) finalizeWarnings.push(...synthResult.warnings);
-            if (synthResult.degraded) finalizeDegraded = true;
-
-            const candidatePerPerson = Array.isArray(synthData?.per_person) ? (synthData.per_person as PersonFeedbackItem[]) : [];
-            if (candidatePerPerson.length > 0) {
-              const { sanitized, strippedCount } = this.sanitizeClaimEvidenceRefs(candidatePerPerson, evidence);
-              if (strippedCount > 0) finalizeWarnings.push(`sanitized ${strippedCount} claims with empty/invalid evidence_refs`);
-              const validation = this.validateClaimEvidenceRefs({ evidence, per_person: sanitized } as ResultV2);
-              if (validation.valid) {
-                finalPerPerson = sanitized;
-                finalOverall = synthData?.overall ?? finalOverall;
-                reportSource = "llm_synthesized";
-                pipelineMode = "llm_core_synthesis";
-                evidence = backfillSupportingUtterances(evidence, finalPerPerson);
-              } else {
-                reportSource = "memo_first_fallback";
-                reportBlockingReason = validation.failures[0] || "invalid evidence refs";
-              }
-            }
-          } catch (synthErr) {
-            reportSource = "memo_first_fallback";
-            reportError = getErrorMessage(synthErr);
-            finalizeWarnings.push(`report-only synthesis failed: ${getErrorMessage(synthErr)}`);
-          }
-
-          if (!ACCEPTED_REPORT_SOURCES.has(reportSource)) {
-            evidence = legacyEvidence;
-          }
-
-          // Persist stage
-          await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 92 });
-          await this.ensureFinalizeJobActive(jobId);
-          const finalizedAt = this.currentIsoTs();
-
-          const memoFirstValidation = validatePersonFeedbackEvidence(finalPerPerson);
-          const finalStrictValidation = this.validateClaimEvidenceRefs({ evidence, per_person: finalPerPerson } as ResultV2);
-          const synthQualityGate = enforceQualityGates({
-            perPerson: finalPerPerson,
-            unknownRatio: computeUnknownRatio(transcript),
-          });
-
-          const captureByStream = (normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE))).capture_by_stream ?? defaultCaptureByStream();
-          const qualityMetrics = this.buildQualityMetrics(transcript, captureByStream);
-          const quality: ReportQualityMeta = {
-            ...memoFirstValidation.quality,
-            generated_at: finalizedAt,
-            build_ms: 0,
-            validation_ms: 0,
-            claim_count: finalStrictValidation.claimCount,
-            invalid_claim_count: finalStrictValidation.invalidCount,
-            needs_evidence_count: finalStrictValidation.needsEvidenceCount,
-            report_source: reportSource,
-            report_model: reportModel,
-            report_degraded: !ACCEPTED_REPORT_SOURCES.has(reportSource),
-            report_error: reportError
-          };
-
-          const confidenceLevel = existingResult.session.confidence_level ?? "high";
-          const tentative = confidenceLevel === "low" || !this.evaluateFeedbackQualityGates({
-            unknownRatio: qualityMetrics.unknown_ratio,
-            ingestP95Ms: null,
-            claimValidationFailures: [
-              ...(finalStrictValidation.failures ?? []),
-              ...synthQualityGate.failures,
-              ...(ACCEPTED_REPORT_SOURCES.has(reportSource) ? [] : [reportBlockingReason || "llm report unavailable"])
-            ]
-          }).passed;
-
-          const resultV2 = buildResultV2({
-            sessionId,
-            finalizedAt,
-            tentative,
-            confidenceLevel,
-            unresolvedClusterCount: existingResult.session.unresolved_cluster_count ?? 0,
-            captionSource: this.captionSource,
-            diarizationBackend: existingResult.session.diarization_backend ?? "cloud",
-            transcript,
-            speakerLogs,
-            stats,
-            memos,
-            evidence,
-            overall: finalOverall,
-            perPerson: finalPerPerson,
-            quality,
-            finalizeJobId: jobId,
-            modelVersions: existingResult.trace?.model_versions ?? {},
-            thresholds: existingResult.trace?.thresholds ?? {},
-            backendTimeline: [],
-            qualityGateSnapshot: existingResult.trace?.quality_gate_snapshot,
-            reportPipeline: {
-              mode: pipelineMode,
-              source: reportSource,
-              llm_attempted: true,
-              llm_success: reportSource === "llm_synthesized",
-              llm_elapsed_ms: 0,
-              blocking_reason: reportBlockingReason
-            },
-            qualityGateFailures: []
-          });
-
-          const resultV2Key = resultObjectKeyV2(sessionId);
-          await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
-            httpMetadata: { contentType: "application/json" }
-          });
-          await this.ctx.storage.put(STORAGE_KEY_RESULT_KEY_V2, resultV2Key);
-          await this.ctx.storage.put(STORAGE_KEY_FINALIZED_AT, finalizedAt);
-          await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, finalizedAt);
-
-          const cache = await this.loadFeedbackCache(sessionId);
-          cache.updated_at = finalizedAt;
-          cache.report = resultV2;
-          cache.person_summary_cache = resultV2.per_person;
-          cache.overall_summary_cache = resultV2.overall;
-          cache.evidence_index_cache = this.buildEvidenceIndex(resultV2.per_person);
-          cache.quality = resultV2.quality;
-          cache.report_source = reportSource;
-          cache.blocking_reason = reportBlockingReason;
-          cache.quality_gate_passed = ACCEPTED_REPORT_SOURCES.has(reportSource)
-            && finalStrictValidation.needsEvidenceCount === 0;
-          cache.ready = cache.quality_gate_passed && !tentative;
-          await this.storeFeedbackCache(cache);
-
-          await this.updateFinalizeV2Status(jobId, {
-            status: "succeeded",
-            stage: "persist",
-            progress: 100,
-            finished_at: finalizedAt,
-            warnings: finalizeWarnings,
-            degraded: finalizeDegraded,
-            backend_used: finalizeBackendUsed
-          });
-
-          log("info", "finalize-v2: report-only completed", { component: "finalize-v2", session_id: sessionId });
-
-          // ── Async: generate improvement suggestions (non-blocking) ──
-          this.triggerImprovementGeneration(sessionId, resultV2, resultV2.transcript, resultV2Key).catch(err2 => {
-            log("warn", "finalize-v2: improvements generation failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err2) });
-          });
-        } catch (err) {
-          const errMsg = getErrorMessage(err) || "unknown error";
-          log("error", "finalize-v2: report-only failed", { component: "finalize-v2", session_id: sessionId, error: errMsg });
-          await this.updateFinalizeV2Status(jobId, {
-            status: "failed",
-            errors: [errMsg],
-            finished_at: this.currentIsoTs()
-          });
-        } finally {
-          await this.setFinalizeLock(false);
-        }
-        return; // exit early — do not run full pipeline
-      }
-
-      // ── Caption mode: skip audio-dependent stages ──
-      const useCaptions = this.captionSource === 'acs-teams' && this.captionBuffer.length > 0;
-
-      // GUARD: If captionSource is acs-teams but captionBuffer is empty (DO evicted + storage lost),
-      // force report-only mode to avoid falling through to local_asr which would timeout.
-      // At this point mode is 'full' (report-only already returned above), so we redirect.
-      if (this.captionSource === 'acs-teams' && !useCaptions) {
-        log("warn", "finalize-v2: captionSource=acs-teams but captionBuffer empty, forcing report-only mode", { component: "finalize-v2", session_id: sessionId });
-        await this.setFinalizeLock(false);
-        return this.runFinalizeV2Job(sessionId, jobId, metadata, 'report-only');
-      }
-
-      if (!useCaptions) {
-      // ── Drain ASR queues (non-fatal) ──
-      // Drain is best-effort: if DashScope ASR is unreachable, we continue with
-      // whatever transcript data we already have. This prevents external service
-      // outages from blocking the entire finalization pipeline.
-      await this.updateFinalizeV2Status(jobId, { stage: "drain", progress: 18 });
-      await this.ensureFinalizeJobActive(jobId);
-      const drainTimeoutMs = Math.min(timeoutMs, DRAIN_TIMEOUT_CAP_MS); // cap drain at 30s
-      const drainWithTimeout = async (streamRole: StreamRole): Promise<void> => {
-        await Promise.race([
-          this.drainRealtimeQueue(sessionId, streamRole),
-          new Promise<void>((_, reject) => {
-            setTimeout(() => reject(new Error(`drain timeout stream=${streamRole}`)), drainTimeoutMs);
-          })
-        ]);
-      };
-      try {
-        await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
-      } catch (drainErr) {
-        log("warn", "finalize-v2: drain failed (non-fatal), continuing", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(drainErr) });
-        finalizeWarnings.push(`drain degraded: ${getErrorMessage(drainErr)}`);
-        finalizeDegraded = true;
-      }
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      await this.updateFinalizeV2Status(jobId, { stage: "replay_gap", progress: 30 });
-      await this.ensureFinalizeJobActive(jobId);
-      try {
-        await Promise.all([this.replayGapFromR2(sessionId, "teacher"), this.replayGapFromR2(sessionId, "students")]);
-        await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
-      } catch (replayErr) {
-        log("warn", "finalize-v2: replay/drain failed (non-fatal), continuing", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(replayErr) });
-        finalizeWarnings.push(`replay degraded: ${getErrorMessage(replayErr)}`);
-        finalizeDegraded = true;
-      }
-
-      // Force-close ASR sessions and clear queues to prevent orphaned drain loops
-      await this.closeRealtimeAsrSession("teacher", "finalize-v2", true, false);
-      await this.closeRealtimeAsrSession("students", "finalize-v2", true, false);
-      await this.refreshAsrStreamMetrics(sessionId, "teacher");
-      await this.refreshAsrStreamMetrics(sessionId, "students");
-      } // end if (!useCaptions) — drain/replay/close
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      // ── Windowed ASR for local-whisper (drain/replay only applies to FunASR realtime) ──
-      // When using local-whisper, audio is NOT streamed to a realtime ASR WebSocket during
-      // recording. Instead, we must run windowed transcription on all stored audio now.
-      if (!useCaptions && this.getAsrProvider() === "local-whisper") {
-        await this.updateFinalizeV2Status(jobId, { stage: "local_asr", progress: 25 });
-        await this.ensureFinalizeJobActive(jobId);
-        try {
-          // Log diagnostic info before running windowed ASR
-          const diagIngest = await this.loadIngestByStream(sessionId);
-          const diagAsr = await this.loadAsrByStream();
-          log("info", "finalize-v2: local-whisper pre-check", { component: "finalize-v2", session_id: sessionId, teacher_last_seq: diagIngest.teacher.last_seq, students_last_seq: diagIngest.students.last_seq, asr_enabled: diagAsr.students.enabled, window_seconds: diagAsr.students.window_seconds });
-          log("info", "finalize-v2: ASR provider info", { component: "finalize-v2", session_id: sessionId, asr_provider: this.env.ASR_PROVIDER, has_local_whisper: !!this.localWhisperProvider, get_asr_provider: this.getAsrProvider() });
-
-          // Process each stream sequentially, in small batches (BATCH_SIZE windows)
-          // with heartbeat updates between batches. This prevents the DO from being
-          // evicted during long ASR processing (each window takes ~10s).
-          const BATCH_SIZE = 5;
-          const MAX_CONSECUTIVE_FAILURES = 5;
-          let totalGenerated = 0;
-
-          for (const role of ["teacher", "students"] as const) {
-            const ingest = role === "teacher" ? diagIngest.teacher : diagIngest.students;
-            if (ingest.last_seq <= 0) {
-                log("info", "finalize-v2: local-whisper skip (no audio)", { sessionId, action: "local_asr", streamRole: role, lastSeq: ingest.last_seq });
-              continue;
-            }
-
-            const estimatedWindows = Math.floor(ingest.last_seq / (diagAsr[role].hop_seconds || 10));
-            log("info", "finalize-v2: local-whisper starting", { sessionId, action: "local_asr", streamRole: role, estimatedWindows });
-            let roleGenerated = 0;
-            let roleFailures = 0;
-
-            while (true) {
-              // Update heartbeat and progress before each batch
-              const progressPct = estimatedWindows > 0
-                ? Math.min(45, 25 + Math.round((roleGenerated / estimatedWindows) * 20))
-                : 25;
-              await this.updateFinalizeV2Status(jobId, { stage: "local_asr", progress: progressPct });
-              await this.ensureFinalizeJobActive(jobId);
-
-              // Reset failures before each batch so backoff guard doesn't block
-              const asrByStream = await this.loadAsrByStream();
-              asrByStream[role].consecutive_failures = 0;
-              asrByStream[role].next_retry_after_ms = 0;
-              await this.storeAsrByStream(asrByStream);
-
-              const result = await this.maybeRunAsrWindows(sessionId, role, true, BATCH_SIZE);
-
-              if (result.generated > 0) {
-                roleGenerated += result.generated;
-                totalGenerated += result.generated;
-                roleFailures = 0;
-                log("info", "finalize-v2: local-whisper batch complete", { component: "finalize-v2", session_id: sessionId, stream_role: role, generated: result.generated, role_total: roleGenerated, estimated: estimatedWindows, last_seq: result.last_window_end_seq });
-              } else if (result.last_error) {
-                roleFailures += 1;
-                log("warn", "finalize-v2: local-whisper batch error", { component: "finalize-v2", session_id: sessionId, stream_role: role, failures: roleFailures, max_failures: MAX_CONSECUTIVE_FAILURES, error: result.last_error });
-                if (roleFailures >= MAX_CONSECUTIVE_FAILURES) {
-                  log("warn", "finalize-v2: local-whisper too many failures, stopping", { component: "finalize-v2", session_id: sessionId, stream_role: role, failures: roleFailures });
-                  finalizeWarnings.push(`local-whisper ${role}: stopped after ${roleFailures} consecutive failures`);
-                  break;
-                }
-                await new Promise((r) => setTimeout(r, 3000));
-              } else {
-                // No error and no generated = all windows done for this stream
-                log("info", "finalize-v2: local-whisper stream complete", { component: "finalize-v2", session_id: sessionId, stream_role: role, windows: roleGenerated });
-                break;
-              }
-            }
-          }
-
-          log("info", "finalize-v2: local-whisper completed", { component: "finalize-v2", total_windows: totalGenerated });
-          if (totalGenerated === 0) {
-            finalizeWarnings.push("local-whisper produced 0 utterances");
-          }
-        } catch (localAsrErr) {
-          log("warn", "finalize-v2: local-whisper ASR failed (non-fatal)", { component: "finalize-v2", error: getErrorMessage(localAsrErr) });
-          finalizeWarnings.push(`local-whisper degraded: ${getErrorMessage(localAsrErr)}`);
-          finalizeDegraded = true;
-        }
-      }
-
-      // ── Merge finalize metadata into storage (memos, free_form_notes) ──
-      // Desktop may send memos/notes in finalize metadata as a convenience.
-      // Merge them into DO storage so the pipeline can read them uniformly.
-      if (Array.isArray((metadata as Record<string, unknown>)?.memos)) {
-        const incomingMemos = (metadata as Record<string, unknown>).memos as Array<Record<string, unknown>>;
-        const existingMemos = await this.loadMemos();
-        const existingIds = new Set(existingMemos.map((m) => m.memo_id));
-        for (const raw of incomingMemos) {
-          const memoId = typeof raw.memo_id === "string" ? raw.memo_id : `m_meta_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          if (existingIds.has(memoId)) continue;
-          existingMemos.push({
-            memo_id: memoId,
-            created_at_ms: typeof raw.created_at_ms === "number" ? raw.created_at_ms : Date.now(),
-            author_role: "teacher",
-            type: (["observation", "evidence", "question", "decision", "score"].includes(raw.type as string) ? raw.type : "observation") as MemoItem["type"],
-            tags: Array.isArray(raw.tags) ? raw.tags.filter((t): t is string => typeof t === "string") : [],
-            text: typeof raw.text === "string" ? raw.text : "",
-            stage: typeof raw.stage === "string" ? raw.stage : undefined,
-            stage_index: typeof raw.stage_index === "number" ? raw.stage_index : undefined,
-          });
-          existingIds.add(memoId);
-        }
-        await this.storeMemos(existingMemos);
-      }
-      if (typeof (metadata as Record<string, unknown>)?.free_form_notes === "string") {
-        const preState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-        const cfg = { ...(preState.config ?? {}) } as Record<string, unknown>;
-        cfg.free_form_notes = (metadata as Record<string, unknown>).free_form_notes;
-        preState.config = cfg;
-        await this.ctx.storage.put(STORAGE_KEY_STATE, preState);
-      }
-
-      // ── Global clustering stage ──
-      // If edge diarization is active, extract any missing embeddings from R2
-      // audio and run global agglomerative clustering to produce consistent
-      // speaker IDs across the entire session.
-      // Caption mode skips clustering: Teams provides speaker identity directly.
-      let globalClusterResult: GlobalClusterResult | null = null;
-      let clusterRosterMapping: Map<string, string> | null = null;
-      if (!useCaptions) {
-      await this.updateFinalizeV2Status(jobId, { stage: "cluster", progress: 36 });
-      await this.ensureFinalizeJobActive(jobId);
-      {
-        const preState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-        const preDiarizationBackend = preState.config?.diarization_backend === "edge" ? "edge" : "cloud";
-        if (preDiarizationBackend === "edge") {
-          try {
-            // Extract missing embeddings for any turns not yet in the cache
-            const preSpeakerLogs = await this.loadSpeakerLogs();
-            if (this.embeddingCache.size === 0 && preSpeakerLogs.turns.length > 0) {
-              await this.extractEmbeddingsForTurns(sessionId, preSpeakerLogs, "students");
-            }
-
-            const embeddings = this.embeddingCache.getAllEmbeddings();
-            if (embeddings.length >= 2) {
-              globalClusterResult = globalCluster(embeddings, {
-                distance_threshold: 0.3,
-                linkage: "average",
-                min_cluster_size: 1
-              });
-
-              // Build roster participants with enrollment embeddings for mapping
-              const rosterParticipants: RosterParticipant[] = (preState.roster ?? []).map((r) => {
-                const profile = (preState.participant_profiles ?? []).find(
-                  (p) => p.name === r.name
-                );
-                return {
-                  name: r.name,
-                  enrollment_embedding: profile?.centroid?.length
-                    ? new Float32Array(profile.centroid)
-                    : undefined
-                };
-              });
-
-              clusterRosterMapping = mapClustersToRoster(globalClusterResult, rosterParticipants, 0.65);
-              log("info", "finalize-v2: global clustering complete", { sessionId, action: "cluster", embeddingCount: embeddings.length, clusterCount: globalClusterResult.clusters.size, confidence: globalClusterResult.confidence });
-            } else if (embeddings.length > 0) {
-              log("info", "finalize-v2: skipping clustering (too few embeddings)", { sessionId, action: "cluster", embeddingCount: embeddings.length });
-            }
-          } catch (clusterErr) {
-            log("warn", "finalize-v2: clustering failed (non-fatal)", { sessionId, action: "cluster", error: getErrorMessage(clusterErr) });
-            finalizeWarnings.push(`clustering degraded: ${getErrorMessage(clusterErr)}`);
-            finalizeDegraded = true;
-          }
-        }
-      }
-      } // end if (!useCaptions) — clustering
-
-      await this.updateFinalizeV2Status(jobId, { stage: "reconcile", progress: 42 });
-      await this.ensureFinalizeJobActive(jobId);
-
-      let transcript: TranscriptItem[];
-      let state: SessionState;
-      let memos: MemoItem[];
-      let locale: string;
-      let diarizationBackend: "cloud" | "edge";
-      let speakerLogsStored: SpeakerLogs;
-      let confidenceLevel: "high" | "medium" | "low";
-      let tentative: boolean;
-      let speakerLogs: SpeakerLogs;
-      let unresolvedClusterCount: number;
-      let asrByStream: Record<StreamRole, AsrState>;
-
-      if (useCaptions) {
-        // ── Caption mode: build transcript from captionBuffer ──
-        const captionAsr = new ACSCaptionASRProvider();
-        const captionDia = new ACSCaptionDiarizationProvider();
-        const utterances = captionAsr.convertToUtterances(this.captionBuffer);
-        const resolved = captionDia.resolveCaptions(this.captionBuffer);
-        const speakerMap = captionDia.getSpeakerMap();
-
-        state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-        memos = await this.loadMemos();
-        speakerLogsStored = await this.loadSpeakerLogs();
-        locale = getSessionLocale(state, this.env);
-        diarizationBackend = "cloud"; // caption mode doesn't use edge diarization
-
-        // Build transcript from caption utterances
-        transcript = utterances.map((u, i) => ({
-          utterance_id: u.id,
-          stream_role: "students" as const, // captions are from remote participants
-          cluster_id: resolved[i]?.speaker_id ?? null,
-          speaker_name: resolved[i]?.speaker_name ?? null,
-          decision: "auto" as const,
-          text: u.text,
-          start_ms: u.start_ms,
-          end_ms: u.end_ms,
-          duration_ms: u.end_ms - u.start_ms,
-        }));
-
-        // Update state with caption speaker bindings
-        for (const [displayName, speakerId] of Object.entries(speakerMap)) {
-          state.bindings[speakerId] = displayName;
-          state.cluster_binding_meta[speakerId] = {
-            participant_name: displayName,
-            source: "name_extract",
-            confidence: 0.95,
-            locked: true,
-            updated_at: new Date().toISOString(),
-          };
-        }
-
-        // Caption mode: all speakers are identified by Teams, so confidence is always high
-        confidenceLevel = "high";
-        tentative = false;
-        unresolvedClusterCount = 0;
-        asrByStream = await this.loadAsrByStream();
-
-        // Build speaker logs from caption transcript
-        const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
-        speakerLogs = this.deriveSpeakerLogsFromTranscript(
-          this.currentIsoTs(),
-          transcript,
-          state,
-          cloudBase,
-          "cloud"
-        );
-        await this.storeSpeakerLogs(speakerLogs);
-
-        log("info", "finalize-v2: caption mode transcript built", { sessionId, action: "reconcile", utteranceCount: utterances.length, speakerCount: Object.keys(speakerMap).length });
-      } else {
-        // ── Original audio-based reconciliation path ──
-        const [stateRaw, events, rawByStream, mergedByStream, memosLoaded, speakerLogsLoaded, asrByStreamLoaded] = await Promise.all([
-          this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE),
-          this.loadSpeakerEvents(),
-          this.loadUtterancesRawByStream(),
-          this.loadUtterancesMergedByStream(),
-          this.loadMemos(),
-          this.loadSpeakerLogs(),
-          this.loadAsrByStream()
-        ]);
-        state = normalizeSessionState(stateRaw);
-        memos = memosLoaded;
-        speakerLogsStored = speakerLogsLoaded;
-        asrByStream = asrByStreamLoaded;
-        locale = getSessionLocale(state, this.env);
-        // When caption source is set to acs-teams (even if buffer is empty due to
-        // ACS join failure), force cloud diarization — edge diarization requires
-        // edge speaker-logs which are not collected in caption mode.
-        diarizationBackend = this.captionSource === 'acs-teams'
-          ? "cloud"
-          : (state.config?.diarization_backend === "edge" ? "edge" : "cloud");
-
-        const cutoffUtterances = [...rawByStream.teacher, ...rawByStream.students]
-          .filter((item) => item.end_seq <= cutoff[item.stream_role]);
-        transcript = buildReconciledTranscript({
-          utterances: cutoffUtterances,
-          events,
-          speakerLogs: speakerLogsStored,
-          state,
-          diarizationBackend,
-          roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
-          globalClusterResult,
-          clusterRosterMapping,
-          cachedEmbeddings: this.embeddingCache.getAllEmbeddings()
-        });
-
-        mergedByStream.teacher = mergeUtterances(rawByStream.teacher);
-        mergedByStream.students = mergeUtterances(rawByStream.students);
-        await this.storeUtterancesMergedByStream(mergedByStream);
-
-        // ── Memo-assisted binding: resolve unidentified clusters using teacher notes ──
-        const rosterNames = (state.roster ?? []).map(r => r.name).filter(Boolean);
-        const memoBindResult = memoAssistedBinding({
-          clusters: state.clusters.map(c => ({ cluster_id: c.cluster_id, turn_ids: [] })),
-          bindings: state.bindings,
-          bindingMeta: state.cluster_binding_meta,
-          transcript,
-          memos,
-          roster: rosterNames,
-        });
-        for (const [clusterId, name] of Object.entries(memoBindResult.newBindings)) {
-          state.bindings[clusterId] = name;
-          state.cluster_binding_meta[clusterId] = {
-            participant_name: name,
-            source: "name_extract",
-            confidence: 0.7,
-            locked: false,
-            updated_at: new Date().toISOString(),
-          };
-        }
-
-        unresolvedClusterCount = state.clusters.filter((cluster) => {
-          const bound = state.bindings[cluster.cluster_id];
-          const meta = state.cluster_binding_meta[cluster.cluster_id];
-          return !bound || !meta || !meta.locked;
-        }).length;
-        const totalClusters = state.clusters.length;
-        const unresolvedRatio = totalClusters > 0 ? unresolvedClusterCount / totalClusters : 0;
-        confidenceLevel =
-          unresolvedRatio === 0 ? "high" :
-          unresolvedRatio <= 0.25 ? "medium" : "low";
-        tentative = confidenceLevel === "low";
-
-        const hasStudentTranscript = transcript.some((item) => item.stream_role === "students");
-        if (diarizationBackend === "edge") {
-          const edgeLogsUsable = !hasStudentTranscript
-            || (speakerLogsStored.source === "edge" && speakerLogsStored.turns.length > 0);
-          if (edgeLogsUsable) {
-            speakerLogs = this.buildEdgeSpeakerLogsForFinalize(this.currentIsoTs(), speakerLogsStored, state);
-          } else {
-            // Fallback to cloud diarization when edge speaker-logs are unavailable
-            finalizeWarnings.push(`diarization fallback: edge speaker-logs unavailable (source=${speakerLogsStored.source}, turns=${speakerLogsStored.turns.length}), using cloud`);
-            diarizationBackend = "cloud";
-            const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
-            speakerLogs = this.deriveSpeakerLogsFromTranscript(
-              this.currentIsoTs(),
-              transcript,
-              state,
-              cloudBase,
-              "cloud"
-            );
-          }
-        } else {
-          const cloudBase = speakerLogsStored.source === "cloud" ? speakerLogsStored : emptySpeakerLogs(this.currentIsoTs());
-          speakerLogs = this.deriveSpeakerLogsFromTranscript(
-            this.currentIsoTs(),
-            transcript,
-            state,
-            cloudBase,
-            "cloud"
-          );
-        }
-        await this.storeSpeakerLogs(speakerLogs);
-      } // end if/else useCaptions reconcile
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      // E5: Save stage checkpoint after reconcile (most expensive data-prep stage)
-      await this.saveFinalizeStageCheckpoint(jobId, "reconcile", {
-        transcript_count: transcript.length,
-        locale,
-        diarization_backend: diarizationBackend
-      });
-
-      await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
-      const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
-
-      // ── NEW PIPELINE: Extract names, build multi-evidence, stage metadata ──
-      const knownSpeakers = stats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
-      const memoBindings = extractMemoNames(memos, knownSpeakers);
-      const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
-      const enrichedMemos = addStageMetadata(memos, configStages);
-      let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
-
-      // ── Enrich evidence pack with transcript quotes, stats summaries, interaction patterns ──
-      const enrichedEvidence = enrichEvidencePack(transcript, stats);
-      evidence = [...evidence, ...enrichedEvidence];
-
-      // ── Generate stats observations for LLM context ──
-      const audioDurationMs = calcTranscriptDurationMs(transcript);
-      const statsObservations = generateStatsObservations(stats, audioDurationMs);
-
-      // Keep legacy evidence + memo-first as fallback baseline
-      const legacyEvidence = buildEvidence({ memos, transcript });
-      const memosWithEvidence = attachEvidenceToMemos(memos, legacyEvidence);
-      const memoFirstStart = Date.now();
-      const memoFirstReport = buildMemoFirstReport({
-        transcript,
-        memos: memosWithEvidence,
-        evidence: legacyEvidence,
-        stats
-      });
-      const memoFirstBuildMs = Date.now() - memoFirstStart;
-      const validationStart = Date.now();
-      const memoFirstStrictValidation = this.validateClaimEvidenceRefs({
-        evidence: legacyEvidence,
-        per_person: memoFirstReport.per_person
-      } as ResultV2);
-      const memoFirstValidation = validatePersonFeedbackEvidence(memoFirstReport.per_person);
-      const validationMs = Date.now() - validationStart;
-      if (!memoFirstValidation.valid || !memoFirstStrictValidation.valid) {
-        // Non-fatal: memo-first baseline has invalid evidence refs (common when drain
-        // was degraded). Continue to LLM synthesis which may produce valid refs.
-        log("warn", "finalize-v2: memo-first evidence validation failed (non-fatal)", { sessionId, action: "report", claimCount: memoFirstStrictValidation.claimCount, invalidCount: memoFirstStrictValidation.invalidCount });
-        finalizeWarnings.push(`memo-first evidence invalid: ${memoFirstStrictValidation.invalidCount}/${memoFirstStrictValidation.claimCount} claims`);
-        finalizeDegraded = true;
-      }
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      await this.updateFinalizeV2Status(jobId, { stage: "events", progress: 70 });
-      await this.ensureFinalizeJobActive(jobId);
-      const eventsPayload = {
-        session_id: sessionId,
-        transcript,
-        memos: memosWithEvidence,
-        stats,
-        locale
-      };
-      const eventsResult = await this.invokeInferenceAnalysisEvents(eventsPayload);
-      const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
-      backendTimeline.push(...eventsResult.timeline);
-      if (eventsResult.warnings.length > 0) {
-        finalizeWarnings.push(...eventsResult.warnings);
-      }
-      if (eventsResult.degraded) {
-        finalizeDegraded = true;
-      }
-      finalizeBackendUsed = eventsResult.backend_used === "local" ? "local" : eventsResult.backend_used;
-      if (eventsResult.fallback_reason) {
-        finalizeWarnings.push(`events fallback: ${eventsResult.fallback_reason}`);
-      }
-      await this.updateFinalizeV2Status(jobId, {
-        warnings: finalizeWarnings,
-        degraded: finalizeDegraded,
-        backend_used: finalizeBackendUsed
-      });
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      // E5: Save stage checkpoint after events (before expensive LLM report generation)
-      await this.saveFinalizeStageCheckpoint(jobId, "events", {
-        events_count: analysisEvents.length,
-        backend_used: finalizeBackendUsed,
-        degraded: finalizeDegraded
-      });
-
-      await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
-      await this.ensureFinalizeJobActive(jobId);
-      const reportStart = Date.now();
-      let finalOverall = memoFirstReport.overall;
-      let finalPerPerson = memoFirstReport.per_person;
-      let reportSource: "memo_first" | "llm_enhanced" | "llm_failed"
-        | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
-      let reportModel: string | null = null;
-      let reportError: string | null = null;
-      let reportBlockingReason: string | null = null;
-      let reportTimeline: InferenceBackendTimelineItem[] = [];
-      let llmAttempted = false;
-      let llmSuccess = false;
-      let llmElapsedMs: number | null = null;
-      let pipelineMode: "memo_first_with_llm_polish" | "llm_core_synthesis" = "memo_first_with_llm_polish";
-
-      // ── LLM-Core Synthesis Pipeline (with checkpoint merge support) ──
-      const storedCheckpoints = await this.loadCheckpoints();
-      const useCheckpointMerge = storedCheckpoints.length > 0;
-      try {
-        llmAttempted = true;
-        const fullConfig = (state.config ?? {}) as Record<string, unknown>;
-        const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
-          sessionConfig: {
-            mode: fullConfig.mode as "1v1" | "group" | undefined,
-            interviewer_name: fullConfig.interviewer_name as string | undefined,
-            position_title: fullConfig.position_title as string | undefined,
-            company_name: fullConfig.company_name as string | undefined,
-            stages: configStages,
-            free_form_notes: fullConfig.free_form_notes as string | undefined,
-            rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
-          },
-        });
-
-
-        // Augment sessionContext with dimension presets from config
-        if (sessionContext) {
-          const it = fullConfig.interview_type;
-          if (typeof it === "string" && it) sessionContext.interview_type = it;
-          const dp = fullConfig.dimension_presets;
-          if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
-        }
-        let synthData: Record<string, unknown>;
-        const synthStart = Date.now();
-
-        if (useCheckpointMerge) {
-          // ── Checkpoint merge path: merge pre-computed checkpoint summaries ──
-          log("info", "finalize: using checkpoint merge", { sessionId, action: "report", checkpointCount: storedCheckpoints.length });
-          const mergePayload: MergeCheckpointsRequestPayload = {
-            session_id: sessionId,
-            checkpoints: storedCheckpoints,
-            final_stats: stats,
-            final_memos: enrichedMemos,
-            evidence: evidence.map((e) => {
-              let sk = e.speaker?.person_id ?? e.speaker?.display_name ?? e.speaker?.cluster_id ?? null;
-              if ((!sk || /^c\d+$/.test(sk) || sk === "unknown") && e.quote) {
-                const quoteLower = e.quote.toLowerCase();
-                for (const stat of stats) {
-                  const name = stat.speaker_name?.trim();
-                  if (name && name !== "unknown" && name !== "teacher" && quoteLower.includes(name.toLowerCase())) {
-                    sk = name;
-                    break;
-                  }
-                }
-              }
-              return { ...e, speaker_key: sk };
-            }),
-            locale,
-          };
-          const mergeResult = await this.invokeInferenceMergeCheckpoints(mergePayload);
-          llmElapsedMs = Date.now() - synthStart;
-          reportTimeline = mergeResult.timeline;
-          synthData = mergeResult.data;
-          if (mergeResult.warnings.length > 0) {
-            finalizeWarnings.push(...mergeResult.warnings);
-          }
-          if (mergeResult.degraded) {
-            finalizeDegraded = true;
-          }
-        } else {
-          // ── Direct synthesis path: short interviews without checkpoints ──
-          const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
-          const synthPayload = buildSynthesizePayload({
-            sessionId,
-            transcript,
-            memos: enrichedMemos,
-            evidence,
-            stats,
-            events: analysisEvents.map((evt: Record<string, unknown>) => ({
-              event_id: String(evt.event_id ?? ""),
-              event_type: String(evt.event_type ?? ""),
-              actor: evt.actor != null ? String(evt.actor) : null,
-              target: evt.target != null ? String(evt.target) : null,
-              time_range_ms: Array.isArray(evt.time_range_ms) ? (evt.time_range_ms as number[]) : [],
-              utterance_ids: Array.isArray(evt.utterance_ids) ? (evt.utterance_ids as string[]) : [],
-              quote: evt.quote != null ? String(evt.quote) : null,
-              confidence: typeof evt.confidence === "number" ? evt.confidence : 0.5,
-              rationale: evt.rationale != null ? String(evt.rationale) : null,
-            })),
-            bindings: memoBindings,
-            rubric,
-            sessionContext,
-            freeFormNotes,
-            historical: [],
-            stages: contextStages.length > 0 ? contextStages : configStages,
-            locale,
-            nameAliases: configNameAliases,
-            statsObservations,
-          });
-
-          const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
-          llmElapsedMs = Date.now() - synthStart;
-          reportTimeline = synthResult.timeline;
-          synthData = synthResult.data;
-          if (synthResult.warnings.length > 0) {
-            finalizeWarnings.push(...synthResult.warnings);
-          }
-          if (synthResult.degraded) {
-            finalizeDegraded = true;
-          }
-        }
-
-        const candidatePerPerson = Array.isArray(synthData?.per_person) ? (synthData.per_person as PersonFeedbackItem[]) : [];
-        const candidateOverall = (synthData?.overall ?? memoFirstReport.overall) as unknown;
-        const candidateQuality =
-          synthData?.quality && typeof synthData.quality === "object" ? (synthData.quality as Partial<ReportQualityMeta>) : null;
-
-        if (candidatePerPerson.length > 0) {
-          // Strip claims with empty/invalid evidence_refs before validation
-          const { sanitized: sanitizedPerPerson, strippedCount } = this.sanitizeClaimEvidenceRefs(candidatePerPerson, evidence);
-          if (strippedCount > 0) {
-            finalizeWarnings.push(`sanitized ${strippedCount} claims with empty/invalid evidence_refs`);
-          }
-          const candidateValidation = this.validateClaimEvidenceRefs({
-            evidence,
-            per_person: sanitizedPerPerson
-          } as ResultV2);
-          if (candidateValidation.valid) {
-            finalPerPerson = sanitizedPerPerson;
-            finalOverall = candidateOverall;
-            llmSuccess = true;
-            pipelineMode = "llm_core_synthesis";
-            reportSource = (candidateQuality?.report_source as typeof reportSource) ?? "llm_synthesized";
-            reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
-            reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
-            // Stage 2 LLM fine-matching: backfill supporting_utterances into evidence
-            evidence = backfillSupportingUtterances(evidence, finalPerPerson);
-          } else {
-            reportSource = "memo_first_fallback";
-            reportBlockingReason = candidateValidation.failures[0] || "analysis/synthesize invalid evidence refs";
-          }
-        } else {
-          reportSource = "memo_first_fallback";
-          reportBlockingReason = "analysis/synthesize returned empty per_person";
-        }
-      } catch (synthError) {
-        // Synthesis failed — try legacy analysis/report as secondary fallback
-        try {
-          const reportResult = await this.invokeInferenceAnalysisReport({
-            session_id: sessionId,
-            transcript,
-            memos: memosWithEvidence,
-            stats,
-            evidence: legacyEvidence,
-            events: analysisEvents,
-            locale
-          });
-          reportTimeline = reportResult.timeline;
-          if (reportResult.warnings.length > 0) {
-            finalizeWarnings.push(...reportResult.warnings);
-          }
-          if (reportResult.degraded) {
-            finalizeDegraded = true;
-          }
-          const payload = reportResult.data;
-          const candidatePerPerson = Array.isArray(payload?.per_person) ? (payload.per_person as PersonFeedbackItem[]) : [];
-          const candidateOverall = (payload?.overall ?? memoFirstReport.overall) as unknown;
-          const candidateQuality =
-            payload?.quality && typeof payload.quality === "object" ? (payload.quality as Partial<ReportQualityMeta>) : null;
-          if (candidatePerPerson.length > 0) {
-            const candidateValidation = this.validateClaimEvidenceRefs({
-              evidence: legacyEvidence,
-              per_person: candidatePerPerson
-            } as ResultV2);
-            if (candidateValidation.valid) {
-              finalPerPerson = candidatePerPerson;
-              finalOverall = candidateOverall;
-              reportSource = "llm_enhanced";
-              if (candidateQuality?.report_source === "memo_first") {
-                reportSource = "memo_first";
-              }
-              if (candidateQuality?.report_source === "llm_failed") {
-                reportSource = "llm_failed";
-              }
-              reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
-              reportError = typeof candidateQuality?.report_error === "string" ? candidateQuality.report_error : null;
-            } else {
-              reportSource = "memo_first_fallback";
-              reportBlockingReason = candidateValidation.failures[0] || "analysis/report invalid evidence refs";
-            }
-          } else {
-            reportSource = "memo_first_fallback";
-            reportBlockingReason = "analysis/report returned empty per_person";
-          }
-        } catch (reportError2) {
-          reportSource = "memo_first_fallback";
-          reportError = getErrorMessage(synthError);
-          reportBlockingReason = `analysis/synthesize failed: ${getErrorMessage(synthError)}, analysis/report fallback also failed: ${getErrorMessage(reportError2)}`;
-          finalizeWarnings.push(reportBlockingReason);
-        }
-      }
-      const reportMs = Date.now() - reportStart;
-      backendTimeline.push(...reportTimeline);
-
-      // ── Evidence namespace alignment ──
-      // When report comes from legacy or memo_first fallback, the claim evidence_refs
-      // reference legacy evidence IDs. Switch the evidence pack to match.
-      if (reportSource === 'memo_first_fallback' || reportSource === 'memo_first' || reportSource === 'llm_enhanced' || reportSource === 'llm_failed') {
-        evidence = legacyEvidence;
-      }
-
-      // ── Quality gate enforcement (new) ──
-      const synthQualityGate = enforceQualityGates({
-        perPerson: finalPerPerson,
-        unknownRatio: computeUnknownRatio(transcript),
-      });
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      // E5: Save stage checkpoint after report (LLM call complete, only persist remaining)
-      await this.saveFinalizeStageCheckpoint(jobId, "report", {
-        report_source: reportSource,
-        report_model: reportModel,
-        pipeline_mode: pipelineMode
-      });
-
-      await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
-      await this.ensureFinalizeJobActive(jobId);
-      const finalizedAt = this.currentIsoTs();
-      const thresholdMeta: Record<string, number | string | boolean> = {};
-      for (const [key, value] of Object.entries(metadata ?? {})) {
-        if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") {
-          thresholdMeta[key] = value;
-        }
-      }
-      const captureByStream = state.capture_by_stream ?? defaultCaptureByStream();
-      const qualityMetrics = this.buildQualityMetrics(transcript, captureByStream);
-      const ingestP95Ms =
-        typeof asrByStream.students.ingest_to_utterance_p95_ms === "number"
-          ? asrByStream.students.ingest_to_utterance_p95_ms
-          : null;
-      const finalStrictValidation = this.validateClaimEvidenceRefs({
-        evidence,
-        per_person: finalPerPerson
-      } as ResultV2);
-      const qualityGateEvaluation = this.evaluateFeedbackQualityGates({
-        unknownRatio: qualityMetrics.unknown_ratio,
-        ingestP95Ms,
-        claimValidationFailures: [
-          ...(finalStrictValidation.failures ?? []),
-          ...synthQualityGate.failures,
-          ...(ACCEPTED_REPORT_SOURCES.has(reportSource) ? [] : [reportBlockingReason || "llm report unavailable"])
-        ]
-      });
-      const finalTentative = confidenceLevel === "low" || !qualityGateEvaluation.passed;
-      const quality: ReportQualityMeta = {
-        ...memoFirstValidation.quality,
-        generated_at: finalizedAt,
-        build_ms: memoFirstBuildMs + reportMs,
-        validation_ms: validationMs,
-        claim_count: finalStrictValidation.claimCount,
-        invalid_claim_count: finalStrictValidation.invalidCount,
-        needs_evidence_count: finalStrictValidation.needsEvidenceCount,
-        report_source: reportSource,
-        report_model: reportModel,
-        report_degraded: !ACCEPTED_REPORT_SOURCES.has(reportSource),
-        report_error: reportError
-      };
-      const qualityGateSnapshot = {
-        finalize_success_target: 0.995,
-        students_unknown_ratio_target: 0.25,
-        sv_top1_target: 0.9,
-        echo_reduction_target: 0.8,
-        observed_unknown_ratio: qualityMetrics.unknown_ratio,
-        observed_students_turns: qualityMetrics.students_utterance_count,
-        observed_students_unknown: qualityMetrics.students_unknown_count,
-        observed_echo_suppressed_chunks: qualityMetrics.echo_suppressed_chunks,
-        observed_echo_recent_rate: qualityMetrics.echo_suppression_recent_rate,
-        observed_echo_leak_rate: qualityMetrics.echo_leak_rate,
-        observed_suppression_false_positive_rate: qualityMetrics.suppression_false_positive_rate
-      };
-      const resultV2 = buildResultV2({
-        sessionId,
-        finalizedAt,
-        tentative: finalTentative,
-        confidenceLevel,
-        unresolvedClusterCount,
-        diarizationBackend,
-        captionSource: this.captionSource,
-        transcript,
-        speakerLogs,
-        stats,
-        memos,
-        evidence,
-        overall: finalOverall,
-        perPerson: finalPerPerson,
-        quality,
-        finalizeJobId: jobId,
-        modelVersions: {
-          asr: asrByStream.students.model,
-          analysis_events_path: this.env.INFERENCE_EVENTS_PATH ?? "/analysis/events",
-          analysis_report_path: this.env.INFERENCE_REPORT_PATH ?? "/analysis/report",
-          analysis_synthesize_path: this.env.INFERENCE_SYNTHESIZE_PATH ?? "/analysis/synthesize",
-          summary_mode: pipelineMode
-        },
-        thresholds: {
-          sv_t_low: 0.45,
-          sv_t_high: 0.70,
-          tentative: finalTentative,
-          unresolved_cluster_count: unresolvedClusterCount,
-          diarization_backend: diarizationBackend,
-          finalize_timeout_ms: timeoutMs,
-          feedback_assemble_budget_ms: FEEDBACK_ASSEMBLE_BUDGET_MS,
-          feedback_events_budget_ms: FEEDBACK_EVENTS_BUDGET_MS,
-          feedback_report_budget_ms: FEEDBACK_REPORT_BUDGET_MS,
-          feedback_validate_budget_ms: FEEDBACK_VALIDATE_BUDGET_MS,
-          feedback_total_budget_ms: FEEDBACK_TOTAL_BUDGET_MS,
-          ...thresholdMeta
-        },
-        backendTimeline,
-        qualityGateSnapshot,
-        reportPipeline: {
-          mode: pipelineMode,
-          source: reportSource,
-          llm_attempted: llmAttempted,
-          llm_success: llmSuccess,
-          llm_elapsed_ms: llmElapsedMs ?? reportMs,
-          blocking_reason: reportBlockingReason
-        },
-        qualityGateFailures: qualityGateEvaluation.failures
-      });
-
-      const resultV2Key = resultObjectKeyV2(sessionId);
-      await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
-        httpMetadata: { contentType: "application/json" }
-      });
-      const historyItem: HistoryIndexItem = {
-        session_id: sessionId,
-        finalized_at: finalizedAt,
-        tentative: Boolean(resultV2.session.tentative),
-        unresolved_cluster_count: Number(resultV2.session.unresolved_cluster_count || 0),
-        ready: Boolean(
-          ACCEPTED_REPORT_SOURCES.has(resultV2.quality.report_source ?? "")
-          && resultV2.quality.needs_evidence_count === 0
-        ),
-        needs_evidence_count: Number(resultV2.quality.needs_evidence_count || 0),
-        report_source: resultV2.quality.report_source ?? "memo_first"
-      };
-      const historyKey = historyObjectKey(sessionId, Date.parse(finalizedAt));
-      await this.env.RESULT_BUCKET.put(historyKey, JSON.stringify(historyItem), {
-        httpMetadata: { contentType: "application/json" }
-      });
-      await this.ctx.storage.put(STORAGE_KEY_RESULT_KEY_V2, resultV2Key);
-      await this.ctx.storage.put(STORAGE_KEY_FINALIZED_AT, finalizedAt);
-      await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, finalizedAt);
-      const cache = await this.loadFeedbackCache(sessionId);
-      cache.updated_at = finalizedAt;
-      cache.report = resultV2;
-      cache.person_summary_cache = resultV2.per_person;
-      cache.overall_summary_cache = resultV2.overall;
-      cache.evidence_index_cache = this.buildEvidenceIndex(resultV2.per_person);
-      cache.quality = resultV2.quality;
-      cache.timings = {
-        assemble_ms: memoFirstBuildMs,
-        events_ms: 0,
-        report_ms: reportMs,
-        validation_ms: validationMs,
-        persist_ms: 0,
-        total_ms: 0
-      };
-      cache.report_source = resultV2.quality.report_source ?? "memo_first";
-      cache.quality_gate_passed =
-        ACCEPTED_REPORT_SOURCES.has(cache.report_source)
-        && resultV2.quality.needs_evidence_count === 0;
-      cache.blocking_reason = cache.quality_gate_passed
-        ? null
-        : (resultV2.trace.quality_gate_failures?.[0] ?? "feedback quality gate failed");
-      cache.ready = cache.quality_gate_passed;
-      await this.storeFeedbackCache(cache);
-
-      if (abortController.signal.aborted) {
-        throw new Error("Finalization aborted: global timeout exceeded");
-      }
-
-      await this.updateFinalizeV2Status(jobId, {
-        status: "succeeded",
-        stage: "persist",
-        progress: 100,
-        finished_at: finalizedAt,
-        errors: [],
-        warnings: finalizeWarnings,
-        degraded: finalizeDegraded,
-        backend_used: finalizeBackendUsed
-      });
-      // E6: Transition to finalized phase
-      await this.setSessionPhase("finalized");
-      // E5: Clear stage checkpoint on success — no longer needed
-      await this.clearFinalizeStageCheckpoint();
-
-      // ── D1: persist session metadata + dimension scores (non-blocking) ──
-      if (this.env.DB) {
-        persistSessionToD1(this.env.DB, sessionId, resultV2, resultV2Key).catch(err => {
-          log("warn", "finalize-v2: D1 persist failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err) });
-        });
-      }
-
-      // ── Async: generate improvement suggestions (non-blocking) ──
-      this.triggerImprovementGeneration(sessionId, resultV2, transcript, resultV2Key).catch(err => {
-        log("warn", "finalize-v2: improvements generation failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err) });
-      });
-
-      // ── Incremental finalize: if V1 increments were processed during recording, use them ──
-      let incrementalFinalizeSucceeded = false;
-      const incrementalStatusForFinalize = await this.loadIncrementalStatus();
-      if (incrementalV1Enabled(this.env) && incrementalStatusForFinalize.increments_completed > 0) {
-        try {
-          // ── 消灭大尾巴 — 检查未处理的尾部音频 ──
-          {
-            const ingestForTail = await this.loadIngestByStream(sessionId);
-            const totalAudioMs = ingestForTail.mixed.received_chunks * 1000;
-            const lastProcessedMs = incrementalStatusForFinalize.last_processed_ms;
-            const tailGapMs = totalAudioMs - lastProcessedMs;
-
-            if (tailGapMs > 30_000) {
-              log("info", "incremental-v1: tail gap detected, running tail chunk", { sessionId, action: "incremental", tailGapMs, totalAudioMs, lastProcessedMs });
-              // 运行一次额外的 process-chunk 来覆盖尾部音频
-              try {
-                await this.runIncrementalJob(sessionId);
-              } catch (tailErr) {
-                log("warn", "incremental-v1: tail chunk failed (non-fatal)", { sessionId, action: "incremental", error: getErrorMessage(tailErr) });
-              }
-            }
-          }
-
-          const finalizeNameAliases = ((state.config ?? {}) as Record<string, unknown>).name_aliases as Record<string, string[]> | undefined;
-          incrementalFinalizeSucceeded = await this.runIncrementalFinalize(
-            sessionId,
-            memos,
-            stats,
-            evidence,
-            locale,
-            finalizeNameAliases ?? {}
-          );
-          if (incrementalFinalizeSucceeded) {
-            log("info", "finalize-v2: incremental finalize used as primary, skipping tier2", { component: "finalize-v2", session_id: sessionId });
-          } else {
-            log("warn", "finalize-v2: incremental finalize failed, falling back to tier2", { component: "finalize-v2", session_id: sessionId });
-          }
-        } catch (incFinalizeErr) {
-          log("warn", "finalize-v2: incremental finalize threw (non-fatal)", { component: "finalize-v2", error: getErrorMessage(incFinalizeErr) });
-        }
-      }
-
-      // ── Tier 2 background trigger ──
-      // After Tier 1 succeeds, check if Tier 2 batch re-processing is enabled.
-      // Skip Tier 2 if incremental finalize already succeeded.
-      // If so, schedule a DO alarm to run the Tier 2 job asynchronously.
-      if (!incrementalFinalizeSucceeded && this.tier2Enabled() && this.tier2AutoTrigger()) {
-        try {
-          const tier2: Tier2Status = {
-            enabled: true,
-            status: "pending",
-            started_at: null,
-            completed_at: null,
-            error: null,
-            report_version: "tier1_instant",
-            progress: 0,
-            warnings: []
-          };
-          await this.storeTier2Status(tier2);
-          // Schedule alarm for 2 seconds from now to start Tier 2
-          const tag = `tier2_${sessionId}_${Date.now()}`;
-          await this.ctx.storage.put(STORAGE_KEY_TIER2_ALARM_TAG, tag);
-          await this.ctx.storage.setAlarm(Date.now() + 2_000);
-          log("info", "finalize-v2: tier2 scheduled", { sessionId, action: "tier2" });
-        } catch (tier2ScheduleErr) {
-          log("warn", "finalize-v2: failed to schedule tier2 (non-fatal)", { sessionId, action: "tier2", error: getErrorMessage(tier2ScheduleErr) });
-        }
-      }
-    } catch (error) {
-      const message = getErrorMessage(error);
-      const current = await this.loadFinalizeV2Status();
-      if (current && current.job_id === jobId && !this.isFinalizeTerminal(current.status)) {
-        await this.updateFinalizeV2Status(jobId, {
-          status: "failed",
-          stage: "persist",
-          progress: 100,
-          finished_at: this.currentIsoTs(),
-          errors: [...current.errors, message],
-          warnings: [...current.warnings, ...finalizeWarnings],
-          degraded: true,
-          backend_used: current.backend_used
-        });
-      }
-    } finally {
-      clearTimeout(globalTimer);
-      await this.setFinalizeLock(false);
-    }
+    const finalizeCtx: FinalizeJobContext = {
+      doCtx: this.ctx,
+      env: this.env,
+      getCaptionSource: () => this.captionSource,
+      setCaptionSource: (source) => { this.captionSource = source; },
+      getCaptionBuffer: () => this.captionBuffer,
+      setCaptionBuffer: (buffer) => { this.captionBuffer = buffer; },
+      embeddingCache: this.embeddingCache,
+      localWhisperProvider: this.localWhisperProvider,
+      loadIngestByStream: (sid) => this.loadIngestByStream(sid),
+      loadAsrByStream: () => this.loadAsrByStream(),
+      storeAsrByStream: (state) => this.storeAsrByStream(state),
+      loadUtterancesRawByStream: () => this.loadUtterancesRawByStream(),
+      storeUtterancesRawByStream: (state) => this.storeUtterancesRawByStream(state),
+      loadUtterancesMergedByStream: () => this.loadUtterancesMergedByStream(),
+      storeUtterancesMergedByStream: (state) => this.storeUtterancesMergedByStream(state),
+      loadSpeakerEvents: () => this.loadSpeakerEvents(),
+      loadSpeakerLogs: () => this.loadSpeakerLogs(),
+      storeSpeakerLogs: (logs) => this.storeSpeakerLogs(logs),
+      loadMemos: () => this.loadMemos(),
+      storeMemos: (memos) => this.storeMemos(memos),
+      loadFeedbackCache: (sid) => this.loadFeedbackCache(sid),
+      storeFeedbackCache: (cache) => this.storeFeedbackCache(cache),
+      loadFinalizeV2Status: () => this.loadFinalizeV2Status(),
+      storeFinalizeV2Status: (status) => this.storeFinalizeV2Status(status),
+      loadFinalizeStageCheckpoint: () => this.loadFinalizeStageCheckpoint(),
+      saveFinalizeStageCheckpoint: (jobId, stage, data) => this.saveFinalizeStageCheckpoint(jobId, stage, data),
+      clearFinalizeStageCheckpoint: () => this.clearFinalizeStageCheckpoint(),
+      loadCheckpoints: () => this.loadCheckpoints(),
+      storeCheckpoints: (cps) => this.storeCheckpoints(cps),
+      loadLastCheckpointAt: () => this.loadLastCheckpointAt(),
+      storeLastCheckpointAt: (ms) => this.storeLastCheckpointAt(ms),
+      storeTier2Status: (status) => this.storeTier2Status(status),
+      updateFinalizeV2Status: (jid, patch) => this.updateFinalizeV2Status(jid, patch),
+      setFinalizeLock: (locked) => this.setFinalizeLock(locked),
+      ensureFinalizeJobActive: (jid) => this.ensureFinalizeJobActive(jid),
+      isFinalizeTerminal: (status) => this.isFinalizeTerminal(status),
+      finalizeTimeoutMs: () => this.finalizeTimeoutMs(),
+      setSessionPhase: (target) => this.setSessionPhase(target),
+      maybeRunAsrWindows: (sid, role, force, maxW) => this.maybeRunAsrWindows(sid, role, force, maxW),
+      drainRealtimeQueue: (sid, role) => this.drainRealtimeQueue(sid, role),
+      replayGapFromR2: (sid, role) => this.replayGapFromR2(sid, role),
+      closeRealtimeAsrSession: (role, reason, wait, schedule) => this.closeRealtimeAsrSession(role, reason, wait, schedule),
+      refreshAsrStreamMetrics: (sid, role) => this.refreshAsrStreamMetrics(sid, role),
+      extractEmbeddingsForTurns: (sid, logs, role) => this.extractEmbeddingsForTurns(sid, logs, role),
+      getAsrProvider: () => this.getAsrProvider(),
+      checkpointIntervalMs: () => this.checkpointIntervalMs(),
+      invokeInferenceAnalysisEvents: (payload) => this.invokeInferenceAnalysisEvents(payload),
+      invokeInferenceAnalysisReport: (payload) => this.invokeInferenceAnalysisReport(payload),
+      invokeInferenceSynthesizeReport: (payload) => this.invokeInferenceSynthesizeReport(payload),
+      invokeInferenceCheckpoint: (payload) => this.invokeInferenceCheckpoint(payload),
+      invokeInferenceMergeCheckpoints: (payload) => this.invokeInferenceMergeCheckpoints(payload),
+      sanitizeClaimEvidenceRefs: (perPerson, evidence) => this.sanitizeClaimEvidenceRefs(perPerson, evidence),
+      validateClaimEvidenceRefs: (report) => this.validateClaimEvidenceRefs(report),
+      evaluateFeedbackQualityGates: (params) => this.evaluateFeedbackQualityGates(params),
+      mergeStatsWithRoster: (stats, state) => this.mergeStatsWithRoster(stats, state),
+      buildEvidenceIndex: (perPerson) => this.buildEvidenceIndex(perPerson),
+      buildQualityMetrics: (transcript, captureByStream) => this.buildQualityMetrics(transcript, captureByStream),
+      speechBackendMode: (state, dependencyHealth) => this.speechBackendMode(state, dependencyHealth),
+      deriveSpeakerLogsFromTranscript: (nowIso, transcript, state, existing, source) => this.deriveSpeakerLogsFromTranscript(nowIso, transcript, state, existing, source),
+      buildEdgeSpeakerLogsForFinalize: (nowIso, existing, state) => this.buildEdgeSpeakerLogsForFinalize(nowIso, existing, state),
+      runIncrementalJob: (sid) => this.runIncrementalJob(sid),
+      runIncrementalFinalize: (sid, memos, stats, evidence, locale, aliases) => this.runIncrementalFinalize(sid, memos, stats, evidence, locale, aliases),
+      loadIncrementalStatus: () => this.loadIncrementalStatus(),
+      triggerImprovementGeneration: (sid, result, transcript, key) => this.triggerImprovementGeneration(sid, result, transcript, key),
+      tier2Enabled: () => this.tier2Enabled(),
+      tier2AutoTrigger: () => this.tier2AutoTrigger(),
+      currentIsoTs: () => this.currentIsoTs(),
+      appendSpeakerEvent: (event) => this.appendSpeakerEvent(event),
+    };
+    await runFinalizeV2JobFn(sessionId, jobId, metadata, finalizeCtx, mode);
   }
-
-  // ── Improvement Suggestions (async, non-blocking) ─────────────────────
 
   private async triggerImprovementGeneration(
     sessionId: string,
@@ -4375,81 +2411,26 @@ export class MeetingSessionDO extends DurableObject<Env> {
     transcript: Array<{ utterance_id: string; speaker_name?: string | null; text: string; start_ms: number; end_ms: number; duration_ms: number }>,
     resultV2Key: string
   ): Promise<void> {
-    const inferenceBase = (this.env.INFERENCE_BASE_URL ?? "").trim() || "http://127.0.0.1:8000";
-    const apiKey = (this.env.INFERENCE_API_KEY ?? "").trim();
-
-    const sessionContext = (await this.ctx.storage.get("session_context")) as SessionContextMeta | undefined;
-    const dimensionPresets = sessionContext?.dimension_presets ?? [];
-
-    const reportJson = JSON.stringify({
-      overall: resultV2.overall,
-      per_person: resultV2.per_person,
-      evidence: resultV2.evidence,
-    });
-
-    const body = JSON.stringify({
-      session_id: sessionId,
-      report_json: reportJson,
-      transcript: transcript.slice(0, 50).map(u => ({
-        utterance_id: u.utterance_id,
-        speaker_name: u.speaker_name ?? "Unknown",
-        text: u.text,
-        start_ms: u.start_ms,
-        end_ms: u.end_ms,
-        duration_ms: u.duration_ms,
-      })),
-      interview_language: "en",
-      dimension_presets: dimensionPresets.map(d => ({
-        key: d.key,
-        label_zh: d.label_zh,
-        description: d.description,
-      })),
-    });
-
-    const resp = await fetch(`${inferenceBase}/analysis/improvements`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(apiKey ? { "x-api-key": apiKey } : {}),
-      },
-      body,
-      signal: AbortSignal.timeout(120_000),
-    });
-
-    if (!resp.ok) {
-      throw new Error(`improvements API returned ${resp.status}`);
-    }
-
-    const data = await resp.json() as { improvements: ImprovementReport };
-
-    // Merge improvements into resultV2 and re-persist
-    resultV2.improvements = data.improvements;
-    await this.env.RESULT_BUCKET.put(resultV2Key, JSON.stringify(resultV2), {
-      httpMetadata: { contentType: "application/json" },
-    });
-
-    // Update feedback cache
-    const cache = await this.loadFeedbackCache(sessionId);
-    if (cache.report) {
-      (cache.report as ResultV2).improvements = data.improvements;
-      await this.storeFeedbackCache(cache);
-    }
-
-    log("info", "finalize-v2: improvements generated", { component: "finalize-v2", session_id: sessionId });
+    return triggerImprovementGenerationImpl(sessionId, resultV2, transcript, resultV2Key, {
+      doCtx: this.ctx,
+      env: this.env,
+      loadFeedbackCache: (sid) => this.loadFeedbackCache(sid),
+      storeFeedbackCache: (cache) => this.storeFeedbackCache(cache),
+    } as FinalizeJobContext);
   }
 
   // ── Tier 2 Status Management ───────────────────────────────────────────
 
   private tier2Enabled(): boolean {
-    return parseBool(this.env.TIER2_ENABLED, false);
+    return tier2EnabledFn(this.env);
   }
 
   private tier2AutoTrigger(): boolean {
-    return parseBool(this.env.TIER2_AUTO_TRIGGER, false);
+    return tier2AutoTriggerFn(this.env);
   }
 
   private tier2BatchEndpoint(): string {
-    return (this.env.TIER2_BATCH_ENDPOINT ?? "").trim() || `${this.env.INFERENCE_BASE_URL}/batch/process`;
+    return tier2BatchEndpointFn(this.env);
   }
 
   private defaultTier2Status(): Tier2Status {
@@ -4469,7 +2450,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private isTier2Terminal(status: Tier2Status["status"]): boolean {
-    return status === "succeeded" || status === "failed" || status === "idle";
+    return isTier2TerminalFn(status);
   }
 
   // ── Tier 2 Background Job ────────────────────────────────────────────
@@ -4477,336 +2458,25 @@ export class MeetingSessionDO extends DurableObject<Env> {
   private async runTier2Job(sessionId: string): Promise<void> {
     const tier2 = await this.loadTier2Status();
     if (this.isTier2Terminal(tier2.status)) {
-      return; // Already completed or not pending
+      return;
     }
 
-    await this.updateTier2Status({
-      status: "downloading",
-      started_at: this.currentIsoTs(),
-      progress: 5
-    });
+    const tier2Ctx: Tier2Context = {
+      storage: this.ctx.storage,
+      env: this.env,
+      updateTier2Status: (patch) => this.updateTier2Status(patch),
+      loadMemos: () => this.loadMemos(),
+      loadFeedbackCache: (sid) => this.loadFeedbackCache(sid),
+      storeFeedbackCache: (cache) => this.storeFeedbackCache(cache),
+      buildEvidenceIndex: (perPerson) => this.buildEvidenceIndex(perPerson),
+      mergeStatsWithRoster: (stats, state) => this.mergeStatsWithRoster(stats, state),
+      sanitizeClaimEvidenceRefs: (perPerson, evidence) => this.sanitizeClaimEvidenceRefs(perPerson, evidence),
+      validateClaimEvidenceRefs: (report) => this.validateClaimEvidenceRefs(report),
+      invokeInferenceSynthesizeReport: (payload) => this.invokeInferenceSynthesizeReport(payload as SynthesizeRequestPayload),
+      currentIsoTs: () => this.currentIsoTs(),
+    };
 
-    try {
-      // 1. Gather the audio chunks from R2 into a single PCM blob
-      const resultKey = await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2);
-      if (!resultKey) {
-        throw new Error("no result key found — tier1 may not have completed");
-      }
-      const sessionPrefix = resultKey.replace(/\/result_v2\.json$/, "");
-      const chunksPrefix = `${sessionPrefix}/chunks/`;
-
-      // Collect all PCM chunk keys sorted by name (sequential order)
-      const chunkKeys: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const listing = await this.env.RESULT_BUCKET.list({
-          prefix: chunksPrefix,
-          cursor,
-          limit: 500
-        });
-        for (const obj of listing.objects) {
-          chunkKeys.push(obj.key);
-        }
-        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
-      } while (cursor);
-
-      if (chunkKeys.length === 0) {
-        throw new Error("no audio chunks found in R2 for tier2 processing");
-      }
-
-      chunkKeys.sort();
-
-      await this.updateTier2Status({ progress: 15 });
-
-      // Concatenate PCM chunks
-      const pcmParts: Uint8Array[] = [];
-      for (const key of chunkKeys) {
-        const obj = await this.env.RESULT_BUCKET.get(key);
-        if (obj) {
-          pcmParts.push(new Uint8Array(await obj.arrayBuffer()));
-        }
-      }
-      const fullPcm = concatUint8Arrays(pcmParts);
-      const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-
-      await this.updateTier2Status({
-        status: "transcribing",
-        progress: 25
-      });
-
-      // 2. Send to batch processor endpoint (/batch/process)
-      const endpoint = this.tier2BatchEndpoint();
-      const state = normalizeSessionState(
-        await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE)
-      );
-      const numSpeakers = (state.roster ?? []).length || undefined;
-
-      // Upload as WAV via R2 presigned URL or direct POST
-      // For simplicity, we POST the audio directly as a base64 payload
-      const audioB64 = bytesToBase64(wavBytes);
-
-      const batchResponse = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(this.env.INFERENCE_API_KEY
-            ? { "x-api-key": this.env.INFERENCE_API_KEY }
-            : {})
-        },
-        body: JSON.stringify({
-          audio_url: `data:audio/wav;base64,${audioB64}`,
-          num_speakers: numSpeakers,
-          language: getSessionLocale(state, this.env)
-        }),
-        signal: AbortSignal.timeout(180_000) // 3 min timeout
-      });
-
-      await this.updateTier2Status({
-        status: "diarizing",
-        progress: 50
-      });
-
-      if (!batchResponse.ok) {
-        const errText = await batchResponse.text().catch(() => "unknown");
-        throw new Error(`batch/process returned ${batchResponse.status}: ${errText}`);
-      }
-
-      const batchResult = (await batchResponse.json()) as {
-        transcript?: Array<{
-          utterance_id?: string;
-          speaker?: string;
-          text?: string;
-          start_ms?: number;
-          end_ms?: number;
-        }>;
-        speaker_stats?: Record<string, unknown>;
-        diarization?: Record<string, unknown>;
-      };
-
-      await this.updateTier2Status({
-        status: "reconciling",
-        progress: 65
-      });
-
-      // 3. Re-reconcile: merge batch transcript with manual bindings
-      const existingResult = await this.env.RESULT_BUCKET.get(resultKey);
-      if (!existingResult) {
-        throw new Error("could not load tier1 result for re-reconciliation");
-      }
-      const tier1Result = (await existingResult.json()) as ResultV2;
-
-      // Build enhanced transcript from batch result
-      const batchTranscript = (batchResult.transcript ?? []).map((item, idx) => ({
-        utterance_id: item.utterance_id ?? `tier2_utt_${idx}`,
-        stream_role: "students" as const,
-        cluster_id: null,
-        speaker_name: item.speaker ?? null,
-        decision: "auto" as const,
-        text: item.text ?? "",
-        start_ms: item.start_ms ?? 0,
-        end_ms: item.end_ms ?? 0,
-        duration_ms: (item.end_ms ?? 0) - (item.start_ms ?? 0)
-      }));
-
-      // Use batch transcript if it has data, otherwise keep tier1 transcript
-      const finalTranscript = batchTranscript.length > 0
-        ? batchTranscript
-        : tier1Result.transcript;
-
-      await this.updateTier2Status({
-        status: "reporting",
-        progress: 75
-      });
-
-      // 4. Re-generate stats
-      const tier2Stats = computeSpeakerStats(finalTranscript as TranscriptItem[]);
-      const mergedStats = this.mergeStatsWithRoster(tier2Stats, state);
-
-      // 5. Re-run LLM report synthesis with improved transcript
-      const tier2Warnings: string[] = [];
-      const memos = await this.loadMemos();
-      const enrichedMemos = addStageMetadata(memos, (state.config as Record<string, unknown>)?.stages as string[] ?? []);
-      const knownSpeakers = mergedStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
-      const memoBindings = extractMemoNames(enrichedMemos, knownSpeakers);
-      let evidence = buildMultiEvidence({
-        memos: enrichedMemos,
-        transcript: finalTranscript as TranscriptItem[],
-        bindings: memoBindings
-      });
-
-      // ── Enrich evidence pack with transcript quotes, stats summaries, interaction patterns ──
-      const tier2EnrichedEvidence = enrichEvidencePack(finalTranscript as TranscriptItem[], mergedStats);
-      evidence = [...evidence, ...tier2EnrichedEvidence];
-
-      // ── Generate stats observations for LLM context ──
-      const tier2AudioDurationMs = calcTranscriptDurationMs(finalTranscript);
-      const tier2StatsObservations = generateStatsObservations(mergedStats, tier2AudioDurationMs);
-
-      const locale = getSessionLocale(state, this.env);
-      const fullConfig = (state.config ?? {}) as Record<string, unknown>;
-      const configStages: string[] = fullConfig.stages as string[] ?? [];
-      const { rubric, sessionContext, freeFormNotes, stages: contextStages } = collectEnrichedContext({
-        sessionConfig: {
-          mode: fullConfig.mode as "1v1" | "group" | undefined,
-          interviewer_name: fullConfig.interviewer_name as string | undefined,
-          position_title: fullConfig.position_title as string | undefined,
-          company_name: fullConfig.company_name as string | undefined,
-          stages: configStages,
-          free_form_notes: fullConfig.free_form_notes as string | undefined,
-          rubric: fullConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
-        },
-      });
-
-      // Augment sessionContext with dimension presets from config
-      if (sessionContext) {
-        const it = fullConfig.interview_type;
-        if (typeof it === "string" && it) sessionContext.interview_type = it;
-        const dp = fullConfig.dimension_presets;
-        if (Array.isArray(dp)) sessionContext.dimension_presets = dp as DimensionPresetItem[];
-      }
-      const configNameAliases = (fullConfig.name_aliases ?? {}) as Record<string, string[]>;
-      const synthPayload = buildSynthesizePayload({
-        sessionId,
-        transcript: finalTranscript as TranscriptItem[],
-        memos: enrichedMemos,
-        evidence,
-        stats: mergedStats,
-        events: [],
-        bindings: memoBindings,
-        rubric,
-        sessionContext,
-        freeFormNotes,
-        historical: [],
-        stages: contextStages.length > 0 ? contextStages : configStages,
-        locale,
-        nameAliases: configNameAliases,
-        statsObservations: tier2StatsObservations,
-      });
-      const synthResult = await this.invokeInferenceSynthesizeReport(synthPayload);
-      if (synthResult.warnings.length > 0) {
-        tier2Warnings.push(...synthResult.warnings);
-      }
-
-      let finalPerPerson = tier1Result.per_person;
-      let finalOverall = tier1Result.overall;
-      let reportSource: ReportQualityMeta["report_source"] = "llm_synthesized";
-      let reportModel: string | null = null;
-
-      const synthData = synthResult.data;
-      const candidatePerPerson = Array.isArray(synthData?.per_person)
-        ? (synthData.per_person as PersonFeedbackItem[])
-        : [];
-      if (candidatePerPerson.length > 0) {
-        const { sanitized, strippedCount } = this.sanitizeClaimEvidenceRefs(candidatePerPerson, evidence);
-        if (strippedCount > 0) {
-          tier2Warnings.push(`tier2 sanitized ${strippedCount} claims with empty/invalid evidence_refs`);
-        }
-        const validation = this.validateClaimEvidenceRefs({
-          evidence,
-          per_person: sanitized
-        } as ResultV2);
-        if (validation.valid) {
-          finalPerPerson = sanitized;
-          finalOverall = (synthData?.overall ?? tier1Result.overall) as OverallFeedback;
-          const candidateQuality = synthData?.quality && typeof synthData.quality === "object"
-            ? (synthData.quality as Partial<ReportQualityMeta>)
-            : null;
-          reportSource = (candidateQuality?.report_source as typeof reportSource) ?? "llm_synthesized";
-          reportModel = typeof candidateQuality?.report_model === "string" ? candidateQuality.report_model : null;
-          // Stage 2 LLM fine-matching: backfill supporting_utterances into evidence
-          evidence = backfillSupportingUtterances(evidence, finalPerPerson);
-        } else {
-          tier2Warnings.push("tier2 LLM report had invalid evidence refs, keeping tier1 report content");
-          reportSource = tier1Result.quality.report_source ?? "memo_first";
-        }
-      } else {
-        tier2Warnings.push("tier2 LLM returned empty per_person, keeping tier1 report");
-        reportSource = tier1Result.quality.report_source ?? "memo_first";
-      }
-
-      await this.updateTier2Status({
-        status: "persisting",
-        progress: 90
-      });
-
-      // 6. Build and persist the tier2-refined result
-      const tier2FinalizedAt = this.currentIsoTs();
-      const tier2Quality: ReportQualityMeta = {
-        ...tier1Result.quality,
-        generated_at: tier2FinalizedAt,
-        report_source: reportSource,
-        report_model: reportModel,
-        report_degraded: false
-      };
-      const tier2ResultV2: ResultV2 = {
-        ...tier1Result,
-        transcript: finalTranscript,
-        stats: mergedStats,
-        evidence,
-        overall: finalOverall,
-        per_person: finalPerPerson,
-        quality: tier2Quality,
-        session: {
-          ...tier1Result.session,
-          finalized_at: tier2FinalizedAt
-        },
-        trace: {
-          ...tier1Result.trace,
-          generated_at: tier2FinalizedAt,
-          report_pipeline: {
-            mode: "llm_core_synthesis",
-            source: reportSource as "llm_synthesized",
-            llm_attempted: true,
-            llm_success: candidatePerPerson.length > 0,
-            llm_elapsed_ms: null,
-            blocking_reason: null
-          }
-        }
-      };
-
-      // Overwrite the result in R2
-      await this.env.RESULT_BUCKET.put(resultKey, JSON.stringify(tier2ResultV2), {
-        httpMetadata: { contentType: "application/json" }
-      });
-
-      // D1: update session metadata with Tier 2 refined results
-      if (this.env.DB) {
-        persistSessionToD1(this.env.DB, sessionId, tier2ResultV2, resultKey).catch(err => {
-          log("warn", "tier2: D1 persist failed (non-blocking)", { component: "tier2", session_id: sessionId, error: getErrorMessage(err) });
-        });
-      }
-
-      // Update feedback cache
-      const cache = await this.loadFeedbackCache(sessionId);
-      cache.updated_at = tier2FinalizedAt;
-      cache.report = tier2ResultV2;
-      cache.person_summary_cache = tier2ResultV2.per_person;
-      cache.overall_summary_cache = tier2ResultV2.overall;
-      cache.evidence_index_cache = this.buildEvidenceIndex(tier2ResultV2.per_person);
-      cache.quality = tier2ResultV2.quality;
-      cache.report_source = reportSource ?? "llm_synthesized";
-      cache.ready = true;
-      await this.storeFeedbackCache(cache);
-
-      await this.updateTier2Status({
-        status: "succeeded",
-        completed_at: tier2FinalizedAt,
-        report_version: "tier2_refined",
-        progress: 100,
-        warnings: tier2Warnings
-      });
-
-      log("info", "tier2: completed", { component: "tier2", session_id: sessionId });
-    } catch (err) {
-      const message = getErrorMessage(err);
-      log("error", "tier2: failed", { component: "tier2", session_id: sessionId, error: message });
-      await this.updateTier2Status({
-        status: "failed",
-        completed_at: this.currentIsoTs(),
-        error: message,
-        progress: 100
-      });
-    }
+    await runTier2JobFn(sessionId, tier2Ctx);
   }
 
   // ── Incremental Processing ─────────────────────────────────────────────
@@ -4838,190 +2508,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
    * Non-fatal: logs warning and increments failed count on any error.
    */
   private async runIncrementalJob(sessionId: string): Promise<void> {
-    const status = await this.loadIncrementalStatus();
-    if (!incrementalV1Enabled(this.env)) return;
-
-    // Compute total audio duration from "mixed" ingest (primary stream)
-    const ingestByStream = await this.loadIngestByStream(sessionId);
-    const totalAudioMs = ingestByStream.mixed.received_chunks * 1000;
-
-    const decision = shouldScheduleIncremental(this.env, status, totalAudioMs);
-    if (!decision.schedule) {
-      // Nothing to process yet — update status to "recording"
-      if (status.status === "idle") {
-        await this.updateIncrementalStatus({ status: "recording", enabled: true });
-      }
-      return;
-    }
-
-    await this.updateIncrementalStatus({
-      status: "processing",
-      enabled: true,
-      started_at: status.started_at ?? this.currentIsoTs()
-    });
-
-    try {
-      // Gather audio chunks for the range [startMs, endMs)
-      // Each chunk is 1 second of PCM, so seq corresponds to second offset
-      const sessionPrefix = `sessions/${sessionId}`;
-      const chunksPrefix = `${sessionPrefix}/chunks/`;
-
-      // All chunks for the "mixed" stream (primary)
-      const allChunkKeys: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const listing = await this.env.RESULT_BUCKET.list({
-          prefix: chunksPrefix,
-          cursor,
-          limit: 500
-        });
-        for (const obj of listing.objects) {
-          // Only include top-level chunks (no sub-folder = mixed stream)
-          if (!obj.key.slice(chunksPrefix.length).includes("/")) {
-            allChunkKeys.push(obj.key);
-          }
-        }
-        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
-      } while (cursor);
-
-      allChunkKeys.sort();
-
-      // Filter to the [startMs, endMs) window by sequence index
-      // chunkObjectKey produces: sessions/{id}/chunks/{seqPadded}.pcm
-      // Each chunk = 1 second = 1000ms; seq 0 = [0ms, 1000ms)
-      const startSeq = Math.floor(decision.startMs / 1000);
-      const endSeq = Math.ceil(decision.endMs / 1000);
-
-      const rangeKeys = allChunkKeys.filter((key) => {
-        const seqStr = key.split("/").pop()?.replace(".pcm", "") ?? "0";
-        const seq = parseInt(seqStr, 10);
-        return seq >= startSeq && seq < endSeq;
-      });
-
-      if (rangeKeys.length === 0) {
-        log("warn", "incremental: no chunks found for range", { sessionId, action: "incremental", startMs: decision.startMs, endMs: decision.endMs });
-        await this.updateIncrementalStatus({
-          status: "recording",
-          increments_failed: status.increments_failed + 1,
-          warnings: [...status.warnings, `no chunks for range [${decision.startMs},${decision.endMs})`]
-        });
-        return;
-      }
-
-      const pcmParts: Uint8Array[] = [];
-      for (const key of rangeKeys) {
-        const obj = await this.env.RESULT_BUCKET.get(key);
-        if (obj) {
-          pcmParts.push(new Uint8Array(await obj.arrayBuffer()));
-        }
-      }
-
-      const fullPcm = concatUint8Arrays(pcmParts);
-      const wavBytes = pcm16ToWavBytes(fullPcm, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-      const audioB64 = bytesToBase64(wavBytes);
-
-      const state = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
-      const locale = getSessionLocale(state, this.env);
-
-      const inferenceBase = (
-        (this.env.INFERENCE_BASE_URL ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "")
-      ).trim() || "http://127.0.0.1:8000";
-      const apiKey = ((this.env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
-
-      // ── V1 增量管线：唯一路径 ──
-      const incrementId = crypto.randomUUID();
-      const analysisInterval = incrementalAnalysisInterval(this.env);
-      const runAnalysis = analysisInterval > 0 && decision.incrementIndex % analysisInterval === 0;
-
-      const v1Payload = {
-        v: 1 as const,
-        session_id: sessionId,
-        increment_id: incrementId,
-        increment_index: decision.incrementIndex,
-        audio_b64: audioB64,
-        audio_start_ms: decision.startMs,
-        audio_end_ms: decision.endMs,
-        locale,
-        run_analysis: runAnalysis,
-        total_frames: rangeKeys.length,
-      };
-
-      const resp = await fetch(`${inferenceBase}/v1/incremental/process-chunk`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { "x-api-key": apiKey } : {})
-        },
-        body: JSON.stringify(v1Payload),
-        signal: AbortSignal.timeout(240_000) // 4 分钟超时
-      });
-
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => "unknown");
-        throw new Error(`/incremental/process-chunk returned ${resp.status}: ${errText.slice(0, 200)}`);
-      }
-
-      const json = await resp.json() as Record<string, unknown>;
-      const parsed = parseProcessChunkResponse(json);
-
-      // Persist updated speaker profiles and checkpoint
-      await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES, parsed.speakerProfiles);
-      if (parsed.checkpoint) {
-        await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_CHECKPOINT, parsed.checkpoint);
-      }
-
-      // Accumulate utterances in DO Storage (dedup by increment_index + utterance_id)
-      const existingUtts = await this.ctx.storage.get<StoredUtterance[]>(
-        STORAGE_KEY_INCREMENTAL_UTTERANCES
-      ) ?? [];
-
-      const newUtts: StoredUtterance[] = parsed.utterances.map(u => ({
-        utterance_id: u.utterance_id,
-        increment_index: u.increment_index,
-        text: u.text,
-        start_ms: u.start_ms,
-        end_ms: u.end_ms,
-        confidence: u.confidence ?? 1.0,
-        speaker: u.cluster_id ?? u.speaker_name ?? "unknown",
-        stream_role: u.stream_role ?? "mixed",
-      }));
-
-      const dedupKey = (u: StoredUtterance) => `${u.increment_index}:${u.utterance_id}`;
-      const seen = new Set(existingUtts.map(dedupKey));
-      const merged = [...existingUtts];
-      for (const u of newUtts) {
-        if (!seen.has(dedupKey(u))) {
-          merged.push(u);
-          seen.add(dedupKey(u));
-        }
-      }
-      const trimmed = merged.length > MAX_STORED_UTTERANCES
-        ? merged.slice(-MAX_STORED_UTTERANCES)
-        : merged;
-
-      await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_UTTERANCES, trimmed);
-
-      await this.updateIncrementalStatus({
-        status: "recording",
-        increments_completed: status.increments_completed + 1,
-        last_processed_ms: decision.endMs,
-        speakers_detected: parsed.speakersDetected,
-        stable_speaker_map: parsed.stableSpeakerMap,
-        last_increment_at: this.currentIsoTs(),
-        error: null
-      });
-
-      log("info", "incremental: increment completed", { sessionId, action: "incremental", incrementIndex: decision.incrementIndex, speakersDetected: parsed.speakersDetected, utteranceCount: parsed.utterances.length });
-    } catch (err) {
-      const message = getErrorMessage(err);
-      log("warn", "incremental: increment failed (non-fatal)", { sessionId, action: "incremental", incrementIndex: decision.incrementIndex, error: message });
-      await this.updateIncrementalStatus({
-        status: "recording",
-        increments_failed: status.increments_failed + 1,
-        warnings: [...status.warnings, `increment ${decision.incrementIndex} failed: ${message}`],
-        error: message
-      });
-    }
+    const incrementalCtx: IncrementalContext = {
+      storage: this.ctx.storage,
+      env: this.env,
+      loadIncrementalStatus: () => this.loadIncrementalStatus(),
+      updateIncrementalStatus: (patch) => this.updateIncrementalStatus(patch),
+      loadIngestByStream: (sid) => this.loadIngestByStream(sid),
+      currentIsoTs: () => this.currentIsoTs(),
+    };
+    await runIncrementalJobFn(sessionId, incrementalCtx);
   }
 
   /**
@@ -5037,173 +2532,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
     locale: string,
     nameAliases: Record<string, string[]>
   ): Promise<boolean> {
-    try {
-      const incrementalStatus = await this.loadIncrementalStatus();
-      if (!incrementalV1Enabled(this.env) || incrementalStatus.increments_completed === 0) {
-        return false;
-      }
-
-      await this.updateIncrementalStatus({ status: "finalizing" });
-
-      // 列出所有 mixed 流的 chunk keys
-      const sessionPrefix = `sessions/${sessionId}`;
-      const chunksPrefix = `${sessionPrefix}/chunks/`;
-      const allChunkKeys: string[] = [];
-      let cursor: string | undefined;
-      do {
-        const listing = await this.env.RESULT_BUCKET.list({
-          prefix: chunksPrefix,
-          cursor,
-          limit: 500
-        });
-        for (const obj of listing.objects) {
-          if (!obj.key.slice(chunksPrefix.length).includes("/")) {
-            allChunkKeys.push(obj.key);
-          }
-        }
-        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
-      } while (cursor);
-
-      allChunkKeys.sort();
-
-      if (allChunkKeys.length === 0) {
-        log("warn", "incremental: finalize found no audio chunks", { sessionId, action: "incremental_finalize" });
-        await this.updateIncrementalStatus({ status: "failed", error: "no audio chunks" });
-        return false;
-      }
-
-      const inferenceBase = (
-        (this.env.INFERENCE_BASE_URL ?? this.env.INFERENCE_BASE_URL_PRIMARY ?? "")
-      ).trim() || "http://127.0.0.1:8000";
-      const apiKey = ((this.env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
-
-      // ── V1 增量 finalize：使用 R2 引用代替 base64 音频（唯一路径） ──
-      const r2AudioRefs: Array<{ key: string; startMs: number; endMs: number }> = allChunkKeys.map((key) => {
-        // 从 key 解析序列号，每个 chunk 代表 1 秒（1000ms）
-        const seqStr = key.split("/").pop()?.replace(".pcm", "") ?? "0";
-        const seq = parseInt(seqStr, 10);
-        return {
-          key,
-          startMs: seq * 1000,
-          endMs: (seq + 1) * 1000,
-        };
-      });
-
-      const totalAudioMs = allChunkKeys.length * 1000;
-
-      // ── Recompute: filter low-confidence utterances, fetch audio from R2 ──
-      const RECOMPUTE_CONFIDENCE_THRESHOLD = 0.7;
-      const RECOMPUTE_MAX_SEGMENTS = 10;
-      const RECOMPUTE_MIN_DURATION_MS = 500;
-      const RECOMPUTE_MAX_DURATION_MS = 30_000;
-      const RECOMPUTE_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
-      const BASE64_OVERHEAD = 4 / 3;
-      const JSON_FIELD_OVERHEAD = 200;
-
-      const storedUtterances = await this.ctx.storage.get<StoredUtterance[]>(
-        STORAGE_KEY_INCREMENTAL_UTTERANCES
-      ) ?? [];
-
-      const lowConfUtterances = storedUtterances
-        .filter(u =>
-          u.confidence < RECOMPUTE_CONFIDENCE_THRESHOLD &&
-          (u.end_ms - u.start_ms) >= RECOMPUTE_MIN_DURATION_MS &&
-          (u.end_ms - u.start_ms) <= RECOMPUTE_MAX_DURATION_MS
-        )
-        .sort((a, b) => a.confidence - b.confidence)
-        .slice(0, RECOMPUTE_MAX_SEGMENTS);
-
-      const recomputeSegments: RecomputeSegment[] = [];
-      let estimatedPayloadBytes = 0;
-
-      for (const utt of lowConfUtterances) {
-        if (estimatedPayloadBytes >= RECOMPUTE_MAX_PAYLOAD_BYTES) break;
-
-        const startSeq = Math.floor(utt.start_ms / 1000);
-        const endSeq = Math.ceil(utt.end_ms / 1000);
-
-        const pcmChunks: Uint8Array[] = [];
-        let fetchFailed = false;
-        for (let seq = startSeq; seq < endSeq; seq++) {
-          const key = chunkObjectKey(sessionId, utt.stream_role as StreamRole, seq);
-          const obj = await this.env.RESULT_BUCKET.get(key);
-          if (!obj) { fetchFailed = true; break; }
-          pcmChunks.push(new Uint8Array(await obj.arrayBuffer()));
-        }
-
-        if (fetchFailed || pcmChunks.length === 0) continue;
-
-        const totalPcm = concatUint8Arrays(pcmChunks);
-        const segPayload = Math.ceil(totalPcm.byteLength * BASE64_OVERHEAD) + JSON_FIELD_OVERHEAD;
-        if (estimatedPayloadBytes + segPayload > RECOMPUTE_MAX_PAYLOAD_BYTES) continue;
-
-        const wavBytes = pcm16ToWavBytes(totalPcm);
-        const audioB64 = bytesToBase64(wavBytes);
-
-        recomputeSegments.push({
-          utterance_id: utt.utterance_id,
-          increment_index: utt.increment_index,
-          start_ms: utt.start_ms,
-          end_ms: utt.end_ms,
-          original_confidence: utt.confidence,
-          stream_role: utt.stream_role,
-          audio_b64: audioB64,
-          audio_format: "wav",
-        });
-
-        estimatedPayloadBytes += segPayload;
-      }
-
-      const v1Payload = buildFinalizePayloadV1({
-        sessionId,
-        r2AudioRefs,
-        totalAudioMs,
-        locale,
-        memos,
-        stats,
-        evidence,
-        nameAliases,
-        recomputeSegments,
-      });
-
-      const resp = await fetch(`${inferenceBase}/v1/incremental/finalize`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { "x-api-key": apiKey } : {})
-        },
-        body: JSON.stringify(v1Payload),
-        signal: AbortSignal.timeout(300_000) // 5 分钟超时
-      });
-
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => "unknown");
-        throw new Error(`/incremental/finalize returned ${resp.status}: ${errText.slice(0, 200)}`);
-      }
-
-      // Response is a full ResultV2-compatible object — caller decides what to do with it.
-      // For now we just return true so the finalize_v2 persist stage knows it succeeded.
-      // The finalize_v2 flow can call runIncrementalFinalize separately and merge the result.
-
-      // Clean up DO utterance cache (Hard Point 5)
-      await this.ctx.storage.delete(STORAGE_KEY_INCREMENTAL_UTTERANCES);
-
-      await this.updateIncrementalStatus({
-        status: "succeeded",
-        last_increment_at: this.currentIsoTs(),
-        error: null
-      });
-
-      log("info", "incremental: finalize succeeded", { component: "incremental", session_id: sessionId });
-      return true;
-    } catch (err) {
-      const message = getErrorMessage(err);
-      log("warn", "incremental: finalize failed (non-fatal)", { component: "incremental", session_id: sessionId, error: message });
-      // Clean up utterance cache even on failure (Hard Point 5)
-      await this.ctx.storage.delete(STORAGE_KEY_INCREMENTAL_UTTERANCES).catch(() => {});
-      await this.updateIncrementalStatus({ status: "failed", error: message });
-      return false;
-    }
+    const finalizeCtx: IncrementalFinalizeContext = {
+      storage: this.ctx.storage,
+      env: this.env,
+      loadIncrementalStatus: () => this.loadIncrementalStatus(),
+      updateIncrementalStatus: (patch) => this.updateIncrementalStatus(patch),
+      currentIsoTs: () => this.currentIsoTs(),
+    };
+    return runIncrementalFinalizeFn(sessionId, memos, stats, evidence, locale, nameAliases, finalizeCtx);
   }
 
   async handleChunkFrame(
@@ -5417,7 +2753,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     sessionId: string,
     connectionRole: StreamRole
   ): Response {
-    return handleWebSocketUpgrade(this, request, sessionId, connectionRole);
+    return handleWebSocketUpgrade(this, request, sessionId, connectionRole, this.env as unknown as Record<string, unknown>);
   }
 
   async fetch(request: Request): Promise<Response> {
