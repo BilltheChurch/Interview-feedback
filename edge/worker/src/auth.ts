@@ -8,7 +8,12 @@ export function validateApiKey(request: Request, env: Record<string, unknown>): 
   if (!key) return null; // dev mode — no key configured
 
   const url = new URL(request.url);
-  const incoming = request.headers.get('x-api-key') || url.searchParams.get('api_key');
+  // Prefer Sec-WebSocket-Protocol header (for WS connections — key never appears in URL logs).
+  // Fall back to x-api-key header (HTTP endpoints), then query param (backward compat only).
+  const incoming =
+    request.headers.get('sec-websocket-protocol') ||
+    request.headers.get('x-api-key') ||
+    url.searchParams.get('api_key');
 
   if (!incoming || !timingSafeEqual(incoming, key)) {
     return new Response(JSON.stringify({ detail: 'unauthorized' }), {

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000, alias="APP_PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     inference_api_key: SecretStr = Field(default="", alias="INFERENCE_API_KEY")
-    trust_proxy_headers: bool = Field(default=True, alias="TRUST_PROXY_HEADERS")
+    trust_proxy_headers: bool = Field(default=False, alias="TRUST_PROXY_HEADERS")
 
     sv_model_id: str = Field(
         default="iic/speech_campplus_sv_zh_en_16k-common_advanced",
@@ -30,10 +30,13 @@ class Settings(BaseSettings):
     profile_margin_threshold: float = Field(default=0.08, alias="PROFILE_MARGIN_THRESHOLD")
     enrollment_ready_seconds: float = Field(default=12.0, alias="ENROLLMENT_READY_SECONDS")
     enrollment_ready_samples: int = Field(default=3, alias="ENROLLMENT_READY_SAMPLES")
-    report_model_provider: Literal["dashscope"] = Field(default="dashscope", alias="REPORT_MODEL_PROVIDER")
+    report_model_provider: Literal["dashscope", "openai"] = Field(default="dashscope", alias="REPORT_MODEL_PROVIDER")
     report_model_name: str = Field(default="qwen-turbo", alias="REPORT_MODEL_NAME")
     dashscope_api_key: SecretStr = Field(default="", alias="DASHSCOPE_API_KEY")
     report_timeout_ms: int = Field(default=45000, alias="REPORT_TIMEOUT_MS")
+    openai_api_key: SecretStr = Field(default="", alias="OPENAI_API_KEY")
+    openai_model_name: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL_NAME")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
 
     audio_sr: int = Field(default=16000, alias="AUDIO_SR")
     max_audio_seconds: int = Field(default=30, alias="MAX_AUDIO_SECONDS")
@@ -87,6 +90,11 @@ class Settings(BaseSettings):
     )
     pyannote_device: str = Field(default="auto", alias="PYANNOTE_DEVICE")
     hf_token: SecretStr = Field(default="", alias="HF_TOKEN")
+
+    # Diarization backend selection
+    diarization_backend: Literal["pyannote", "nemo"] = Field(default="pyannote", alias="DIARIZATION_BACKEND")
+    nemo_model_name: str = Field(default="diar_msdd_telephonic", alias="NEMO_MODEL_NAME")
+    nemo_device: str = Field(default="auto", alias="NEMO_DEVICE")
 
     # Incremental processing
     incremental_interval_ms: int = Field(default=180_000, alias="INCREMENTAL_INTERVAL_MS")

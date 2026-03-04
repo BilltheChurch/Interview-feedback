@@ -31,6 +31,9 @@ jobs:
         run: npx vitest run
       - name: Build
         run: npx vite build
+      - name: Audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -58,9 +61,12 @@ jobs:
         run: npx vitest run
       - name: Run contract tests
         run: npx vitest run tests/contract-inference.test.ts
+      - name: Audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
 
   inference:
-    name: Inference (Unit)
+    name: Inference (Lint + Unit)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -73,10 +79,17 @@ jobs:
           cache: 'pip'
           cache-dependency-path: inference/requirements.txt
       - run: pip install -r requirements.txt
+      - name: Install lint tools
+        run: pip install ruff pip-audit
+      - name: Lint
+        run: ruff check .
       - name: Run Tests
         run: python -m pytest tests/ -v -m "not integration"
       - name: Run contract tests
         run: python -m pytest tests/test_contract_worker_inference.py -v
+      - name: Audit
+        run: pip-audit -r requirements.txt
+        continue-on-error: true
 
   inference-integration:
     name: Inference (Integration)

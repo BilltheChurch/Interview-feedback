@@ -4,13 +4,36 @@ import asyncio
 import concurrent.futures
 import hmac
 import logging
+import time
 from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from app.config import get_settings
+
+# ── Observability: OpenTelemetry + Prometheus ─────────────────────────
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    _otel_available = True
+except ImportError:
+    _otel_available = False
+
+try:
+    from prometheus_client import (
+        Counter,
+        Histogram,
+        generate_latest,
+        CONTENT_TYPE_LATEST,
+    )
+    _prom_available = True
+except ImportError:
+    _prom_available = False
 from app.routes.asr import router as asr_router
 from app.routes.batch import router as batch_router
 from app.routes.incremental_v1 import v1_router
@@ -70,11 +93,44 @@ rate_limiter = (
     else None
 )
 app = FastAPI(title=settings.app_name, version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://chorus.frontierace.ai",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 app.state.runtime = runtime
 app.include_router(asr_router)
 app.include_router(batch_router)
 app.include_router(v1_router)
 register_ws_routes(app, runtime)
+
+# ── OpenTelemetry auto-instrumentation ────────────────────────────────
+if _otel_available:
+    _resource = Resource.create({"service.name": settings.app_name})
+    _tracer_provider = TracerProvider(resource=_resource)
+    trace.set_tracer_provider(_tracer_provider)
+    FastAPIInstrumentor.instrument_app(app)
+    logger.info("OpenTelemetry tracing enabled for %s", settings.app_name)
+
+# ── Prometheus metrics ────────────────────────────────────────────────
+if _prom_available:
+    REQUEST_COUNT = Counter(
+        "http_requests_total",
+        "Total HTTP requests",
+        ["method", "endpoint", "status"],
+    )
+    REQUEST_DURATION = Histogram(
+        "http_request_duration_seconds",
+        "HTTP request duration in seconds",
+        ["method", "endpoint"],
+        buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
+    )
 
 _thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
@@ -93,6 +149,20 @@ async def _warmup_asr() -> None:
         logger.info("ASR backend ready: backend=%s, device=%s, model=%s", asr.backend, asr.device, asr.model_size)
     except Exception as exc:
         logger.warning("ASR backend info unavailable: %s", exc)
+
+
+@app.middleware("http")
+async def prometheus_metrics(request: Request, call_next: Callable) -> Response:
+    """Record request count and duration for Prometheus."""
+    if not _prom_available or request.url.path in {"/metrics", "/health"}:
+        return await call_next(request)
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    endpoint = request.url.path
+    REQUEST_DURATION.labels(method=request.method, endpoint=endpoint).observe(duration)
+    REQUEST_COUNT.labels(method=request.method, endpoint=endpoint, status=response.status_code).inc()
+    return response
 
 
 @app.middleware("http")
@@ -166,14 +236,22 @@ async def handle_not_implemented(_: Request, exc: NotImplementedServiceError) ->
 
 @app.exception_handler(SVBackendError)
 async def handle_sv_backend_error(_: Request, exc: SVBackendError) -> JSONResponse:
-    logger.exception("speaker verification backend error")
-    return JSONResponse(status_code=500, content=ErrorResponse(detail=str(exc)).model_dump())
+    logger.error("Speaker verification error: %s", str(exc))
+    return JSONResponse(status_code=503, content=ErrorResponse(detail="speaker verification error").model_dump())
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Minimal health check — no auth required."""
     return {"status": "ok", "app_name": settings.app_name}
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics endpoint — no auth required."""
+    if not _prom_available:
+        return JSONResponse(status_code=501, content={"detail": "prometheus-client not installed"})
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health/detailed", response_model=HealthResponse)
@@ -370,8 +448,8 @@ async def merge_checkpoints(req: MergeCheckpointsRequest) -> AnalysisReportRespo
 
 
 @app.post("/sd/diarize", response_model=DiarizeResponse)
-async def diarize(req: DiarizeRequest) -> DiarizeResponse:
-    """Speaker diarization using pyannote.audio full pipeline."""
+async def diarize(req: DiarizeRequest, request: Request) -> DiarizeResponse:
+    """Speaker diarization using the configured diarization backend."""
     if not runtime.settings.enable_diarization:
         raise NotImplementedServiceError("/sd/diarize is disabled (ENABLE_DIARIZATION=false)")
 
@@ -379,8 +457,6 @@ async def diarize(req: DiarizeRequest) -> DiarizeResponse:
     import tempfile
     import wave
     from pathlib import Path
-
-    from app.routes.batch import _get_diarizer
 
     # Decode base64 audio to temp WAV file
     audio_bytes = base64.b64decode(req.audio.content_b64)
@@ -404,7 +480,8 @@ async def diarize(req: DiarizeRequest) -> DiarizeResponse:
         tmp_path = tmp.name
 
     try:
-        diarizer = _get_diarizer()
+        # Use runtime diarizer (respects DIARIZATION_BACKEND config)
+        diarizer = request.app.state.runtime.incremental_processor._diarizer
         result = await asyncio.to_thread(diarizer.diarize, tmp_path)
 
         return DiarizeResponse(
@@ -419,6 +496,16 @@ async def diarize(req: DiarizeRequest) -> DiarizeResponse:
             Path(tmp_path).unlink(missing_ok=True)
         except OSError:
             pass
+
+
+@app.delete("/session/{session_id}")
+async def delete_session_data(session_id: str, request: Request):
+    """GDPR: Delete all inference-side data for a session (Redis keys)."""
+    rt = request.app.state.runtime
+    deleted_keys = 0
+    if rt.redis_state is not None:
+        deleted_keys = rt.redis_state.cleanup_session(session_id)
+    return {"session_id": session_id, "deleted_keys": deleted_keys}
 
 
 @app.exception_handler(HTTPException)

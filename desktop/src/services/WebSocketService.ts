@@ -34,24 +34,21 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 
 async function buildWsUrl(baseWsUrl: string, sessionId: string, role: StreamRole): Promise<string> {
   const base = baseWsUrl.replace(/\/+$/, '');
-  const url = `${base}/v1/audio/ws/${encodeURIComponent(sessionId)}/${role}`;
+  return `${base}/v1/audio/ws/${encodeURIComponent(sessionId)}/${role}`;
+}
+
+async function getApiKey(): Promise<string | undefined> {
   // Retrieve API key from main process via IPC (keeps secret out of renderer bundle).
   // Falls back to VITE_ env var for dev/browser mode where desktopAPI is unavailable.
-  let apiKey: string | undefined;
   try {
     if (window.desktopAPI?.getWorkerApiKey) {
-      apiKey = await window.desktopAPI.getWorkerApiKey();
+      const key = await window.desktopAPI.getWorkerApiKey();
+      if (key) return key;
     }
   } catch {
     // IPC unavailable — fall through to env var
   }
-  if (!apiKey) {
-    apiKey = import.meta.env.VITE_WORKER_API_KEY;
-  }
-  if (apiKey) {
-    return `${url}?api_key=${encodeURIComponent(apiKey)}`;
-  }
-  return url;
+  return import.meta.env.VITE_WORKER_API_KEY;
 }
 
 /* ── WebSocketService ──────────────────────── */
@@ -88,9 +85,12 @@ class WebSocketService {
 
     return new Promise(async (resolve, reject) => {
       const url = await buildWsUrl(baseWsUrl, sessionId, role);
+      const apiKey = await getApiKey();
       useSessionStore.getState().setWsStatus(role, 'connecting');
 
-      const ws = new WebSocket(url);
+      // Pass API key via Sec-WebSocket-Protocol header (keeps it out of URL logs).
+      // The server echoes back the protocol in its 101 response.
+      const ws = apiKey ? new WebSocket(url, [apiKey]) : new WebSocket(url);
       this.sockets[role] = ws;
       this.ready[role] = false;
       this.closing[role] = false;
