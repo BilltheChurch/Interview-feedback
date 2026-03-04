@@ -82,9 +82,12 @@ class TestSdDiarizeSchema:
         mock_runtime = MagicMock()
         mock_runtime.settings = mock_settings
 
+        mock_inc = MagicMock(_diarizer=mock_diarizer)
+        mock_runtime.incremental_processor = mock_inc
+
         with _no_auth(), \
              patch("app.main.runtime", mock_runtime), \
-             patch("app.routes.batch._get_diarizer", return_value=mock_diarizer):
+             patch.object(app.state, "runtime", mock_runtime):
             resp = client.post("/sd/diarize", json={
                 "session_id": "test-session",
                 "audio": {

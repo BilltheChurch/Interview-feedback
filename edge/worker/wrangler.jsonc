@@ -13,8 +13,8 @@
   ],
 
   "vars": {
-    "INFERENCE_BASE_URL_PRIMARY": "http://127.0.0.1:8000",
-    "INFERENCE_BASE_URL_SECONDARY": "https://if.frontierace.ai",
+    "INFERENCE_BASE_URL_PRIMARY": "https://if.frontierace.ai",
+    "INFERENCE_BASE_URL_SECONDARY": "http://127.0.0.1:8000",
     "INFERENCE_TIMEOUT_MS": "60000",
     "INFERENCE_FAILOVER_ENABLED": "true",
     "INFERENCE_RETRY_MAX": "2",
@@ -76,5 +76,32 @@
       "binding": "RESULT_BUCKET",
       "bucket_name": "interview-feedback-results"
     }
-  ]
+  ],
+
+  // ── Staging environment ─────────────────────────────────────────────
+  // Deploy: npx wrangler deploy --env staging
+  "env": {
+    "staging": {
+      "name": "interview-feedback-gateway-staging",
+      "workers_dev": true,
+      "routes": [],
+      "vars": {
+        "INFERENCE_BASE_URL_PRIMARY": "http://127.0.0.1:8000",
+        "INFERENCE_BASE_URL_SECONDARY": "",
+        "INFERENCE_FAILOVER_ENABLED": "false",
+        "TIER2_ENABLED": "false",
+        "TIER2_AUTO_TRIGGER": "false",
+        "ASR_REALTIME_ENABLED": "true",
+        "AUDIO_RETENTION_HOURS": "24",
+        "INCREMENTAL_V1_ENABLED": "true",
+        "DEFAULT_LOCALE": "en-US"
+      },
+      "r2_buckets": [
+        {
+          "binding": "RESULT_BUCKET",
+          "bucket_name": "interview-feedback-results-staging"
+        }
+      ]
+    }
+  }
 }

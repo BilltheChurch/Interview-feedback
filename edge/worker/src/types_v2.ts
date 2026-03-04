@@ -52,6 +52,35 @@ export interface SpeakerLogs {
   updated_at: string;
 }
 
+// ── Session Phase State Machine ──────────────────────────────────────────
+// Explicit lifecycle: idle → recording → finalizing → finalized → archived
+export type SessionPhase =
+  | "idle"        // DO created, no audio ingested yet
+  | "recording"   // WebSocket connected, audio being received
+  | "finalizing"  // Finalization in progress
+  | "finalized"   // Finalization succeeded, results available
+  | "archived";   // Data retention cleanup completed or GDPR purged
+
+/** Valid transitions for the session phase state machine. */
+export const SESSION_PHASE_TRANSITIONS: Record<SessionPhase, SessionPhase[]> = {
+  idle:       ["recording"],
+  recording:  ["finalizing"],
+  finalizing: ["finalized", "recording"],  // recording = retry after failure
+  finalized:  ["archived", "finalizing"],  // finalizing = re-finalize
+  archived:   ["idle"],                    // idle = after GDPR purge
+};
+
+// ── Finalize Stage Checkpoint (E5: idempotent resume) ───────────────────
+export interface FinalizeStageCheckpoint {
+  job_id: string;
+  /** Last stage that completed successfully. */
+  completed_stage: FinalizeV2Stage;
+  /** Epoch ms when this checkpoint was written. */
+  saved_at: number;
+  /** Serialized output data from the completed stage (used to skip re-computation). */
+  stage_data: Record<string, unknown>;
+}
+
 export type FinalizeV2StatusState =
   | "idle"
   | "queued"

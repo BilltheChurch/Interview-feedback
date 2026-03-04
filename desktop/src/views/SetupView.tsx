@@ -27,8 +27,11 @@ import { Button } from '../components/ui/Button';
 import { TextField } from '../components/ui/TextField';
 import { TextArea } from '../components/ui/TextArea';
 import { Chip } from '../components/ui/Chip';
+import { Modal } from '../components/ui/Modal';
 import { ShimmerButton } from '../components/magicui/shimmer-button';
 import { RubricTemplateModal, type CustomTemplate } from '../components/RubricTemplateModal';
+
+const RECORDING_CONSENT_KEY = 'ifb_recording_consent_accepted';
 import { DIMENSION_PRESETS, type DimensionPresetItem } from '../lib/dimensionPresets';
 
 /* ─── Motion Variants ────────────────────────── */
@@ -806,7 +809,12 @@ export function SetupView() {
     setParticipants((prev) => [...prev, ...newOnes]);
   };
 
-  const handleStart = useCallback(async () => {
+  // ── Recording consent (GDPR) ──
+  const [showConsent, setShowConsent] = useState(false);
+  const hasConsented = useRef(localStorage.getItem(RECORDING_CONSENT_KEY) === 'true');
+  const pendingStartRef = useRef(false);
+
+  const handleStartInner = useCallback(async () => {
     const sessionId = `sess_${Date.now()}`;
     const displayName = sessionName || 'Untitled Session';
 
@@ -865,6 +873,25 @@ export function SetupView() {
       dimensionPresets,
     });
   }, [sessionName, mode, participants, template, stages, teamsUrl, startSession, navigate]);
+
+  const handleStartWithConsent = useCallback(() => {
+    if (!hasConsented.current) {
+      pendingStartRef.current = true;
+      setShowConsent(true);
+      return;
+    }
+    handleStartInner();
+  }, [handleStartInner]);
+
+  const acceptConsent = useCallback(() => {
+    localStorage.setItem(RECORDING_CONSENT_KEY, 'true');
+    hasConsented.current = true;
+    setShowConsent(false);
+    if (pendingStartRef.current) {
+      pendingStartRef.current = false;
+      handleStartInner();
+    }
+  }, [handleStartInner]);
 
   // Wizard step state
   const [step, setStep] = useState(0);
@@ -1236,7 +1263,7 @@ export function SetupView() {
               Continue
             </Button>
           ) : (
-            <ShimmerButton onClick={handleStart} className="w-auto">
+            <ShimmerButton onClick={handleStartWithConsent} className="w-auto">
               <Layout className="w-4 h-4" />
               Join & Start Session
             </ShimmerButton>
@@ -1254,6 +1281,33 @@ export function SetupView() {
         onSave={handleSaveTemplate}
         editTemplate={editingTemplate}
       />
+
+      {/* Recording Consent Modal (GDPR) */}
+      <Modal open={showConsent} onClose={() => setShowConsent(false)} title="Recording Consent" size="sm">
+        <div className="space-y-4">
+          <p className="text-sm text-ink-secondary leading-relaxed">
+            This session will record audio from your microphone and system audio
+            for real-time transcription and AI-powered feedback analysis.
+          </p>
+          <ul className="text-sm text-ink-secondary space-y-1 list-disc pl-4">
+            <li>Audio is processed in real-time and stored temporarily</li>
+            <li>Recordings are automatically deleted after 30 days</li>
+            <li>You can delete session data at any time from History</li>
+          </ul>
+          <p className="text-xs text-ink-tertiary">
+            By continuing, you confirm that all participants have been informed
+            and consent to being recorded.
+          </p>
+          <div className="flex gap-3 pt-2">
+            <Button variant="ghost" onClick={() => setShowConsent(false)} className="flex-1">
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={acceptConsent} className="flex-1">
+              I Agree, Start Recording
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

@@ -31,7 +31,6 @@ import {
   type InferenceEndpointKey
 } from "./inference_client";
 import { analyzeEventsLocally } from "./local_events_analyzer";
-import { validateApiKey } from "./auth";
 import {
   decodeBase64ToBytes,
   bytesToBase64,
@@ -60,8 +59,10 @@ import type {
   CheckpointRequestPayload,
   CheckpointResult,
   FinalizeV2Status,
+  FinalizeStageCheckpoint,
   IncrementalStatus,
   IncrementalSpeakerProfile,
+  SessionPhase,
   StoredUtterance,
   MemoItem,
   MemoSpeakerBinding,
@@ -89,1588 +90,216 @@ import {
 import { buildFinalizePayloadV1 } from "./incremental_v1";
 import type { R2AudioRefV1, RecomputeSegment } from "./incremental_v1";
 
-// V1 增量管线特性开关
-function incrementalV1Enabled(env: Env): boolean {
-  return env.INCREMENTAL_V1_ENABLED === "true";
-}
+import { handleWorkerFetch } from "./router";
+import {
+  buildEvidenceIndex as buildEvidenceIndexFn,
+  findClaimInReport as findClaimInReportFn,
+  downWeightClaimConfidenceByEvidence as downWeightClaimConfidenceByEvidenceFn,
+  sanitizeClaimEvidenceRefs as sanitizeClaimEvidenceRefsFn,
+  validateClaimEvidenceRefs as validateClaimEvidenceRefsFn,
+  evaluateFeedbackQualityGates as evaluateFeedbackQualityGatesFn,
+  mergeStatsWithRoster as mergeStatsWithRosterFn,
+  confidenceBucketFromEvidence as confidenceBucketFromEvidenceFn,
+  echoLeakRate as echoLeakRateFn,
+  suppressionFalsePositiveRate as suppressionFalsePositiveRateFn,
+  buildQualityMetrics as buildQualityMetricsFn,
+  speechBackendMode as speechBackendModeFn
+} from "./feedback-helpers";
+import {
+  resolveTeacherIdentity as resolveTeacherIdentityFn,
+  deriveSpeakerLogsFromTranscript as deriveSpeakerLogsFromTranscriptFn,
+  buildEdgeSpeakerLogsForFinalize as buildEdgeSpeakerLogsForFinalizeFn,
+  deriveMixedCaptureState as deriveMixedCaptureStateFn
+} from "./speaker-helpers";
+import {
+  scoreNumber as scoreNumberFn,
+  participantProgressFromProfiles as participantProgressFromProfilesFn,
+  refreshEnrollmentMode as refreshEnrollmentModeFn,
+  rosterNameByCandidate as rosterNameByCandidateFn,
+  inferParticipantFromText as inferParticipantFromTextFn,
+  updateUnassignedEnrollmentByCluster as updateUnassignedEnrollmentByClusterFn
+} from "./enrollment-helpers";
+import {
+  isAsrEnabled as isAsrEnabledFn,
+  asrRealtimeEnabled as asrRealtimeEnabledFn,
+  asrDebugEnabled as asrDebugEnabledFn,
+  buildDefaultAsrState as buildDefaultAsrStateFn,
+  sanitizeAsrState as sanitizeAsrStateFn,
+  defaultAsrByStream as defaultAsrByStreamFn,
+  emptyAsrCursorByStream as emptyAsrCursorByStreamFn,
+  buildRealtimeRuntime as buildRealtimeRuntimeFn,
+  sendWsJson as sendWsJsonFn,
+  sendWsError as sendWsErrorFn
+} from "./asr-helpers";
+import {
+  incrementalV1Enabled,
+  type StreamRole,
+  STREAM_ROLES,
+  type AudioPayload,
+  type RosterEntry,
+  type ResolveRequest,
+  type ClusterState,
+  type ParticipantProfile,
+  type BindingMeta,
+  type EnrollmentParticipantProgress,
+  type EnrollmentUnassignedProgress,
+  type EnrollmentState,
+  type SessionState,
+  type SessionConfigRequest,
+  type CaptureState,
+  type ResolveEvidence,
+  type ResolveResponse,
+  type SpeakerEvent,
+  type EnrollmentStartRequest,
+  type ClusterMapRequest,
+  type InferenceEnrollRequest,
+  type InferenceEnrollResponse,
+  type FinalizeRequest,
+  type FeedbackRegenerateClaimRequest,
+  type FeedbackClaimEvidenceRequest,
+  type InferenceRegenerateClaimRequest,
+  type InferenceRegenerateClaimResponse,
+  type FeedbackExportRequest,
+  type IngestState,
+  type UtteranceRaw,
+  type UtteranceMerged,
+  type FeedbackTimings,
+  type FeedbackCache,
+  type QualityMetrics,
+  type HistoryIndexItem,
+  type AsrState,
+  type AsrRunResult,
+  type AsrReplayCursor,
+  type AsrQueueChunk,
+  type AsrRealtimeRuntime,
+  type AudioChunkFrame,
+  type Env,
+  DEFAULT_STATE,
+  emptyReportQualityMeta,
+  emptyFeedbackCache,
+  SESSION_ROUTE_REGEX,
+  SESSION_ENROLL_ROUTE_REGEX,
+  SESSION_FINALIZE_STATUS_ROUTE_REGEX,
+  SESSION_TIER2_STATUS_ROUTE_REGEX,
+  SESSION_INCREMENTAL_STATUS_ROUTE_REGEX,
+  SESSION_HISTORY_ROUTE_REGEX,
+  WS_INGEST_ROUTE_REGEX,
+  WS_INGEST_ROLE_ROUTE_REGEX,
+  STORAGE_KEY_STATE,
+  STORAGE_KEY_EVENTS,
+  STORAGE_KEY_UPDATED_AT,
+  STORAGE_KEY_FINALIZED_AT,
+  STORAGE_KEY_RESULT_KEY,
+  STORAGE_KEY_RESULT_KEY_V2,
+  STORAGE_KEY_FINALIZE_V2_STATUS,
+  STORAGE_KEY_FINALIZE_LOCK,
+  STORAGE_KEY_TIER2_STATUS,
+  STORAGE_KEY_TIER2_ALARM_TAG,
+  STORAGE_KEY_INCREMENTAL_STATUS,
+  STORAGE_KEY_INCREMENTAL_ALARM_TAG,
+  STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES,
+  STORAGE_KEY_INCREMENTAL_CHECKPOINT,
+  STORAGE_KEY_MEMOS,
+  STORAGE_KEY_SPEAKER_LOGS,
+  STORAGE_KEY_ASR_CURSOR_BY_STREAM,
+  STORAGE_KEY_FEEDBACK_CACHE,
+  STORAGE_KEY_DEPENDENCY_HEALTH,
+  STORAGE_KEY_INGEST_STATE,
+  STORAGE_KEY_ASR_STATE,
+  STORAGE_KEY_UTTERANCES_RAW,
+  STORAGE_KEY_INGEST_BY_STREAM,
+  STORAGE_KEY_ASR_BY_STREAM,
+  STORAGE_KEY_UTTERANCES_RAW_BY_STREAM,
+  STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM,
+  STORAGE_KEY_CHECKPOINTS,
+  STORAGE_KEY_LAST_CHECKPOINT_AT,
+  STORAGE_KEY_CAPTION_SOURCE,
+  STORAGE_KEY_CAPTION_BUFFER,
+  STORAGE_KEY_INCREMENTAL_UTTERANCES,
+  MAX_STORED_UTTERANCES,
+  TARGET_FORMAT,
+  INFERENCE_MAX_AUDIO_SECONDS,
+  DASHSCOPE_DEFAULT_WS_URL,
+  DASHSCOPE_DEFAULT_MODEL,
+  FEEDBACK_REFRESH_INTERVAL_MS,
+  FEEDBACK_TOTAL_BUDGET_MS,
+  FEEDBACK_ASSEMBLE_BUDGET_MS,
+  FEEDBACK_EVENTS_BUDGET_MS,
+  FEEDBACK_REPORT_BUDGET_MS,
+  FEEDBACK_VALIDATE_BUDGET_MS,
+  FEEDBACK_PERSIST_FETCH_BUDGET_MS,
+  HISTORY_PREFIX,
+  HISTORY_MAX_LIMIT,
+  HISTORY_REVERSE_EPOCH_MAX,
+  DASHSCOPE_TIMEOUT_CAP_MS,
+  DEFAULT_ASR_TIMEOUT_MS,
+  DRAIN_TIMEOUT_CAP_MS,
+  WS_CLOSE_REASON_MAX_LEN,
+  R2_LIST_LIMIT,
+  MAX_BACKOFF_MS,
+  MAX_CONSECUTIVE_FAILURES,
+  ACCEPTED_REPORT_SOURCES,
+  getErrorMessage,
+  calcTranscriptDurationMs,
+  jsonResponse,
+  badRequest,
+  normalizeBaseUrl,
+  safeSessionId,
+  safeObjectSegment,
+  parseStreamRole,
+  resultObjectKey,
+  resultObjectKeyV2,
+  historyObjectKey,
+  chunkObjectKey,
+  readJson,
+  parseTimeoutMs,
+  parsePositiveInt,
+  parseBool,
+  getSessionLocale,
+  isWebSocketRequest,
+  sleep,
+  levenshteinDistance,
+  toWebSocketHandshakeUrl,
+  extractFirstString,
+  extractBooleanByKeys,
+  extractNumberByKeys,
+  extractNameFromText,
+  parseRosterEntries,
+  normalizeTextForMerge,
+  tokenizeForMerge,
+  tokenOverlapSuffixPrefix,
+  computeTokenJaccard,
+  stitchTextByTokenOverlap,
+  mergeUtterances,
+  quantile,
+  parseChunkFrame,
+  parseCaptureStatusPayload,
+  identitySourceFromBindingSource,
+  buildIngestState,
+  ingestStatusPayload,
+  valueAsString,
+  buildDefaultCaptureState,
+  buildDefaultEnrollmentState,
+  defaultCaptureByStream,
+  sanitizeCaptureState,
+  normalizeSessionState,
+  emptyIngestByStream,
+  emptyUtterancesRawByStream,
+  emptyUtterancesMergedByStream,
+  log,
+  DEFAULT_DATA_RETENTION_DAYS,
+  STORAGE_KEY_SESSION_PHASE,
+  STORAGE_KEY_FINALIZE_STAGE_DATA,
+  transitionSessionPhase
+} from "./config";
 
-type StreamRole = "mixed" | "teacher" | "students";
-const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
-
-interface AudioPayload {
-  content_b64: string;
-  format: "wav" | "pcm_s16le" | "mp3" | "m4a" | "ogg" | "flac";
-  sample_rate?: number;
-  channels?: number;
-}
-
-interface RosterEntry {
-  name: string;
-  email?: string | null;
-  aliases?: string[];
-}
-
-interface ResolveRequest {
-  audio: AudioPayload;
-  asr_text?: string | null;
-  roster?: RosterEntry[];
-}
-
-interface ClusterState {
-  cluster_id: string;
-  centroid: number[];
-  sample_count: number;
-  bound_name?: string | null;
-}
-
-interface ParticipantProfile {
-  name: string;
-  email?: string | null;
-  centroid: number[];
-  sample_count: number;
-  sample_seconds: number;
-  status: "collecting" | "ready";
-}
-
-interface BindingMeta {
-  participant_name: string;
-  source: "enrollment_match" | "name_extract" | "manual_map";
-  confidence: number;
-  locked: boolean;
-  updated_at: string;
-}
-
-interface EnrollmentParticipantProgress {
-  name: string;
-  sample_seconds: number;
-  sample_count: number;
-  status: "collecting" | "ready";
-}
-
-interface EnrollmentUnassignedProgress {
-  sample_seconds: number;
-  sample_count: number;
-}
-
-interface EnrollmentState {
-  mode: "idle" | "collecting" | "ready" | "closed";
-  started_at?: string | null;
-  stopped_at?: string | null;
-  participants: Record<string, EnrollmentParticipantProgress>;
-  unassigned_clusters: Record<string, EnrollmentUnassignedProgress>;
-  updated_at: string;
-}
-
-interface SessionState {
-  clusters: ClusterState[];
-  bindings: Record<string, string>;
-  roster?: RosterEntry[];
-  capture_by_stream?: Record<StreamRole, CaptureState>;
-  config: Record<string, unknown>;
-  participant_profiles: ParticipantProfile[];
-  cluster_binding_meta: Record<string, BindingMeta>;
-  prebind_by_cluster: Record<string, BindingMeta>;
-  enrollment_state: EnrollmentState;
-}
-
-interface SessionConfigRequest {
-  participants?: Array<RosterEntry | string>;
-  teams_participants?: Array<RosterEntry | string>;
-  teams_interviewer_name?: string;
-  interviewer_name?: string;
-  diarization_backend?: "cloud" | "edge" | "local";
-  mode?: "1v1" | "group";
-  template_id?: string;
-  booking_ref?: string;
-  teams_join_url?: string;
-  stages?: string[];
-  free_form_notes?: string;
-  interview_type?: string;
-  dimension_presets?: DimensionPresetItem[];
-}
-
-interface CaptureState {
-  capture_state: "idle" | "running" | "recovering" | "failed";
-  recover_attempts?: number;
-  last_recover_at?: string | null;
-  last_recover_error?: string | null;
-  echo_suppressed_chunks?: number;
-  echo_suppression_recent_rate?: number;
-  updated_at?: string;
-}
-
-interface ResolveEvidence {
-  sv_score: number;
-  threshold_low: number;
-  threshold_high: number;
-  segment_count: number;
-  name_hit?: string | null;
-  roster_hit?: boolean | null;
-  profile_top_name?: string | null;
-  profile_top_score?: number | null;
-  profile_margin?: number | null;
-  binding_source?: string | null;
-  reason?: string | null;
-}
-
-interface ResolveResponse {
-  session_id: string;
-  cluster_id: string;
-  speaker_name?: string | null;
-  decision: "auto" | "confirm" | "unknown";
-  evidence: ResolveEvidence;
-  updated_state: SessionState;
-}
-
-interface SpeakerEvent {
-  ts: string;
-  stream_role: StreamRole;
-  source: "inference_resolve" | "teacher_direct" | "manual_map";
-  identity_source?:
-    | "teams_participants"
-    | "preconfig"
-    | "name_extract"
-    | "teacher"
-    | "inference_resolve"
-    | "enrollment_match"
-    | "manual_map"
-    | null;
-  utterance_id?: string | null;
-  cluster_id?: string | null;
-  speaker_name?: string | null;
-  decision?: "auto" | "confirm" | "unknown" | null;
-  evidence?: ResolveEvidence | null;
-  note?: string | null;
-  metadata?: Record<string, unknown> | null;
-  backend?: "primary" | "secondary" | "worker";
-  fallback_reason?: string | null;
-  confidence_bucket?: "high" | "medium" | "low" | "unknown";
-}
-
-interface EnrollmentStartRequest {
-  participants?: Array<RosterEntry | string>;
-  teams_participants?: Array<RosterEntry | string>;
-  interviewer_name?: string;
-  teams_interviewer_name?: string;
-}
-
-interface ClusterMapRequest {
-  stream_role?: StreamRole;
-  cluster_id: string;
-  participant_name: string;
-  lock?: boolean;
-  mode?: "bind" | "prebind";
-}
-
-interface InferenceEnrollRequest {
-  session_id: string;
-  participant_name: string;
-  audio: AudioPayload;
-  state: SessionState;
-}
-
-interface InferenceEnrollResponse {
-  session_id: string;
-  participant_name: string;
-  embedding_dim: number;
-  sample_seconds: number;
-  profile_updated: boolean;
-  updated_state: SessionState;
-}
-
-interface FinalizeRequest {
-  metadata?: Record<string, unknown>;
-}
-
-interface FeedbackRegenerateClaimRequest {
-  person_key: string;
-  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
-  claim_type: "strengths" | "risks" | "actions";
-  claim_id?: string;
-  text_hint?: string;
-}
-
-interface FeedbackClaimEvidenceRequest {
-  person_key: string;
-  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
-  claim_type: "strengths" | "risks" | "actions";
-  claim_id?: string;
-  evidence_refs: string[];
-}
-
-interface InferenceRegenerateClaimRequest {
-  session_id: string;
-  person_key: string;
-  display_name?: string | null;
-  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
-  claim_type: "strengths" | "risks" | "actions";
-  claim_id?: string;
-  claim_text?: string;
-  text_hint?: string;
-  allowed_evidence_ids: string[];
-  evidence: Array<{
-    evidence_id: string;
-    time_range_ms: [number, number];
-    utterance_ids: string[];
-    speaker_key?: string | null;
-    quote: string;
-    confidence: number;
-  }>;
-  transcript: TranscriptItem[];
-  memos: MemoItem[];
-  stats: SpeakerStatItem[];
-  locale: string;
-}
-
-interface InferenceRegenerateClaimResponse {
-  session_id: string;
-  person_key: string;
-  dimension: "leadership" | "collaboration" | "logic" | "structure" | "initiative";
-  claim_type: "strengths" | "risks" | "actions";
-  claim: {
-    claim_id: string;
-    text: string;
-    evidence_refs: string[];
-    confidence: number;
-  };
-}
-
-interface FeedbackExportRequest {
-  format?: "plain_text" | "markdown" | "docx";
-  file_name?: string;
-}
-
-interface IngestState {
-  meeting_id: string;
-  last_seq: number;
-  received_chunks: number;
-  duplicate_chunks: number;
-  missing_chunks: number;
-  bytes_stored: number;
-  started_at: string;
-  updated_at: string;
-}
-
-interface UtteranceRaw {
-  utterance_id: string;
-  session_id: string;
-  stream_role: StreamRole;
-  text: string;
-  start_seq: number;
-  end_seq: number;
-  start_ms: number;
-  end_ms: number;
-  duration_ms: number;
-  asr_model: string;
-  asr_provider: "dashscope" | "local-whisper";
-  confidence?: number | null;
-  created_at: string;
-  latency_ms: number;
-}
-
-interface UtteranceMerged {
-  merged_id: string;
-  session_id: string;
-  stream_role: StreamRole;
-  text: string;
-  start_seq: number;
-  end_seq: number;
-  start_ms: number;
-  end_ms: number;
-  duration_ms: number;
-  asr_model: string;
-  asr_provider: "dashscope" | "local-whisper";
-  created_at: string;
-  source_utterance_ids: string[];
-}
-
-interface FeedbackTimings {
-  assemble_ms: number;
-  events_ms: number;
-  report_ms: number;
-  validation_ms: number;
-  persist_ms: number;
-  total_ms: number;
-}
-
-interface FeedbackCache {
-  session_id: string;
-  updated_at: string;
-  ready: boolean;
-  person_summary_cache: PersonFeedbackItem[];
-  overall_summary_cache: unknown;
-  evidence_index_cache: Record<string, string[]>;
-  report: ResultV2 | null;
-  quality: ReportQualityMeta;
-  timings: FeedbackTimings;
-  report_source: string;
-  blocking_reason: string | null;
-  quality_gate_passed: boolean;
-}
-
-interface QualityMetrics {
-  unknown_ratio: number;
-  students_utterance_count: number;
-  students_unknown_count: number;
-  echo_suppressed_chunks: number;
-  echo_suppression_recent_rate: number;
-  echo_leak_rate: number;
-  suppression_false_positive_rate: number;
-}
-
-interface HistoryIndexItem {
-  session_id: string;
-  finalized_at: string;
-  tentative: boolean;
-  unresolved_cluster_count: number;
-  ready: boolean;
-  needs_evidence_count: number;
-  report_source: string;
-}
-
-interface AsrState {
-  enabled: boolean;
-  provider: "dashscope";
-  model: string;
-  mode?: "realtime" | "windowed";
-  asr_ws_state?: "disconnected" | "connecting" | "running" | "error";
-  backlog_chunks?: number;
-  ingest_lag_seconds?: number;
-  last_emit_at?: string | null;
-  ingest_to_utterance_p50_ms?: number | null;
-  ingest_to_utterance_p95_ms?: number | null;
-  recent_ingest_to_utterance_ms?: number[];
-  window_seconds: number;
-  hop_seconds: number;
-  last_window_end_seq: number;
-  utterance_count: number;
-  total_windows_processed: number;
-  total_audio_seconds_processed: number;
-  last_window_latency_ms?: number | null;
-  avg_window_latency_ms?: number | null;
-  avg_rtf?: number | null;
-  consecutive_failures: number;
-  next_retry_after_ms: number;
-  last_error?: string | null;
-  last_success_at?: string | null;
-  updated_at: string;
-}
-
-interface AsrRunResult {
-  generated: number;
-  last_window_end_seq: number;
-  utterance_count: number;
-  total_windows_processed: number;
-  total_audio_seconds_processed: number;
-  last_window_latency_ms?: number | null;
-  avg_window_latency_ms?: number | null;
-  avg_rtf?: number | null;
-  last_error?: string | null;
-}
-
-interface AsrReplayCursor {
-  last_ingested_seq: number;
-  last_sent_seq: number;
-  last_emitted_seq: number;
-  updated_at: string;
-}
-
-interface AsrQueueChunk {
-  seq: number;
-  timestampMs: number;
-  receivedAtMs: number;
-  bytes: Uint8Array;
-}
-
-interface AsrRealtimeRuntime {
-  ws: WebSocket | null;
-  connectPromise: Promise<void> | null;
-  flushPromise: Promise<void> | null;
-  readyPromise: Promise<void> | null;
-  readyResolve: (() => void) | null;
-  readyReject: ((error: Error) => void) | null;
-  streamRole: StreamRole;
-  connected: boolean;
-  connecting: boolean;
-  running: boolean;
-  taskId: string | null;
-  sendQueue: AsrQueueChunk[];
-  reconnectBackoffMs: number;
-  lastSentSeq: number;
-  startedAt: number;
-  currentStartSeq: number | null;
-  currentStartTsMs: number | null;
-  sentChunkTsBySeq: Map<number, number>;
-  lastEmitAt: string | null;
-  lastFinalTextNorm: string;
-  drainGeneration: number;
-}
-
-interface AudioChunkFrame {
-  type: "chunk";
-  meeting_id: string;
-  seq: number;
-  timestamp_ms: number;
-  sample_rate: number;
-  channels: number;
-  format: "pcm_s16le";
-  content_b64: string;
-  stream_role?: StreamRole;
-}
-
-interface Env {
-  INFERENCE_BASE_URL: string;
-  INFERENCE_BASE_URL_PRIMARY?: string;
-  INFERENCE_BASE_URL_SECONDARY?: string;
-  INFERENCE_FAILOVER_ENABLED?: string;
-  INFERENCE_RETRY_MAX?: string;
-  INFERENCE_RETRY_BACKOFF_MS?: string;
-  INFERENCE_CIRCUIT_OPEN_MS?: string;
-  INFERENCE_API_KEY?: string;
-  INFERENCE_TIMEOUT_MS?: string;
-  INFERENCE_RESOLVE_PATH?: string;
-  INFERENCE_ENROLL_PATH?: string;
-  INFERENCE_EVENTS_PATH?: string;
-  INFERENCE_REPORT_PATH?: string;
-  INFERENCE_REGENERATE_CLAIM_PATH?: string;
-  INFERENCE_SYNTHESIZE_PATH?: string;
-  INFERENCE_CHECKPOINT_PATH?: string;
-  INFERENCE_MERGE_CHECKPOINTS_PATH?: string;
-  INFERENCE_EXTRACT_EMBEDDING_PATH?: string;
-  INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
-  ALIYUN_DASHSCOPE_API_KEY?: string;
-  ASR_ENABLED?: string;
-  ASR_MODEL?: string;
-  ASR_WS_URL?: string;
-  ASR_WINDOW_SECONDS?: string;
-  ASR_HOP_SECONDS?: string;
-  ASR_TIMEOUT_MS?: string;
-  ASR_SEND_PACING_MS?: string;
-  ASR_STREAM_CHUNK_BYTES?: string;
-  ASR_REALTIME_ENABLED?: string;
-  ASR_DEBUG_LOG_EVENTS?: string;
-  MEMOS_ENABLED?: string;
-  FINALIZE_V2_ENABLED?: string;
-  FINALIZE_TIMEOUT_MS?: string;
-  FINALIZE_WATCHDOG_MS?: string;
-  CHECKPOINT_INTERVAL_MS?: string;
-  DIARIZATION_BACKEND_DEFAULT?: "cloud" | "edge" | "local";
-  AUDIO_RETENTION_HOURS?: string;
-  ASR_PROVIDER?: string;
-  ASR_ENDPOINT?: string;
-  ASR_LANGUAGE?: string;
-  WORKER_API_KEY?: string;
-  DEFAULT_LOCALE?: string;
-  TIER2_ENABLED?: string;
-  TIER2_AUTO_TRIGGER?: string;
-  TIER2_BATCH_ENDPOINT?: string;
-  INCREMENTAL_V1_ENABLED?: string;
-  INCREMENTAL_INTERVAL_MS?: string;
-  INCREMENTAL_OVERLAP_MS?: string;
-  INCREMENTAL_CUMULATIVE_THRESHOLD?: string;
-  INCREMENTAL_ANALYSIS_INTERVAL?: string;
-  RESULT_BUCKET: R2Bucket;
-  MEETING_SESSION: DurableObjectNamespace<MeetingSessionDO>;
-}
-
-const DEFAULT_STATE: SessionState = {
-  clusters: [],
-  bindings: {},
-  capture_by_stream: defaultCaptureByStream(),
-  config: {},
-  participant_profiles: [],
-  cluster_binding_meta: {},
-  prebind_by_cluster: {},
-  enrollment_state: buildDefaultEnrollmentState()
-};
-
-function emptyReportQualityMeta(nowIso: string): ReportQualityMeta {
-  return {
-    generated_at: nowIso,
-    build_ms: 0,
-    validation_ms: 0,
-    claim_count: 0,
-    invalid_claim_count: 0,
-    needs_evidence_count: 0,
-    report_source: "memo_first",
-    report_model: null,
-    report_degraded: false,
-    report_error: null
-  };
-}
-
-function emptyFeedbackCache(sessionId: string, nowIso: string): FeedbackCache {
-  return {
-    session_id: sessionId,
-    updated_at: nowIso,
-    ready: false,
-    person_summary_cache: [],
-    overall_summary_cache: {},
-    evidence_index_cache: {},
-    report: null,
-    quality: emptyReportQualityMeta(nowIso),
-    timings: {
-      assemble_ms: 0,
-      events_ms: 0,
-      report_ms: 0,
-      validation_ms: 0,
-      persist_ms: 0,
-      total_ms: 0
-    },
-    report_source: "memo_first",
-    blocking_reason: "feedback_not_generated",
-    quality_gate_passed: false
-  };
-}
-
-const SESSION_ROUTE_REGEX =
-  /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|feedback-claim-evidence|export)$/;
-const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state|profiles)$/;
-const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
-const SESSION_TIER2_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/tier2-status$/;
-const SESSION_INCREMENTAL_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/incremental-status$/;
-const SESSION_HISTORY_ROUTE_REGEX = /^\/v1\/sessions\/history$/;
-const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
-const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
-
-const STORAGE_KEY_STATE = "state";
-const STORAGE_KEY_EVENTS = "events";
-const STORAGE_KEY_UPDATED_AT = "updated_at";
-const STORAGE_KEY_FINALIZED_AT = "finalized_at";
-const STORAGE_KEY_RESULT_KEY = "result_key";
-const STORAGE_KEY_RESULT_KEY_V2 = "result_key_v2";
-const STORAGE_KEY_FINALIZE_V2_STATUS = "finalize_v2_status";
-const STORAGE_KEY_FINALIZE_LOCK = "finalize_lock";
-const STORAGE_KEY_TIER2_STATUS = "tier2_status";
-const STORAGE_KEY_TIER2_ALARM_TAG = "tier2_alarm_tag";
-const STORAGE_KEY_INCREMENTAL_STATUS = "incremental_status";
-const STORAGE_KEY_INCREMENTAL_ALARM_TAG = "incremental_alarm_tag";
-const STORAGE_KEY_INCREMENTAL_SPEAKER_PROFILES = "incremental_speaker_profiles";
-const STORAGE_KEY_INCREMENTAL_CHECKPOINT = "incremental_checkpoint";
-const STORAGE_KEY_MEMOS = "memos";
-const STORAGE_KEY_SPEAKER_LOGS = "speaker_logs";
-const STORAGE_KEY_ASR_CURSOR_BY_STREAM = "asr_cursor_by_stream";
-const STORAGE_KEY_FEEDBACK_CACHE = "feedback_cache";
-const STORAGE_KEY_DEPENDENCY_HEALTH = "dependency_health";
-
-const STORAGE_KEY_INGEST_STATE = "ingest_state";
-const STORAGE_KEY_ASR_STATE = "asr_state";
-const STORAGE_KEY_UTTERANCES_RAW = "utterances_raw";
-
-const STORAGE_KEY_INGEST_BY_STREAM = "ingest_by_stream";
-const STORAGE_KEY_ASR_BY_STREAM = "asr_by_stream";
-const STORAGE_KEY_UTTERANCES_RAW_BY_STREAM = "utterances_raw_by_stream";
-const STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM = "utterances_merged_by_stream";
-const STORAGE_KEY_CHECKPOINTS = "checkpoints";
-const STORAGE_KEY_LAST_CHECKPOINT_AT = "last_checkpoint_at";
-const STORAGE_KEY_CAPTION_SOURCE = "caption_source";
-const STORAGE_KEY_CAPTION_BUFFER = "caption_buffer";
-const STORAGE_KEY_INCREMENTAL_UTTERANCES = "incremental_utterances";
-const MAX_STORED_UTTERANCES = 2000;
-
-const TARGET_FORMAT = "pcm_s16le";
-const INFERENCE_MAX_AUDIO_SECONDS = 30;
-const DASHSCOPE_DEFAULT_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
-const DASHSCOPE_DEFAULT_MODEL = "fun-asr-realtime-2025-11-07";
-const FEEDBACK_REFRESH_INTERVAL_MS = 10_000;
-const FEEDBACK_TOTAL_BUDGET_MS = 8_000;
-const FEEDBACK_ASSEMBLE_BUDGET_MS = 1_200;
-const FEEDBACK_EVENTS_BUDGET_MS = 1_200;
-const FEEDBACK_REPORT_BUDGET_MS = 4_500;
-const FEEDBACK_VALIDATE_BUDGET_MS = 600;
-const FEEDBACK_PERSIST_FETCH_BUDGET_MS = 500;
-const HISTORY_PREFIX = "history/";
-const HISTORY_MAX_LIMIT = 50;
-const HISTORY_REVERSE_EPOCH_MAX = 9_999_999_999_999;
-
-// ── Reliability & timeout constants ──────────────────────────────────
-const DASHSCOPE_TIMEOUT_CAP_MS = 15_000;
-const DEFAULT_ASR_TIMEOUT_MS = 45_000;
-const DRAIN_TIMEOUT_CAP_MS = 30_000;
-const WS_CLOSE_REASON_MAX_LEN = 120;
-const R2_LIST_LIMIT = 100;
-const MAX_BACKOFF_MS = 60_000;
-const MAX_CONSECUTIVE_FAILURES = 5;
-
-/**
- * Report sources considered "ready" for feedback delivery.
- * llm_enhanced       — legacy polish pipeline (inference /analysis/report)
- * llm_synthesized    — new synthesis pipeline (inference /analysis/synthesize)
- * llm_synthesized_truncated — synthesis succeeded but input was truncated
- */
-const ACCEPTED_REPORT_SOURCES: ReadonlySet<string> = new Set([
-  "llm_enhanced",
-  "llm_synthesized",
-  "llm_synthesized_truncated"
-]);
-
-/** Extract error message safely from unknown catch value. */
-function getErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
-
-/** Calculate total transcript duration from the last utterance's end_ms. */
-function calcTranscriptDurationMs(transcript: Array<{ end_ms: number }>): number {
-  return transcript.length > 0 ? Math.max(...transcript.map(u => u.end_ms)) : 0;
-}
-
-function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      ...headers
-    }
-  });
-}
-
-function badRequest(detail: string): Response {
-  return jsonResponse({ detail }, 400);
-}
-
-function normalizeBaseUrl(value: string): string {
-  return value.endsWith("/") ? value.slice(0, -1) : value;
-}
-
-function safeSessionId(raw: string): string {
-  const decoded = decodeURIComponent(raw);
-  if (!decoded || decoded.length > 128) {
-    throw new Error("session_id must be 1..128 chars");
-  }
-  return decoded;
-}
-
-function safeObjectSegment(raw: string): string {
-  return raw.replace(/[^A-Za-z0-9._-]/g, "_");
-}
-
-function parseStreamRole(raw: string | null | undefined, fallback: StreamRole = "mixed"): StreamRole {
-  const normalized = String(raw ?? "").trim().toLowerCase();
-  if (!normalized) {
-    return fallback;
-  }
-  if (STREAM_ROLES.includes(normalized as StreamRole)) {
-    return normalized as StreamRole;
-  }
-  throw new Error(`unsupported stream_role: ${raw}`);
-}
-
-function resultObjectKey(sessionId: string): string {
-  return `sessions/${safeObjectSegment(sessionId)}/result.json`;
-}
-
-function resultObjectKeyV2(sessionId: string): string {
-  return `sessions/${safeObjectSegment(sessionId)}/result_v2.json`;
-}
-
-function historyObjectKey(sessionId: string, finalizedAtMs: number): string {
-  const reverse = Math.max(0, HISTORY_REVERSE_EPOCH_MAX - Math.max(0, finalizedAtMs));
-  const reversePart = String(reverse).padStart(13, "0");
-  return `${HISTORY_PREFIX}${reversePart}_${safeObjectSegment(sessionId)}.json`;
-}
-
-function chunkObjectKey(sessionId: string, streamRole: StreamRole, seq: number): string {
-  const seqPart = String(seq).padStart(8, "0");
-  if (streamRole === "mixed") {
-    return `sessions/${safeObjectSegment(sessionId)}/chunks/${seqPart}.pcm`;
-  }
-  return `sessions/${safeObjectSegment(sessionId)}/chunks/${streamRole}/${seqPart}.pcm`;
-}
-
-async function readJson<T>(request: Request): Promise<T> {
-  try {
-    return (await request.json()) as T;
-  } catch {
-    throw new Error("request body must be valid JSON");
-  }
-}
-
-function parseTimeoutMs(raw: string | undefined): number {
-  const timeout = Number(raw ?? "15000");
-  if (!Number.isFinite(timeout) || timeout <= 0) {
-    return 15000;
-  }
-  return timeout;
-}
-
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-  const value = Number(raw ?? String(fallback));
-  if (!Number.isInteger(value) || value <= 0) {
-    return fallback;
-  }
-  return value;
-}
-
-function parseBool(raw: string | undefined, fallback: boolean): boolean {
-  if (raw === undefined) {
-    return fallback;
-  }
-  const normalized = raw.trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(normalized)) return true;
-  if (["0", "false", "no", "off"].includes(normalized)) return false;
-  return fallback;
-}
-
-function getSessionLocale(state: SessionState | undefined, env?: Env): string {
-  const fromConfig = (state?.config as Record<string, unknown>)?.locale as string | undefined;
-  return fromConfig || env?.DEFAULT_LOCALE || 'zh-CN';
-}
-
-function isWebSocketRequest(request: Request): boolean {
-  return request.headers.get("upgrade")?.toLowerCase() === "websocket";
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Compute Levenshtein edit distance between two strings. */
-function levenshteinDistance(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  // Use a single-row DP approach for space efficiency.
-  let prev = new Array<number>(n + 1);
-  let curr = new Array<number>(n + 1);
-  for (let j = 0; j <= n; j++) prev[j] = j;
-  for (let i = 1; i <= m; i++) {
-    curr[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
-    }
-    [prev, curr] = [curr, prev];
-  }
-  return prev[n];
-}
-
-function toWebSocketHandshakeUrl(raw: string): string {
-  if (raw.startsWith("wss://")) {
-    return "https://" + raw.slice("wss://".length);
-  }
-  if (raw.startsWith("ws://")) {
-    return "http://" + raw.slice("ws://".length);
-  }
-  return raw;
-}
-
-function extractFirstString(value: unknown): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
-  if (!value || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const text = extractFirstString(item);
-      if (text) return text;
-    }
-    return null;
-  }
-
-  const payload = value as Record<string, unknown>;
-  const preferredKeys = ["text", "sentence", "transcript", "result", "asr_result"];
-  for (const key of preferredKeys) {
-    if (key in payload) {
-      const text = extractFirstString(payload[key]);
-      if (text) return text;
-    }
-  }
-  for (const item of Object.values(payload)) {
-    const text = extractFirstString(item);
-    if (text) return text;
-  }
-  return null;
-}
-
-function extractBooleanByKeys(value: unknown, keys: string[]): boolean | null {
-  if (!value || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const result = extractBooleanByKeys(item, keys);
-      if (result !== null) return result;
-    }
-    return null;
-  }
-
-  const obj = value as Record<string, unknown>;
-  for (const key of keys) {
-    if (key in obj && typeof obj[key] === "boolean") {
-      return obj[key] as boolean;
-    }
-  }
-  for (const item of Object.values(obj)) {
-    const result = extractBooleanByKeys(item, keys);
-    if (result !== null) return result;
-  }
-  return null;
-}
-
-function extractNumberByKeys(value: unknown, keys: string[]): number | null {
-  if (!value || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const result = extractNumberByKeys(item, keys);
-      if (result !== null) return result;
-    }
-    return null;
-  }
-
-  const obj = value as Record<string, unknown>;
-  for (const key of keys) {
-    const maybe = obj[key];
-    if (typeof maybe === "number" && Number.isFinite(maybe)) {
-      return maybe;
-    }
-  }
-  for (const item of Object.values(obj)) {
-    const result = extractNumberByKeys(item, keys);
-    if (result !== null) return result;
-  }
-  return null;
-}
-
-function extractNameFromText(text: string): string | null {
-  const stopwords = new Set([
-    "the",
-    "and",
-    "with",
-    "from",
-    "about",
-    "which",
-    "where",
-    "when",
-    "doing",
-    "really",
-    "excited",
-    "levels",
-    "going",
-    "american",
-    "school",
-    "studying",
-    "netherlands"
-  ]);
-  const patterns = [
-    /\bmy name is\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
-    /\bi am\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
-    /\bi'm\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
-    /\b(?:usually\s+)?go(?:es)?\s+by\s+([A-Za-z][A-Za-z .'-]{0,60})/i,
-    /\b(?:(?:you\s+)?can\s+)?call me\s+([A-Za-z][A-Za-z .'-]{0,60})/i
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (!match || !match[1]) continue;
-    const cleaned = match[1].trim().replace(/\s+/g, " ").replace(/[.,;:!?]+$/, "");
-    const tokens = cleaned.split(/\s+/).filter(Boolean);
-    if (tokens.length === 0 || tokens.length > 3) continue;
-    if (tokens.some((token) => !/^[A-Za-z][A-Za-z'-]{0,30}$/.test(token))) continue;
-    if (tokens.some((token) => stopwords.has(token.toLowerCase()))) continue;
-    if (cleaned.length >= 2 && cleaned.length <= 64) {
-      return cleaned;
-    }
-  }
-  return null;
-}
-
-function parseRosterEntries(value: unknown): RosterEntry[] {
-  if (!Array.isArray(value)) return [];
-  const out: RosterEntry[] = [];
-  for (const item of value) {
-    if (typeof item === "string") {
-      const name = valueAsString(item);
-      if (!name) continue;
-      out.push({ name });
-      continue;
-    }
-    if (!item || typeof item !== "object") continue;
-    const obj = item as Record<string, unknown>;
-    const name = valueAsString(obj.name);
-    if (!name) continue;
-    const email = valueAsString(obj.email);
-    const aliases = Array.isArray(obj.aliases)
-      ? (obj.aliases as unknown[]).filter((a): a is string => typeof a === "string" && a.trim().length > 0)
-      : undefined;
-    out.push({ name, email, aliases: aliases && aliases.length > 0 ? aliases : undefined });
-  }
-  return out;
-}
-
-function normalizeTextForMerge(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "")
-    .trim();
-}
-
-function tokenizeForMerge(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-function tokenOverlapSuffixPrefix(left: string[], right: string[], maxScan = 32): number {
-  const max = Math.min(maxScan, left.length, right.length);
-  for (let overlap = max; overlap >= 1; overlap -= 1) {
-    let matched = true;
-    for (let i = 0; i < overlap; i += 1) {
-      if (left[left.length - overlap + i] !== right[i]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) return overlap;
-  }
-  return 0;
-}
-
-function computeTokenJaccard(a: string[], b: string[]): number {
-  if (a.length === 0 && b.length === 0) return 1;
-  const setA = new Set(a);
-  const setB = new Set(b);
-  let intersection = 0;
-  for (const item of setA) {
-    if (setB.has(item)) intersection += 1;
-  }
-  const union = new Set([...setA, ...setB]).size;
-  return union === 0 ? 0 : intersection / union;
-}
-
-function stitchTextByTokenOverlap(baseText: string, nextText: string, minOverlap = 3): string | null {
-  const baseWords = baseText.trim().split(/\s+/).filter(Boolean);
-  const nextWords = nextText.trim().split(/\s+/).filter(Boolean);
-  if (baseWords.length === 0 || nextWords.length === 0) return null;
-
-  const baseNorm = baseWords.map((item) => normalizeTextForMerge(item)).filter(Boolean);
-  const nextNorm = nextWords.map((item) => normalizeTextForMerge(item)).filter(Boolean);
-  const overlap = tokenOverlapSuffixPrefix(baseNorm, nextNorm);
-  if (overlap < minOverlap) {
-    return null;
-  }
-
-  const suffix = nextWords.slice(overlap).join(" ").trim();
-  if (!suffix) return baseText.trim();
-  return `${baseText.trim()} ${suffix}`.replace(/\s+/g, " ").trim();
-}
-
-function mergeUtterances(utterances: UtteranceRaw[]): UtteranceMerged[] {
-  const sorted = [...utterances].sort((a, b) => a.start_seq - b.start_seq || a.end_seq - b.end_seq);
-  const merged: UtteranceMerged[] = [];
-
-  for (const item of sorted) {
-    const text = item.text.trim();
-    if (!text) continue;
-
-    const normalized = normalizeTextForMerge(text);
-    const tokens = tokenizeForMerge(text);
-    const last = merged[merged.length - 1];
-
-    if (last) {
-      const overlapsOrAdjacent = item.start_seq <= last.end_seq + 1;
-      const lastNorm = normalizeTextForMerge(last.text);
-      const lastTokens = tokenizeForMerge(last.text);
-      const overlapTokens = tokenOverlapSuffixPrefix(lastTokens, tokens);
-      const duplicateLike =
-        normalized.length > 0 &&
-        (normalized === lastNorm ||
-          lastNorm.includes(normalized) ||
-          normalized.includes(lastNorm) ||
-          computeTokenJaccard(lastTokens, tokens) >= 0.9);
-
-      if (overlapsOrAdjacent && duplicateLike) {
-        if (normalized.length > lastNorm.length) {
-          last.text = text;
-        }
-        last.end_seq = Math.max(last.end_seq, item.end_seq);
-        last.end_ms = Math.max(last.end_ms, item.end_ms);
-        last.duration_ms = last.end_ms - last.start_ms;
-        last.source_utterance_ids.push(item.utterance_id);
-        continue;
-      }
-
-      if (overlapsOrAdjacent && overlapTokens >= 3) {
-        const stitched = stitchTextByTokenOverlap(last.text, text, 3);
-        if (stitched) {
-          last.text = stitched;
-          last.end_seq = Math.max(last.end_seq, item.end_seq);
-          last.end_ms = Math.max(last.end_ms, item.end_ms);
-          last.duration_ms = last.end_ms - last.start_ms;
-          last.source_utterance_ids.push(item.utterance_id);
-          continue;
-        }
-      }
-    }
-
-    merged.push({
-      merged_id: `${item.session_id}-${item.stream_role}-m-${String(item.end_seq).padStart(8, "0")}`,
-      session_id: item.session_id,
-      stream_role: item.stream_role,
-      text,
-      start_seq: item.start_seq,
-      end_seq: item.end_seq,
-      start_ms: item.start_ms,
-      end_ms: item.end_ms,
-      duration_ms: item.duration_ms,
-      asr_model: item.asr_model,
-      asr_provider: item.asr_provider,
-      created_at: item.created_at,
-      source_utterance_ids: [item.utterance_id]
-    });
-  }
-
-  return merged;
-}
-
-function quantile(values: number[], q: number): number | null {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * q)));
-  return sorted[idx];
-}
-
-function parseChunkFrame(value: unknown): AudioChunkFrame {
-  if (!value || typeof value !== "object") {
-    throw new Error("frame payload must be an object");
-  }
-
-  const frame = value as Partial<AudioChunkFrame>;
-  if (frame.type !== "chunk") {
-    throw new Error("frame.type must be chunk");
-  }
-  if (!frame.meeting_id || typeof frame.meeting_id !== "string") {
-    throw new Error("frame.meeting_id is required");
-  }
-  if (!Number.isInteger(frame.seq) || Number(frame.seq) <= 0) {
-    throw new Error("frame.seq must be a positive integer");
-  }
-  if (!Number.isFinite(frame.timestamp_ms) || Number(frame.timestamp_ms) <= 0) {
-    throw new Error("frame.timestamp_ms must be a positive number");
-  }
-  if (frame.sample_rate !== TARGET_SAMPLE_RATE) {
-    throw new Error(`frame.sample_rate must be ${TARGET_SAMPLE_RATE}`);
-  }
-  if (frame.channels !== TARGET_CHANNELS) {
-    throw new Error(`frame.channels must be ${TARGET_CHANNELS}`);
-  }
-  if (frame.format !== TARGET_FORMAT) {
-    throw new Error(`frame.format must be ${TARGET_FORMAT}`);
-  }
-  if (!frame.content_b64 || typeof frame.content_b64 !== "string") {
-    throw new Error("frame.content_b64 is required");
-  }
-  if (frame.stream_role !== undefined) {
-    parseStreamRole(frame.stream_role, "mixed");
-  }
-
-  return frame as AudioChunkFrame;
-}
-
-function parseCaptureStatusPayload(
-  value: unknown
-): { stream_role?: StreamRole; payload: Partial<CaptureState> } {
-  if (!value || typeof value !== "object") {
-    throw new Error("capture_status payload must be an object");
-  }
-  const message = value as Record<string, unknown>;
-  if (message.type !== "capture_status") {
-    throw new Error("capture_status.type must be capture_status");
-  }
-
-  const payloadRaw = message.payload;
-  if (!payloadRaw || typeof payloadRaw !== "object") {
-    throw new Error("capture_status.payload must be an object");
-  }
-  const payload = payloadRaw as Record<string, unknown>;
-  const parsed: Partial<CaptureState> = {};
-
-  const captureState = valueAsString(payload.capture_state);
-  if (captureState) {
-    if (!["idle", "running", "recovering", "failed"].includes(captureState)) {
-      throw new Error("capture_status.capture_state must be idle|running|recovering|failed");
-    }
-    parsed.capture_state = captureState as CaptureState["capture_state"];
-  }
-
-  const recoverAttempts = Number(payload.recover_attempts);
-  if (Number.isFinite(recoverAttempts) && recoverAttempts >= 0) {
-    parsed.recover_attempts = Math.floor(recoverAttempts);
-  }
-
-  if (payload.last_recover_at === null) {
-    parsed.last_recover_at = null;
-  } else {
-    const lastRecoverAt = valueAsString(payload.last_recover_at);
-    if (lastRecoverAt) {
-      parsed.last_recover_at = lastRecoverAt;
-    }
-  }
-
-  if (payload.last_recover_error === null) {
-    parsed.last_recover_error = null;
-  } else {
-    const lastRecoverError = valueAsString(payload.last_recover_error);
-    if (lastRecoverError !== null) {
-      parsed.last_recover_error = lastRecoverError;
-    }
-  }
-
-  const echoSuppressed = Number(payload.echo_suppressed_chunks);
-  if (Number.isFinite(echoSuppressed) && echoSuppressed >= 0) {
-    parsed.echo_suppressed_chunks = Math.floor(echoSuppressed);
-  }
-
-  const echoRate = Number(payload.echo_suppression_recent_rate);
-  if (Number.isFinite(echoRate)) {
-    parsed.echo_suppression_recent_rate = Math.max(0, Math.min(1, echoRate));
-  }
-
-  const roleRaw = valueAsString(message.stream_role);
-  const role = roleRaw ? parseStreamRole(roleRaw, "mixed") : undefined;
-  return {
-    stream_role: role,
-    payload: parsed
-  };
-}
-
-function identitySourceFromBindingSource(
-  value: string | null | undefined
-): SpeakerEvent["identity_source"] {
-  if (!value) return "inference_resolve";
-  if (value === "enrollment_match") return "enrollment_match";
-  if (value === "name_extract") return "name_extract";
-  if (value === "manual_map") return "manual_map";
-  return "inference_resolve";
-}
-
-function buildIngestState(sessionId: string): IngestState {
-  const now = new Date().toISOString();
-  return {
-    meeting_id: sessionId,
-    last_seq: 0,
-    received_chunks: 0,
-    duplicate_chunks: 0,
-    missing_chunks: 0,
-    bytes_stored: 0,
-    started_at: now,
-    updated_at: now
-  };
-}
-
-function ingestStatusPayload(sessionId: string, streamRole: StreamRole, ingest: IngestState) {
-  return {
-    type: "status",
-    session_id: sessionId,
-    stream_role: streamRole,
-    meeting_id: ingest.meeting_id,
-    last_seq: ingest.last_seq,
-    received_chunks: ingest.received_chunks,
-    duplicate_chunks: ingest.duplicate_chunks,
-    missing_chunks: ingest.missing_chunks,
-    bytes_stored: ingest.bytes_stored,
-    started_at: ingest.started_at,
-    updated_at: ingest.updated_at
-  };
-}
-
-function valueAsString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function buildDefaultCaptureState(): CaptureState {
-  return {
-    capture_state: "idle",
-    recover_attempts: 0,
-    last_recover_at: null,
-    last_recover_error: null,
-    echo_suppressed_chunks: 0,
-    echo_suppression_recent_rate: 0,
-    updated_at: new Date().toISOString()
-  };
-}
-
-function buildDefaultEnrollmentState(): EnrollmentState {
-  return {
-    mode: "idle",
-    started_at: null,
-    stopped_at: null,
-    participants: {},
-    unassigned_clusters: {},
-    updated_at: new Date().toISOString()
-  };
-}
-
-function defaultCaptureByStream(): Record<StreamRole, CaptureState> {
-  return {
-    mixed: buildDefaultCaptureState(),
-    teacher: buildDefaultCaptureState(),
-    students: buildDefaultCaptureState()
-  };
-}
-
-function sanitizeCaptureState(value: CaptureState | null | undefined): CaptureState {
-  const merged = {
-    ...buildDefaultCaptureState(),
-    ...(value ?? {})
-  };
-  const normalizedState = String(merged.capture_state ?? "idle");
-  merged.capture_state = ["idle", "running", "recovering", "failed"].includes(normalizedState)
-    ? (normalizedState as CaptureState["capture_state"])
-    : "idle";
-  merged.recover_attempts = Number.isFinite(merged.recover_attempts) ? Number(merged.recover_attempts) : 0;
-  merged.echo_suppressed_chunks = Number.isFinite(merged.echo_suppressed_chunks) ? Number(merged.echo_suppressed_chunks) : 0;
-  merged.echo_suppression_recent_rate = Number.isFinite(merged.echo_suppression_recent_rate)
-    ? Math.max(0, Math.min(1, Number(merged.echo_suppression_recent_rate)))
-    : 0;
-  merged.last_recover_at = merged.last_recover_at ?? null;
-  merged.last_recover_error = merged.last_recover_error ?? null;
-  merged.updated_at = new Date().toISOString();
-  return merged;
-}
-
-function normalizeSessionState(state: SessionState | null | undefined): SessionState {
-  const merged = state ? { ...state } : structuredClone(DEFAULT_STATE);
-  merged.clusters = Array.isArray(merged.clusters) ? merged.clusters : [];
-  merged.bindings = merged.bindings && typeof merged.bindings === "object" ? merged.bindings : {};
-  merged.config = merged.config && typeof merged.config === "object" ? merged.config : {};
-  if (merged.config.diarization_backend !== "edge" && merged.config.diarization_backend !== "cloud") {
-    merged.config.diarization_backend = "edge";
-  }
-  merged.participant_profiles = Array.isArray(merged.participant_profiles) ? merged.participant_profiles : [];
-  merged.cluster_binding_meta =
-    merged.cluster_binding_meta && typeof merged.cluster_binding_meta === "object" ? merged.cluster_binding_meta : {};
-  merged.prebind_by_cluster =
-    merged.prebind_by_cluster && typeof merged.prebind_by_cluster === "object" ? merged.prebind_by_cluster : {};
-  const enrollment = merged.enrollment_state ?? buildDefaultEnrollmentState();
-  merged.enrollment_state = {
-    mode: ["idle", "collecting", "ready", "closed"].includes(String(enrollment.mode))
-      ? enrollment.mode
-      : "idle",
-    started_at: enrollment.started_at ?? null,
-    stopped_at: enrollment.stopped_at ?? null,
-    participants: enrollment.participants && typeof enrollment.participants === "object" ? enrollment.participants : {},
-    unassigned_clusters:
-      enrollment.unassigned_clusters && typeof enrollment.unassigned_clusters === "object"
-        ? enrollment.unassigned_clusters
-        : {},
-    updated_at: new Date().toISOString()
-  };
-  const capture = merged.capture_by_stream ?? defaultCaptureByStream();
-  merged.capture_by_stream = {
-    mixed: sanitizeCaptureState(capture.mixed),
-    teacher: sanitizeCaptureState(capture.teacher),
-    students: sanitizeCaptureState(capture.students)
-  };
-  return merged;
-}
-
-async function proxyToDO(request: Request, env: Env, sessionId: string, action: string): Promise<Response> {
-  const id = env.MEETING_SESSION.idFromName(sessionId);
-  const stub = env.MEETING_SESSION.get(id);
-
-  const headers = new Headers();
-  const idemKey = request.headers.get("x-idempotency-key");
-  if (idemKey) {
-    headers.set("x-idempotency-key", idemKey);
-  }
-  headers.set("x-session-id", sessionId);
-
-  let body: string | undefined;
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    body = await request.text();
-    headers.set("content-type", "application/json");
-  }
-
-  const query = new URL(request.url).search;
-  return stub.fetch("https://do.internal/" + action + query, {
-    method: request.method,
-    headers,
-    body
-  });
-}
-
-async function proxyWebSocketToDO(
-  request: Request,
-  env: Env,
-  sessionId: string,
-  streamRole: StreamRole
-): Promise<Response> {
-  const id = env.MEETING_SESSION.idFromName(sessionId);
-  const stub = env.MEETING_SESSION.get(id);
-
-  const headers = new Headers(request.headers);
-  headers.set("x-session-id", sessionId);
-  headers.set("x-stream-role", streamRole);
-
-  return stub.fetch("https://do.internal/ingest-ws", {
-    method: "GET",
-    headers
-  });
-}
-
-function emptyIngestByStream(sessionId: string): Record<StreamRole, IngestState> {
-  return {
-    mixed: buildIngestState(sessionId),
-    teacher: buildIngestState(sessionId),
-    students: buildIngestState(sessionId)
-  };
-}
-
-function emptyUtterancesRawByStream(): Record<StreamRole, UtteranceRaw[]> {
-  return { mixed: [], teacher: [], students: [] };
-}
-
-function emptyUtterancesMergedByStream(): Record<StreamRole, UtteranceMerged[]> {
-  return { mixed: [], teacher: [], students: [] };
-}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-
-    if (path === "/health" && request.method === "GET") {
-      return jsonResponse({ status: "ok", app: "interview-feedback-gateway" });
-    }
-
-    // ── Scheduling webhook placeholder (Phase 2: DualSync integration) ──
-    if (path === "/api/scheduling/webhook" && request.method === "POST") {
-      return jsonResponse({ detail: "not implemented", phase: 2 }, 501);
-    }
-
-    // ── Auth gate (skipped for /health, skipped when WORKER_API_KEY is empty) ──
-    const authError = validateApiKey(request, env as unknown as Record<string, unknown>);
-    if (authError) return authError;
-
-    const wsRoleMatch = path.match(WS_INGEST_ROLE_ROUTE_REGEX);
-    if (wsRoleMatch) {
-      const [, rawSessionId, rawRole] = wsRoleMatch;
-      if (request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      if (!isWebSocketRequest(request)) {
-        return jsonResponse({ detail: "websocket upgrade required" }, 426);
-      }
-
-      let sessionId: string;
-      let streamRole: StreamRole;
-      try {
-        sessionId = safeSessionId(rawSessionId);
-        streamRole = parseStreamRole(rawRole, "mixed");
-      } catch (error) {
-        console.error("ws-ingest-v2 session/role parse error:", error);
-        return badRequest("Request processing failed");
-      }
-
-      return proxyWebSocketToDO(request, env, sessionId, streamRole);
-    }
-
-    const wsMatch = path.match(WS_INGEST_ROUTE_REGEX);
-    if (wsMatch) {
-      const [, rawSessionId] = wsMatch;
-      if (request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      if (!isWebSocketRequest(request)) {
-        return jsonResponse({ detail: "websocket upgrade required" }, 426);
-      }
-
-      let sessionId: string;
-      try {
-        sessionId = safeSessionId(rawSessionId);
-      } catch (error) {
-        console.error("ws-ingest session parse error:", error);
-        return badRequest("Request processing failed");
-      }
-
-      return proxyWebSocketToDO(request, env, sessionId, "mixed");
-    }
-
-    const enrollMatch = path.match(SESSION_ENROLL_ROUTE_REGEX);
-    if (enrollMatch) {
-      const [, rawSessionId, enrollAction] = enrollMatch;
-      let sessionId: string;
-      try {
-        sessionId = safeSessionId(rawSessionId);
-      } catch (error) {
-        console.error("enrollment session parse error:", error);
-        return badRequest("Request processing failed");
-      }
-
-      const action = `enrollment-${enrollAction}`;
-      if (action === "enrollment-start" && request.method !== "POST") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      if (action === "enrollment-stop" && request.method !== "POST") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      if (action === "enrollment-state" && request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      if (action === "enrollment-profiles" && request.method !== "POST") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      return proxyToDO(request, env, sessionId, action);
-    }
-
-    const finalizeStatusMatch = path.match(SESSION_FINALIZE_STATUS_ROUTE_REGEX);
-    if (finalizeStatusMatch) {
-      const [, rawSessionId] = finalizeStatusMatch;
-      let sessionId: string;
-      try {
-        sessionId = safeSessionId(rawSessionId);
-      } catch (error) {
-        console.error("finalize-status session parse error:", error);
-        return badRequest("Request processing failed");
-      }
-      if (request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      return proxyToDO(request, env, sessionId, "finalize-status");
-    }
-
-    const tier2StatusMatch = path.match(SESSION_TIER2_STATUS_ROUTE_REGEX);
-    if (tier2StatusMatch) {
-      const [, rawSessionId] = tier2StatusMatch;
-      let sessionId: string;
-      try {
-        sessionId = safeSessionId(rawSessionId);
-      } catch (error) {
-        console.error("tier2-status session parse error:", error);
-        return badRequest("Request processing failed");
-      }
-      if (request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      return proxyToDO(request, env, sessionId, "tier2-status");
-    }
-
-    const incrementalStatusMatch = path.match(SESSION_INCREMENTAL_STATUS_ROUTE_REGEX);
-    if (incrementalStatusMatch) {
-      const [, rawSessionId] = incrementalStatusMatch;
-      let sessionId: string;
-      try {
-        sessionId = safeSessionId(rawSessionId);
-      } catch (error) {
-        console.error("incremental-status session parse error:", error);
-        return badRequest("Request processing failed");
-      }
-      if (request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      return proxyToDO(request, env, sessionId, "incremental-status");
-    }
-
-    if (SESSION_HISTORY_ROUTE_REGEX.test(path)) {
-      if (request.method !== "GET") {
-        return jsonResponse({ detail: "method not allowed" }, 405);
-      }
-      const limitRaw = Number(url.searchParams.get("limit") ?? "20");
-      const cursorRaw = String(url.searchParams.get("cursor") ?? "").trim();
-      const limit = Math.max(1, Math.min(HISTORY_MAX_LIMIT, Number.isFinite(limitRaw) ? limitRaw : 20));
-      const listing = await env.RESULT_BUCKET.list({
-        prefix: HISTORY_PREFIX,
-        cursor: cursorRaw || undefined,
-        limit
-      });
-      const items: HistoryIndexItem[] = [];
-      for (const obj of listing.objects) {
-        const object = await env.RESULT_BUCKET.get(obj.key);
-        if (!object) continue;
-        try {
-          const parsed = JSON.parse(await object.text()) as HistoryIndexItem;
-          if (!parsed || typeof parsed !== "object") continue;
-          items.push(parsed);
-        } catch {
-          continue;
-        }
-      }
-      return jsonResponse({
-        items,
-        limit,
-        cursor: listing.truncated ? listing.cursor ?? null : null,
-        has_more: listing.truncated
-      });
-    }
-
-    const match = path.match(SESSION_ROUTE_REGEX);
-    if (!match) {
-      return jsonResponse({ detail: "route not found" }, 404);
-    }
-
-    const [, rawSessionId, action] = match;
-
-    let sessionId: string;
-    try {
-      sessionId = safeSessionId(rawSessionId);
-    } catch (error) {
-      console.error("session action parse error:", error);
-      return badRequest("Request processing failed");
-    }
-
-    if (action === "resolve" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "state" && request.method !== "GET") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "finalize" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "utterances" && request.method !== "GET") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "asr-run" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "asr-reset" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "config" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "events" && request.method !== "GET") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "cluster-map" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "unresolved-clusters" && request.method !== "GET") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "memos" && !["GET", "POST"].includes(request.method)) {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "speaker-logs" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "result" && request.method !== "GET") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "feedback-ready" && request.method !== "GET") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "feedback-open" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "feedback-regenerate-claim" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "feedback-claim-evidence" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-    if (action === "export" && request.method !== "POST") {
-      return jsonResponse({ detail: "method not allowed" }, 405);
-    }
-
-    return proxyToDO(request, env, sessionId, action);
+    return handleWorkerFetch(request, env);
   }
 };
+
 
 export class MeetingSessionDO extends DurableObject<Env> {
   private mutationQueue: Promise<void> = Promise.resolve();
@@ -1712,7 +341,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       ? this.captionBuffer.slice(-this.CAPTION_BUFFER_MAX)
       : this.captionBuffer;
     this.ctx.storage.put(STORAGE_KEY_CAPTION_BUFFER, toStore).catch((err) => {
-      console.warn(`[caption-persist] flush failed: ${getErrorMessage(err)}`);
+      log("warn", "caption-persist flush failed", { component: "caption-persist", error: getErrorMessage(err) });
     });
     this.captionFlushPending = 0;
   }
@@ -1774,7 +403,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
           if (sessionId) {
             // Run non-fatally: a failed increment should not crash the alarm handler
             await this.runIncrementalJob(sessionId).catch((err) => {
-              console.warn(`[incremental] alarm job failed (non-fatal): ${getErrorMessage(err)}`);
+              log("warn", "incremental: alarm job failed (non-fatal)", { component: "incremental", error: getErrorMessage(err) });
             });
           }
           return; // Incremental alarm handled; do not run stuck-finalize or cleanup
@@ -1793,7 +422,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         }
       }
       await this.failStuckFinalizeIfNeeded("alarm");
-      await this.cleanupExpiredAudioChunks();
+      await this.cleanupExpiredData();
     });
   }
 
@@ -1820,46 +449,72 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return "unknown-session";
   }
 
-  private async cleanupExpiredAudioChunks(): Promise<void> {
+  private async cleanupExpiredData(): Promise<void> {
     const finalizedAt = await this.ctx.storage.get<string>(STORAGE_KEY_FINALIZED_AT);
     if (!finalizedAt) return;
 
-    const age = Date.now() - new Date(finalizedAt).getTime();
-    const retentionMs = (Number(this.env.AUDIO_RETENTION_HOURS) || 72) * 3600 * 1000;
-    if (age <= retentionMs) return;
+    const ageMs = Date.now() - new Date(finalizedAt).getTime();
+    const audioRetentionMs = (Number(this.env.AUDIO_RETENTION_HOURS) || 72) * 3600 * 1000;
+    const dataRetentionMs = DEFAULT_DATA_RETENTION_DAYS * 24 * 3600 * 1000;
 
-    // Derive the session R2 prefix from the stored result key
     const resultKey = await this.ctx.storage.get<string>(STORAGE_KEY_RESULT_KEY_V2);
     if (!resultKey) return;
-
-    // resultKey is "sessions/{sessionSegment}/result_v2.json"
     const sessionPrefix = resultKey.replace(/\/result_v2\.json$/, "");
-    const chunksPrefix = `${sessionPrefix}/chunks/`;
 
-    let cursor: string | undefined;
-    let deletedCount = 0;
-    do {
-      const listing = await this.env.RESULT_BUCKET.list({
-        prefix: chunksPrefix,
-        cursor,
-        limit: R2_LIST_LIMIT
-      });
-      if (listing.objects.length > 0) {
-        await Promise.all(
-          listing.objects.map((obj) => this.env.RESULT_BUCKET.delete(obj.key))
-        );
-        deletedCount += listing.objects.length;
+    // Phase 1: Delete audio chunks after AUDIO_RETENTION_HOURS
+    if (ageMs > audioRetentionMs) {
+      const chunksPrefix = `${sessionPrefix}/chunks/`;
+      let cursor: string | undefined;
+      let deletedCount = 0;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({ prefix: chunksPrefix, cursor, limit: R2_LIST_LIMIT });
+        if (listing.objects.length > 0) {
+          await Promise.all(listing.objects.map((obj) => this.env.RESULT_BUCKET.delete(obj.key)));
+          deletedCount += listing.objects.length;
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+      if (deletedCount > 0) {
+        log("info", "cleanup: deleted expired audio chunks", { component: "cleanup", deleted_count: deletedCount, prefix: chunksPrefix });
       }
-      cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
-    } while (cursor);
+    }
 
-    if (deletedCount > 0) {
-      console.log(`[cleanup] deleted ${deletedCount} expired audio chunks from ${chunksPrefix}`);
+    // Phase 2: Full GDPR purge after DATA_RETENTION_DAYS (30 days default)
+    if (ageMs > dataRetentionMs) {
+      let r2Count = 0;
+      let cursor: string | undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({ prefix: `${sessionPrefix}/`, cursor, limit: R2_LIST_LIMIT });
+        if (listing.objects.length > 0) {
+          await Promise.all(listing.objects.map((obj) => this.env.RESULT_BUCKET.delete(obj.key)));
+          r2Count += listing.objects.length;
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      const safeId = sessionPrefix.replace(/^sessions\//, "");
+      const historySuffix = `_${safeId}.json`;
+      cursor = undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({ prefix: HISTORY_PREFIX, cursor, limit: R2_LIST_LIMIT });
+        const matching = listing.objects.filter((obj) => obj.key.endsWith(historySuffix));
+        if (matching.length > 0) {
+          await Promise.all(matching.map((obj) => this.env.RESULT_BUCKET.delete(obj.key)));
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      // E6: Transition to archived before wipe (for audit log purposes)
+      await this.setSessionPhase("archived");
+      await this.ctx.storage.deleteAll();
+      log("info", "cleanup: GDPR retention expired, all session data purged", {
+        component: "cleanup", session_prefix: sessionPrefix, r2_objects: r2Count, retention_days: DEFAULT_DATA_RETENTION_DAYS
+      });
     }
   }
 
   private asrRealtimeEnabled(): boolean {
-    return parseBool(this.env.ASR_REALTIME_ENABLED, true);
+    return asrRealtimeEnabledFn(this.env);
   }
 
   private async enqueueMutation<T>(fn: () => Promise<T>): Promise<T> {
@@ -1867,7 +522,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     this.mutationQueue = run.then(
       () => undefined,
       (err) => {
-        console.error("enqueueMutation: queued operation failed:", err);
+        log("error", "enqueueMutation: queued operation failed", { component: "mutation-queue", error: getErrorMessage(err) });
         return undefined;
       }
     );
@@ -1875,7 +530,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private asrDebugEnabled(): boolean {
-    return parseBool(this.env.ASR_DEBUG_LOG_EVENTS, false);
+    return asrDebugEnabledFn(this.env);
   }
 
   private resolveAudioWindowSeconds(): number {
@@ -1913,74 +568,23 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private scoreNumber(value: number | null | undefined): number {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      return -1;
-    }
-    return value;
+    return scoreNumberFn(value);
   }
 
   private participantProgressFromProfiles(state: SessionState): Record<string, EnrollmentParticipantProgress> {
-    const out: Record<string, EnrollmentParticipantProgress> = {};
-    for (const profile of state.participant_profiles ?? []) {
-      const key = profile.name.trim().toLowerCase();
-      if (!key) continue;
-      out[key] = {
-        name: profile.name,
-        sample_seconds: Number.isFinite(profile.sample_seconds) ? Number(profile.sample_seconds) : 0,
-        sample_count: Number.isFinite(profile.sample_count) ? Number(profile.sample_count) : 0,
-        status: profile.status === "ready" ? "ready" : "collecting"
-      };
-    }
-    return out;
+    return participantProgressFromProfilesFn(state);
   }
 
   private refreshEnrollmentMode(state: SessionState): void {
-    const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
-    const participants = enrollment.participants ?? {};
-    const keys = Object.keys(participants);
-    const allReady = keys.length > 0 && keys.every((key) => participants[key].status === "ready");
-    if (enrollment.mode === "collecting" && allReady) {
-      enrollment.mode = "ready";
-    }
-    enrollment.updated_at = this.currentIsoTs();
-    state.enrollment_state = enrollment;
+    refreshEnrollmentModeFn(state, this.currentIsoTs());
   }
 
   private rosterNameByCandidate(state: SessionState, candidate: string | null): string | null {
-    if (!candidate) return null;
-    const normalized = candidate.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-    if (!normalized) return null;
-    const roster = state.roster ?? [];
-    let fuzzySubstring: string | null = null;
-    let fuzzyEdit: string | null = null;
-    let bestEditDist = Infinity;
-    for (const item of roster) {
-      const rosterNorm = item.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-      if (!rosterNorm) continue;
-      // 1. Exact match — return immediately.
-      if (rosterNorm === normalized) {
-        return item.name;
-      }
-      // 2. Substring match (4+ chars).
-      if (normalized.length >= 4 && (normalized.includes(rosterNorm) || rosterNorm.includes(normalized))) {
-        fuzzySubstring = item.name;
-      }
-      // 3. Edit-distance match: both names >= 5 chars and distance <= 2.
-      if (normalized.length >= 5 && rosterNorm.length >= 5) {
-        const dist = levenshteinDistance(normalized, rosterNorm);
-        if (dist <= 2 && dist < bestEditDist) {
-          bestEditDist = dist;
-          fuzzyEdit = item.name;
-        }
-      }
-    }
-    // Prefer substring match over edit-distance match.
-    return fuzzySubstring ?? fuzzyEdit ?? null;
+    return rosterNameByCandidateFn(state, candidate);
   }
 
   private inferParticipantFromText(state: SessionState, asrText: string): string | null {
-    const extracted = extractNameFromText(asrText);
-    return this.rosterNameByCandidate(state, extracted);
+    return inferParticipantFromTextFn(state, asrText);
   }
 
   private updateUnassignedEnrollmentByCluster(
@@ -1988,14 +592,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     clusterId: string | null | undefined,
     durationSeconds: number
   ): void {
-    if (!clusterId || durationSeconds <= 0) return;
-    const enrollment = state.enrollment_state ?? buildDefaultEnrollmentState();
-    const current = enrollment.unassigned_clusters[clusterId] ?? { sample_seconds: 0, sample_count: 0 };
-    current.sample_seconds += durationSeconds;
-    current.sample_count += 1;
-    enrollment.unassigned_clusters[clusterId] = current;
-    enrollment.updated_at = this.currentIsoTs();
-    state.enrollment_state = enrollment;
+    updateUnassignedEnrollmentByClusterFn(state, clusterId, durationSeconds, this.currentIsoTs());
   }
 
   private async callInferenceWithFailover<T>(params: {
@@ -2137,112 +734,31 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime {
-    return {
-      ws: null,
-      connectPromise: null,
-      flushPromise: null,
-      readyPromise: null,
-      readyResolve: null,
-      readyReject: null,
-      streamRole,
-      connected: false,
-      connecting: false,
-      running: false,
-      taskId: null,
-      sendQueue: [],
-      reconnectBackoffMs: 500,
-      lastSentSeq: 0,
-      startedAt: 0,
-      currentStartSeq: null,
-      currentStartTsMs: null,
-      sentChunkTsBySeq: new Map(),
-      lastEmitAt: null,
-      lastFinalTextNorm: "",
-      drainGeneration: 0
-    };
+    return buildRealtimeRuntimeFn(streamRole);
   }
 
   private sendWsJson(socket: WebSocket, payload: unknown): void {
-    socket.send(JSON.stringify(payload));
+    sendWsJsonFn(socket, payload);
   }
 
   private sendWsError(socket: WebSocket, detail: string): void {
-    this.sendWsJson(socket, {
-      type: "error",
-      detail
-    });
+    sendWsErrorFn(socket, detail);
   }
 
   private asrEnabled(): boolean {
-    if (!parseBool(this.env.ASR_ENABLED, true)) return false;
-    // local-whisper uses the inference service, not DashScope — no API key needed
-    if (this.getAsrProvider() === "local-whisper") return true;
-    return Boolean((this.env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim());
+    return isAsrEnabledFn(this.env);
   }
 
   private buildDefaultAsrState(): AsrState {
-    return {
-      enabled: this.asrEnabled(),
-      provider: "dashscope",
-      model: this.env.ASR_MODEL ?? DASHSCOPE_DEFAULT_MODEL,
-      mode: this.asrRealtimeEnabled() ? "realtime" : "windowed",
-      asr_ws_state: "disconnected",
-      backlog_chunks: 0,
-      ingest_lag_seconds: 0,
-      last_emit_at: null,
-      ingest_to_utterance_p50_ms: null,
-      ingest_to_utterance_p95_ms: null,
-      recent_ingest_to_utterance_ms: [],
-      window_seconds: parsePositiveInt(this.env.ASR_WINDOW_SECONDS, 10),
-      hop_seconds: parsePositiveInt(this.env.ASR_HOP_SECONDS, 3),
-      last_window_end_seq: 0,
-      utterance_count: 0,
-      total_windows_processed: 0,
-      total_audio_seconds_processed: 0,
-      last_window_latency_ms: null,
-      avg_window_latency_ms: null,
-      avg_rtf: null,
-      consecutive_failures: 0,
-      next_retry_after_ms: 0,
-      last_error: null,
-      last_success_at: null,
-      updated_at: new Date().toISOString()
-    };
+    return buildDefaultAsrStateFn(this.env);
   }
 
   private sanitizeAsrState(current: AsrState): AsrState {
-    current.enabled = this.asrEnabled();
-    current.model = this.env.ASR_MODEL ?? current.model ?? DASHSCOPE_DEFAULT_MODEL;
-    current.mode = this.asrRealtimeEnabled() ? "realtime" : "windowed";
-    current.asr_ws_state = current.asr_ws_state ?? "disconnected";
-    current.backlog_chunks = Number.isFinite(current.backlog_chunks) ? current.backlog_chunks : 0;
-    current.ingest_lag_seconds = Number.isFinite(current.ingest_lag_seconds) ? current.ingest_lag_seconds : 0;
-    current.last_emit_at = current.last_emit_at ?? null;
-    current.ingest_to_utterance_p50_ms = current.ingest_to_utterance_p50_ms ?? null;
-    current.ingest_to_utterance_p95_ms = current.ingest_to_utterance_p95_ms ?? null;
-    current.recent_ingest_to_utterance_ms = Array.isArray(current.recent_ingest_to_utterance_ms)
-      ? current.recent_ingest_to_utterance_ms.filter((item) => Number.isFinite(item)).slice(-200)
-      : [];
-    current.window_seconds = parsePositiveInt(this.env.ASR_WINDOW_SECONDS, current.window_seconds || 10);
-    current.hop_seconds = parsePositiveInt(this.env.ASR_HOP_SECONDS, current.hop_seconds || 3);
-    current.total_windows_processed = Number.isFinite(current.total_windows_processed)
-      ? current.total_windows_processed
-      : 0;
-    current.total_audio_seconds_processed = Number.isFinite(current.total_audio_seconds_processed)
-      ? current.total_audio_seconds_processed
-      : 0;
-    if (current.last_window_latency_ms === undefined) current.last_window_latency_ms = null;
-    if (current.avg_window_latency_ms === undefined) current.avg_window_latency_ms = null;
-    if (current.avg_rtf === undefined) current.avg_rtf = null;
-    return current;
+    return sanitizeAsrStateFn(current, this.env);
   }
 
   private defaultAsrByStream(): Record<StreamRole, AsrState> {
-    return {
-      mixed: this.buildDefaultAsrState(),
-      teacher: this.buildDefaultAsrState(),
-      students: this.buildDefaultAsrState()
-    };
+    return defaultAsrByStreamFn(this.env);
   }
 
   private async loadIngestByStream(sessionId: string): Promise<Record<StreamRole, IngestState>> {
@@ -2354,87 +870,32 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private confidenceBucketFromEvidence(evidence: ResolveEvidence | null | undefined): "high" | "medium" | "low" | "unknown" {
-    const topScore = typeof evidence?.profile_top_score === "number" ? evidence.profile_top_score : null;
-    const svScore = typeof evidence?.sv_score === "number" ? evidence.sv_score : null;
-    const score = topScore ?? svScore;
-    if (score === null || !Number.isFinite(score)) return "unknown";
-    if (score >= 0.8) return "high";
-    if (score >= 0.6) return "medium";
-    return "low";
+    return confidenceBucketFromEvidenceFn(evidence);
   }
 
   private echoLeakRate(transcript: TranscriptItem[]): number {
-    const teacher = transcript
-      .filter((item) => item.stream_role === "teacher")
-      .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
-    const students = transcript
-      .filter((item) => item.stream_role === "students")
-      .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
-    if (teacher.length === 0 || students.length === 0) return 0;
-
-    let overlapLeak = 0;
-    let totalStudents = 0;
-    for (const item of students) {
-      totalStudents += 1;
-      const normalized = item.text.trim().toLowerCase();
-      if (!normalized) continue;
-      const hit = teacher.find((t) => {
-        const overlap = Math.min(t.end_ms, item.end_ms) - Math.max(t.start_ms, item.start_ms);
-        if (overlap <= 0) return false;
-        const left = t.text.trim().toLowerCase();
-        if (!left) return false;
-        const short = normalized.length < left.length ? normalized : left;
-        const long = normalized.length < left.length ? left : normalized;
-        if (short.length < 12) return false;
-        return long.includes(short);
-      });
-      if (hit) overlapLeak += 1;
-    }
-    if (totalStudents === 0) return 0;
-    return overlapLeak / totalStudents;
+    return echoLeakRateFn(transcript);
   }
 
   private suppressionFalsePositiveRate(
     transcript: TranscriptItem[],
     captureByStream: Record<StreamRole, CaptureState>
   ): number {
-    const suppressed = Number(captureByStream.teacher.echo_suppressed_chunks ?? 0);
-    if (!Number.isFinite(suppressed) || suppressed <= 0) return 0;
-    const teacherTurns = transcript.filter((item) => item.stream_role === "teacher").length;
-    if (teacherTurns <= 0) return 0;
-    const ratio = suppressed / Math.max(teacherTurns, 1);
-    return Math.max(0, Math.min(1, ratio * 0.1));
+    return suppressionFalsePositiveRateFn(transcript, captureByStream);
   }
 
   private buildQualityMetrics(
     transcript: TranscriptItem[],
     captureByStream: Record<StreamRole, CaptureState>
   ): QualityMetrics {
-    const students = transcript.filter((item) => item.stream_role === "students");
-    const unknown = students.filter((item) => !item.speaker_name || item.decision === "unknown").length;
-    const unknownRatio = students.length > 0 ? unknown / students.length : 0;
-    const echoSuppressed = Number(captureByStream.teacher.echo_suppressed_chunks ?? 0);
-    const echoRecent = Number(captureByStream.teacher.echo_suppression_recent_rate ?? 0);
-    return {
-      unknown_ratio: unknownRatio,
-      students_utterance_count: students.length,
-      students_unknown_count: unknown,
-      echo_suppressed_chunks: Number.isFinite(echoSuppressed) ? Math.max(0, Math.floor(echoSuppressed)) : 0,
-      echo_suppression_recent_rate: Number.isFinite(echoRecent) ? Math.max(0, Math.min(1, echoRecent)) : 0,
-      echo_leak_rate: this.echoLeakRate(transcript),
-      suppression_false_positive_rate: this.suppressionFalsePositiveRate(transcript, captureByStream)
-    };
+    return buildQualityMetricsFn(transcript, captureByStream);
   }
 
   private speechBackendMode(
     state: SessionState,
     dependencyHealth: DependencyHealthSnapshot
   ): "cloud-primary" | "cloud-secondary" | "edge-sidecar" | "hybrid" {
-    const diarizationBackend = state.config?.diarization_backend === "edge" ? "edge" : "cloud";
-    const activeInference = dependencyHealth.active_backend === "secondary" ? "cloud-secondary" : "cloud-primary";
-    if (diarizationBackend === "edge" && activeInference === "cloud-secondary") return "hybrid";
-    if (diarizationBackend === "edge") return "edge-sidecar";
-    return activeInference;
+    return speechBackendModeFn(state, dependencyHealth);
   }
 
   private async appendSpeakerEvent(event: SpeakerEvent): Promise<void> {
@@ -2448,12 +909,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private emptyAsrCursorByStream(): Record<StreamRole, AsrReplayCursor> {
-    const now = this.currentIsoTs();
-    return {
-      mixed: { last_ingested_seq: 0, last_sent_seq: 0, last_emitted_seq: 0, updated_at: now },
-      teacher: { last_ingested_seq: 0, last_sent_seq: 0, last_emitted_seq: 0, updated_at: now },
-      students: { last_ingested_seq: 0, last_sent_seq: 0, last_emitted_seq: 0, updated_at: now }
-    };
+    return emptyAsrCursorByStreamFn(this.currentIsoTs());
   }
 
   private async loadAsrCursorByStream(): Promise<Record<StreamRole, AsrReplayCursor>> {
@@ -2557,20 +1013,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private buildEvidenceIndex(perPerson: PersonFeedbackItem[]): Record<string, string[]> {
-    const index: Record<string, string[]> = {};
-    for (const person of perPerson) {
-      for (const dimension of person.dimensions) {
-        const refs = new Set<string>();
-        const claims = [...dimension.strengths, ...dimension.risks, ...dimension.actions];
-        for (const claim of claims) {
-          for (const ref of claim.evidence_refs) {
-            if (ref) refs.add(ref);
-          }
-        }
-        index[`${person.person_key}:${dimension.dimension}`] = [...refs].slice(0, 12);
-      }
-    }
-    return index;
+    return buildEvidenceIndexFn(perPerson);
   }
 
   private findClaimInReport(
@@ -2582,99 +1025,27 @@ export class MeetingSessionDO extends DurableObject<Env> {
       claimId?: string;
     }
   ): { person: PersonFeedbackItem; claim: PersonFeedbackItem["dimensions"][number]["strengths"][number] } | null {
-    const person = report.per_person.find((item) => item.person_key === params.personKey);
-    if (!person) return null;
-    const dimension = person.dimensions.find((item) => item.dimension === params.dimension);
-    if (!dimension) return null;
-    const claims = dimension[params.claimType];
-    const claim = params.claimId ? claims.find((item) => item.claim_id === params.claimId) : claims[0];
-    if (!claim) return null;
-    return { person, claim };
+    return findClaimInReportFn(report, params);
   }
 
   private downWeightClaimConfidenceByEvidence(
     claim: PersonFeedbackItem["dimensions"][number]["strengths"][number],
     evidenceById: Map<string, ResultV2["evidence"][number]>
   ): void {
-    const hasWeakEvidence = claim.evidence_refs.some((ref) => Boolean(evidenceById.get(ref)?.weak));
-    const base = Number(claim.confidence || 0.72);
-    claim.confidence = hasWeakEvidence ? Math.max(0.35, Math.min(0.95, base - 0.18)) : Math.max(0.35, Math.min(0.95, base));
+    downWeightClaimConfidenceByEvidenceFn(claim, evidenceById);
   }
 
-  /** Strip claims with empty or invalid evidence_refs so one bad claim doesn't kill the whole LLM report. */
   private sanitizeClaimEvidenceRefs(
     perPerson: PersonFeedbackItem[],
     evidence: ResultV2["evidence"]
   ): { sanitized: PersonFeedbackItem[]; strippedCount: number } {
-    const evidenceById = new Set(evidence.map((e) => e.evidence_id));
-    let strippedCount = 0;
-    const sanitized = perPerson.map((person) => ({
-      ...person,
-      dimensions: person.dimensions.map((dim) => {
-        const filterClaims = (claims: typeof dim.strengths) =>
-          claims.filter((claim) => {
-            const refs = Array.isArray(claim.evidence_refs)
-              ? claim.evidence_refs.map((r) => String(r || "").trim()).filter(Boolean)
-              : [];
-            // Remove refs that don't exist in evidence
-            const validRefs = refs.filter((r) => evidenceById.has(r));
-            if (validRefs.length === 0) {
-              strippedCount++;
-              return false;
-            }
-            claim.evidence_refs = validRefs;
-            return true;
-          });
-        return {
-          ...dim,
-          strengths: filterClaims(dim.strengths),
-          risks: filterClaims(dim.risks),
-          actions: filterClaims(dim.actions)
-        };
-      })
-    }));
-    return { sanitized, strippedCount };
+    return sanitizeClaimEvidenceRefsFn(perPerson, evidence);
   }
 
   private validateClaimEvidenceRefs(
     report: ResultV2
   ): { valid: boolean; claimCount: number; invalidCount: number; needsEvidenceCount: number; failures: string[] } {
-    const evidenceById = new Map(report.evidence.map((item) => [item.evidence_id, item] as const));
-    let claimCount = 0;
-    let invalidCount = 0;
-    let needsEvidenceCount = 0;
-    const failures: string[] = [];
-    for (const person of report.per_person) {
-      for (const dimension of person.dimensions) {
-        const claims = [...dimension.strengths, ...dimension.risks, ...dimension.actions];
-        for (const claim of claims) {
-          claimCount += 1;
-          const refs = Array.isArray(claim.evidence_refs)
-            ? claim.evidence_refs.map((item) => String(item || "").trim()).filter(Boolean)
-            : [];
-          if (refs.length === 0) {
-            invalidCount += 1;
-            needsEvidenceCount += 1;
-            failures.push(`claim ${claim.claim_id} has empty evidence_refs`);
-            continue;
-          }
-          const missing = refs.filter((ref) => !evidenceById.has(ref));
-          if (missing.length > 0) {
-            invalidCount += 1;
-            failures.push(`claim ${claim.claim_id} references unknown evidence ids: ${missing.slice(0, 3).join(",")}`);
-            continue;
-          }
-          this.downWeightClaimConfidenceByEvidence(claim, evidenceById);
-        }
-      }
-    }
-    return {
-      valid: invalidCount === 0 && claimCount > 0,
-      claimCount,
-      invalidCount,
-      needsEvidenceCount,
-      failures
-    };
+    return validateClaimEvidenceRefsFn(report);
   }
 
   private evaluateFeedbackQualityGates(params: {
@@ -2682,44 +1053,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     ingestP95Ms: number | null;
     claimValidationFailures: string[];
   }): { passed: boolean; failures: string[] } {
-    const failures = [...params.claimValidationFailures];
-    if (!Number.isFinite(params.unknownRatio) || params.unknownRatio > 0.25) {
-      failures.push(`students_unknown_ratio gate failed: observed=${params.unknownRatio.toFixed(4)} target<=0.25`);
-    }
-    if (params.ingestP95Ms === null || !Number.isFinite(params.ingestP95Ms) || params.ingestP95Ms > 3000) {
-      failures.push(`students_ingest_to_utterance_p95_ms gate failed: observed=${params.ingestP95Ms ?? "null"} target<=3000`);
-    }
-    return { passed: failures.length === 0, failures };
+    return evaluateFeedbackQualityGatesFn(params);
   }
 
   private mergeStatsWithRoster(stats: SpeakerStatItem[], state: SessionState): SpeakerStatItem[] {
-    const out: SpeakerStatItem[] = [...stats];
-    const seen = new Set<string>();
-    for (const stat of out) {
-      const key = String(stat.speaker_key || "").trim().toLowerCase();
-      const name = String(stat.speaker_name || "").trim().toLowerCase();
-      if (key) seen.add(key);
-      if (name) seen.add(name);
-    }
-    const roster = Array.isArray(state.roster) ? state.roster : [];
-    for (const entry of roster) {
-      const name = String(entry?.name || "").trim();
-      if (!name) continue;
-      const lower = name.toLowerCase();
-      if (seen.has(lower)) continue;
-      out.push({
-        speaker_key: name,
-        speaker_name: name,
-        talk_time_ms: 0,
-        talk_time_pct: 0,
-        turns: 0,
-        silence_ms: 0,
-        interruptions: 0,
-        interrupted_by_others: 0
-      });
-      seen.add(lower);
-    }
-    return out;
+    return mergeStatsWithRosterFn(stats, state);
   }
 
   private async maybeRefreshFeedbackCache(sessionId: string, force = false): Promise<FeedbackCache> {
@@ -3138,6 +1476,55 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
+  // ── Session Phase State Machine (E6) ────────────────────────────────
+  private async loadSessionPhase(): Promise<SessionPhase> {
+    const stored = await this.ctx.storage.get<SessionPhase>(STORAGE_KEY_SESSION_PHASE);
+    if (stored && ["idle", "recording", "finalizing", "finalized", "archived"].includes(stored)) {
+      return stored;
+    }
+    return "idle";
+  }
+
+  private async setSessionPhase(target: SessionPhase): Promise<SessionPhase> {
+    const current = await this.loadSessionPhase();
+    const result = transitionSessionPhase(current, target);
+    if (result.valid) {
+      await this.ctx.storage.put(STORAGE_KEY_SESSION_PHASE, result.phase);
+      log("info", `session-phase: ${current} → ${result.phase}`, { component: "session-phase" });
+    } else {
+      log("warn", `session-phase: invalid transition ${current} → ${target}, staying at ${current}`, { component: "session-phase" });
+    }
+    return result.phase;
+  }
+
+  /** Force-set session phase (bypass validation, used for GDPR purge reset). */
+  private async resetSessionPhase(phase: SessionPhase): Promise<void> {
+    await this.ctx.storage.put(STORAGE_KEY_SESSION_PHASE, phase);
+  }
+
+  // ── Finalize Stage Checkpoint (E5) ──────────────────────────────────
+  private async loadFinalizeStageCheckpoint(): Promise<FinalizeStageCheckpoint | null> {
+    return (await this.ctx.storage.get<FinalizeStageCheckpoint>(STORAGE_KEY_FINALIZE_STAGE_DATA)) ?? null;
+  }
+
+  private async saveFinalizeStageCheckpoint(
+    jobId: string,
+    completedStage: FinalizeV2Status["stage"],
+    stageData: Record<string, unknown>
+  ): Promise<void> {
+    const checkpoint: FinalizeStageCheckpoint = {
+      job_id: jobId,
+      completed_stage: completedStage,
+      saved_at: Date.now(),
+      stage_data: stageData
+    };
+    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_STAGE_DATA, checkpoint);
+  }
+
+  private async clearFinalizeStageCheckpoint(): Promise<void> {
+    await this.ctx.storage.delete(STORAGE_KEY_FINALIZE_STAGE_DATA);
+  }
+
   private currentRealtimeWsState(runtime: AsrRealtimeRuntime): "disconnected" | "connecting" | "running" | "error" {
     if (runtime.connecting) return "connecting";
     if (runtime.connected && runtime.running) return "running";
@@ -3311,7 +1698,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       ws.addEventListener("message", (event) => {
         this.ctx.waitUntil(
           this.handleRealtimeAsrMessage(sessionId, streamRole, event.data).catch(async (error) => {
-            console.error(`asr realtime message handler failed stream=${streamRole}:`, error);
+            log("error", "asr realtime message handler failed", { component: "asr", stream_role: streamRole, error: getErrorMessage(error) });
             await this.refreshAsrStreamMetrics(sessionId, streamRole, {
               asr_ws_state: "error",
               last_error: getErrorMessage(error)
@@ -4105,41 +2492,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private resolveTeacherIdentity(state: SessionState, asrText: string): { speakerName: string; identitySource: NonNullable<SpeakerEvent["identity_source"]> } {
-    const roster = state.roster ?? [];
-    const config = state.config ?? {};
-    const configTeamsName = valueAsString(config.teams_interviewer_name);
-    const configInterviewerName = valueAsString(config.interviewer_name);
-
-    if (roster.length > 0) {
-      if (configTeamsName) {
-        const matched = roster.find((item) => item.name.trim().toLowerCase() === configTeamsName.trim().toLowerCase());
-        if (matched) {
-          return { speakerName: matched.name, identitySource: "teams_participants" };
-        }
-      }
-      if (configInterviewerName) {
-        const matched = roster.find((item) => item.name.trim().toLowerCase() === configInterviewerName.trim().toLowerCase());
-        if (matched) {
-          return { speakerName: matched.name, identitySource: "teams_participants" };
-        }
-      }
-      if (roster.length === 1) {
-        return { speakerName: roster[0].name, identitySource: "teams_participants" };
-      }
-    }
-
-    if (configTeamsName) {
-      return { speakerName: configTeamsName, identitySource: "preconfig" };
-    }
-    if (configInterviewerName) {
-      return { speakerName: configInterviewerName, identitySource: "preconfig" };
-    }
-
-    const extracted = extractNameFromText(asrText);
-    if (extracted) {
-      return { speakerName: extracted, identitySource: "name_extract" };
-    }
-    return { speakerName: "teacher", identitySource: "teacher" };
+    return resolveTeacherIdentityFn(state, asrText);
   }
 
   private async appendTeacherSpeakerEvent(sessionId: string, utterance: UtteranceRaw): Promise<void> {
@@ -4332,7 +2685,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await this.storeUtterancesRawByStream(utterancesByStream);
 
         if (generated % 5 === 0) {
-          console.log(`[asr] ${streamRole} progress: ${generated} windows, last_seq=${nextEndSeq}/${ingest.last_seq}`);
+          log("info", "asr progress", { component: "asr", stream_role: streamRole, windows: generated, last_seq: nextEndSeq, total_seq: ingest.last_seq });
         }
 
         nextEndSeq += asrState.hop_seconds;
@@ -4369,7 +2722,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const mergedByStream = await this.loadUtterancesMergedByStream();
         mergedByStream[streamRole] = mergeUtterances(utterances);
         await this.storeUtterancesMergedByStream(mergedByStream);
-        console.log(`[asr] persisted ${generated} partial utterances for ${streamRole} despite error: ${getErrorMessage(error)}`);
+        log("warn", "asr persisted partial utterances despite error", { component: "asr", stream_role: streamRole, windows: generated, error: getErrorMessage(error) });
       }
 
       return {
@@ -4727,100 +3080,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     existing: SpeakerLogs,
     source: "cloud" | "edge" = "cloud"
   ): SpeakerLogs {
-    const turns = transcript
-      .filter((item) => item.stream_role === "students" && item.cluster_id)
-      .map((item) => ({
-        turn_id: `turn_${item.utterance_id}`,
-        start_ms: item.start_ms,
-        end_ms: item.end_ms,
-        stream_role: "students" as StreamRole,
-        cluster_id: item.cluster_id as string,
-        utterance_id: item.utterance_id
-      }));
-
-    const clusterMap = new Map<string, Set<string>>();
-    for (const turn of turns) {
-      const bucket = clusterMap.get(turn.cluster_id) ?? new Set<string>();
-      bucket.add(turn.turn_id);
-      clusterMap.set(turn.cluster_id, bucket);
-    }
-    const clusters = [...clusterMap.entries()].map(([clusterId, turnIds]) => ({
-      cluster_id: clusterId,
-      turn_ids: [...turnIds],
-      confidence: null
-    }));
-    const speaker_map = [...clusterMap.keys()].map((clusterId) => {
-      const meta = state.cluster_binding_meta[clusterId];
-      const metaName = valueAsString(meta?.participant_name);
-      const bound = state.bindings[clusterId] ?? (metaName || null);
-      const source: "manual" | "enroll" | "name_extract" | "unknown" =
-        meta?.source === "manual_map"
-          ? "manual"
-          : meta?.source === "enrollment_match"
-            ? "enroll"
-            : meta?.source === "name_extract"
-              ? "name_extract"
-              : "unknown";
-      return {
-        cluster_id: clusterId,
-        person_id: bound,
-        display_name: bound,
-        source
-      };
-    });
-
-    return mergeSpeakerLogs(
-      existing,
-      {
-        source,
-        turns,
-        clusters,
-        speaker_map,
-        updated_at: nowIso
-      }
-    );
+    return deriveSpeakerLogsFromTranscriptFn(nowIso, transcript, state, existing, source);
   }
 
   private buildEdgeSpeakerLogsForFinalize(nowIso: string, existing: SpeakerLogs, state: SessionState): SpeakerLogs {
-    const base = existing.source === "edge" ? existing : emptySpeakerLogs(nowIso);
-    const clusterIds = new Set<string>();
-    for (const item of base.clusters) {
-      clusterIds.add(item.cluster_id);
-    }
-    for (const item of base.turns) {
-      clusterIds.add(item.cluster_id);
-    }
-
-    const mapByCluster = new Map(
-      (Array.isArray(base.speaker_map) ? base.speaker_map : []).map((item) => [item.cluster_id, item])
-    );
-    for (const clusterId of clusterIds) {
-      const meta = state.cluster_binding_meta[clusterId];
-      const metaName = valueAsString(meta?.participant_name);
-      const mapName = valueAsString(mapByCluster.get(clusterId)?.display_name ?? mapByCluster.get(clusterId)?.person_id);
-      const bound = state.bindings[clusterId] ?? (metaName || mapName || null);
-      const source: "manual" | "enroll" | "name_extract" | "unknown" =
-        meta?.source === "manual_map"
-          ? "manual"
-          : meta?.source === "enrollment_match"
-            ? "enroll"
-            : meta?.source === "name_extract"
-              ? "name_extract"
-              : (mapByCluster.get(clusterId)?.source ?? "unknown");
-      mapByCluster.set(clusterId, {
-        cluster_id: clusterId,
-        person_id: bound,
-        display_name: bound,
-        source
-      });
-    }
-
-    return {
-      ...base,
-      source: "edge",
-      speaker_map: [...mapByCluster.values()],
-      updated_at: nowIso
-    };
+    return buildEdgeSpeakerLogsForFinalizeFn(nowIso, existing, state);
   }
 
   private async runFinalizeV2Job(
@@ -4879,7 +3143,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const stored = await this.ctx.storage.get<CaptionEvent[]>(STORAGE_KEY_CAPTION_BUFFER);
         if (Array.isArray(stored) && stored.length > 0) {
           this.captionBuffer = stored;
-          console.log(`[finalize-v2] restored ${stored.length} captions from DO storage`);
+          log("info", "finalize-v2: restored captions from DO storage", { component: "finalize-v2", caption_count: stored.length });
         }
       }
 
@@ -5170,15 +3434,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
             backend_used: finalizeBackendUsed
           });
 
-          console.log(`[finalize-v2] report-only completed for session=${sessionId}`);
+          log("info", "finalize-v2: report-only completed", { component: "finalize-v2", session_id: sessionId });
 
           // ── Async: generate improvement suggestions (non-blocking) ──
           this.triggerImprovementGeneration(sessionId, resultV2, resultV2.transcript, resultV2Key).catch(err2 => {
-            console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${getErrorMessage(err2)}`);
+            log("warn", "finalize-v2: improvements generation failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err2) });
           });
         } catch (err) {
           const errMsg = getErrorMessage(err) || "unknown error";
-          console.error(`[finalize-v2] report-only failed: ${errMsg}`);
+          log("error", "finalize-v2: report-only failed", { component: "finalize-v2", session_id: sessionId, error: errMsg });
           await this.updateFinalizeV2Status(jobId, {
             status: "failed",
             errors: [errMsg],
@@ -5197,7 +3461,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       // force report-only mode to avoid falling through to local_asr which would timeout.
       // At this point mode is 'full' (report-only already returned above), so we redirect.
       if (this.captionSource === 'acs-teams' && !useCaptions) {
-        console.warn(`[finalize-v2] captionSource=acs-teams but captionBuffer empty — forcing report-only mode`);
+        log("warn", "finalize-v2: captionSource=acs-teams but captionBuffer empty, forcing report-only mode", { component: "finalize-v2", session_id: sessionId });
         await this.setFinalizeLock(false);
         return this.runFinalizeV2Job(sessionId, jobId, metadata, 'report-only');
       }
@@ -5221,7 +3485,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       try {
         await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
       } catch (drainErr) {
-        console.warn(`[finalize-v2] drain failed (non-fatal), continuing: ${getErrorMessage(drainErr)}`);
+        log("warn", "finalize-v2: drain failed (non-fatal), continuing", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(drainErr) });
         finalizeWarnings.push(`drain degraded: ${getErrorMessage(drainErr)}`);
         finalizeDegraded = true;
       }
@@ -5236,7 +3500,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
         await Promise.all([this.replayGapFromR2(sessionId, "teacher"), this.replayGapFromR2(sessionId, "students")]);
         await Promise.all([drainWithTimeout("teacher"), drainWithTimeout("students")]);
       } catch (replayErr) {
-        console.warn(`[finalize-v2] replay/drain failed (non-fatal), continuing: ${getErrorMessage(replayErr)}`);
+        log("warn", "finalize-v2: replay/drain failed (non-fatal), continuing", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(replayErr) });
         finalizeWarnings.push(`replay degraded: ${getErrorMessage(replayErr)}`);
         finalizeDegraded = true;
       }
@@ -5262,8 +3526,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
           // Log diagnostic info before running windowed ASR
           const diagIngest = await this.loadIngestByStream(sessionId);
           const diagAsr = await this.loadAsrByStream();
-          console.log(`[finalize-v2] local-whisper pre-check: teacher.last_seq=${diagIngest.teacher.last_seq} students.last_seq=${diagIngest.students.last_seq} asr_enabled=${diagAsr.students.enabled} window_seconds=${diagAsr.students.window_seconds}`);
-          console.log(`[finalize-v2] ASR_PROVIDER=${this.env.ASR_PROVIDER} localWhisperProvider=${!!this.localWhisperProvider} getAsrProvider=${this.getAsrProvider()}`);
+          log("info", "finalize-v2: local-whisper pre-check", { component: "finalize-v2", session_id: sessionId, teacher_last_seq: diagIngest.teacher.last_seq, students_last_seq: diagIngest.students.last_seq, asr_enabled: diagAsr.students.enabled, window_seconds: diagAsr.students.window_seconds });
+          log("info", "finalize-v2: ASR provider info", { component: "finalize-v2", session_id: sessionId, asr_provider: this.env.ASR_PROVIDER, has_local_whisper: !!this.localWhisperProvider, get_asr_provider: this.getAsrProvider() });
 
           // Process each stream sequentially, in small batches (BATCH_SIZE windows)
           // with heartbeat updates between batches. This prevents the DO from being
@@ -5304,30 +3568,30 @@ export class MeetingSessionDO extends DurableObject<Env> {
                 roleGenerated += result.generated;
                 totalGenerated += result.generated;
                 roleFailures = 0;
-                console.log(`[finalize-v2] local-whisper ${role} batch: +${result.generated} (total=${roleGenerated}/${estimatedWindows}, last_seq=${result.last_window_end_seq})`);
+                log("info", "finalize-v2: local-whisper batch complete", { component: "finalize-v2", session_id: sessionId, stream_role: role, generated: result.generated, role_total: roleGenerated, estimated: estimatedWindows, last_seq: result.last_window_end_seq });
               } else if (result.last_error) {
                 roleFailures += 1;
-                console.warn(`[finalize-v2] local-whisper ${role} error (${roleFailures}/${MAX_CONSECUTIVE_FAILURES}): ${result.last_error}`);
+                log("warn", "finalize-v2: local-whisper batch error", { component: "finalize-v2", session_id: sessionId, stream_role: role, failures: roleFailures, max_failures: MAX_CONSECUTIVE_FAILURES, error: result.last_error });
                 if (roleFailures >= MAX_CONSECUTIVE_FAILURES) {
-                  console.warn(`[finalize-v2] local-whisper ${role}: too many failures, stopping`);
+                  log("warn", "finalize-v2: local-whisper too many failures, stopping", { component: "finalize-v2", session_id: sessionId, stream_role: role, failures: roleFailures });
                   finalizeWarnings.push(`local-whisper ${role}: stopped after ${roleFailures} consecutive failures`);
                   break;
                 }
                 await new Promise((r) => setTimeout(r, 3000));
               } else {
                 // No error and no generated = all windows done for this stream
-                console.log(`[finalize-v2] local-whisper ${role} complete: ${roleGenerated} windows`);
+                log("info", "finalize-v2: local-whisper stream complete", { component: "finalize-v2", session_id: sessionId, stream_role: role, windows: roleGenerated });
                 break;
               }
             }
           }
 
-          console.log(`[finalize-v2] local-whisper completed: ${totalGenerated} total windows transcribed`);
+          log("info", "finalize-v2: local-whisper completed", { component: "finalize-v2", total_windows: totalGenerated });
           if (totalGenerated === 0) {
             finalizeWarnings.push("local-whisper produced 0 utterances");
           }
         } catch (localAsrErr) {
-          console.warn(`[finalize-v2] local-whisper ASR failed (non-fatal): ${getErrorMessage(localAsrErr)}`);
+          log("warn", "finalize-v2: local-whisper ASR failed (non-fatal)", { component: "finalize-v2", error: getErrorMessage(localAsrErr) });
           finalizeWarnings.push(`local-whisper degraded: ${getErrorMessage(localAsrErr)}`);
           finalizeDegraded = true;
         }
@@ -5605,6 +3869,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
         throw new Error("Finalization aborted: global timeout exceeded");
       }
 
+      // E5: Save stage checkpoint after reconcile (most expensive data-prep stage)
+      await this.saveFinalizeStageCheckpoint(jobId, "reconcile", {
+        transcript_count: transcript.length,
+        locale,
+        diarization_backend: diarizationBackend
+      });
+
       await this.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
       const stats = this.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
 
@@ -5686,6 +3957,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
       if (abortController.signal.aborted) {
         throw new Error("Finalization aborted: global timeout exceeded");
       }
+
+      // E5: Save stage checkpoint after events (before expensive LLM report generation)
+      await this.saveFinalizeStageCheckpoint(jobId, "events", {
+        events_count: analysisEvents.length,
+        backend_used: finalizeBackendUsed,
+        degraded: finalizeDegraded
+      });
 
       await this.updateFinalizeV2Status(jobId, { stage: "report", progress: 84 });
       await this.ensureFinalizeJobActive(jobId);
@@ -5920,6 +4198,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
         throw new Error("Finalization aborted: global timeout exceeded");
       }
 
+      // E5: Save stage checkpoint after report (LLM call complete, only persist remaining)
+      await this.saveFinalizeStageCheckpoint(jobId, "report", {
+        report_source: reportSource,
+        report_model: reportModel,
+        pipeline_mode: pipelineMode
+      });
+
       await this.updateFinalizeV2Status(jobId, { stage: "persist", progress: 95 });
       await this.ensureFinalizeJobActive(jobId);
       const finalizedAt = this.currentIsoTs();
@@ -6088,10 +4373,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
         degraded: finalizeDegraded,
         backend_used: finalizeBackendUsed
       });
+      // E6: Transition to finalized phase
+      await this.setSessionPhase("finalized");
+      // E5: Clear stage checkpoint on success — no longer needed
+      await this.clearFinalizeStageCheckpoint();
 
       // ── Async: generate improvement suggestions (non-blocking) ──
       this.triggerImprovementGeneration(sessionId, resultV2, transcript, resultV2Key).catch(err => {
-        console.warn(`[finalize-v2] improvements generation failed (non-blocking): ${getErrorMessage(err)}`);
+        log("warn", "finalize-v2: improvements generation failed (non-blocking)", { component: "finalize-v2", session_id: sessionId, error: getErrorMessage(err) });
       });
 
       // ── Incremental finalize: if V1 increments were processed during recording, use them ──
@@ -6131,12 +4420,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
             finalizeNameAliases ?? {}
           );
           if (incrementalFinalizeSucceeded) {
-            console.log(`[finalize-v2] incremental finalize used as primary for session=${sessionId}, skipping tier2`);
+            log("info", "finalize-v2: incremental finalize used as primary, skipping tier2", { component: "finalize-v2", session_id: sessionId });
           } else {
-            console.warn(`[finalize-v2] incremental finalize failed, falling back to tier2 for session=${sessionId}`);
+            log("warn", "finalize-v2: incremental finalize failed, falling back to tier2", { component: "finalize-v2", session_id: sessionId });
           }
         } catch (incFinalizeErr) {
-          console.warn(`[finalize-v2] incremental finalize threw (non-fatal): ${getErrorMessage(incFinalizeErr)}`);
+          log("warn", "finalize-v2: incremental finalize threw (non-fatal)", { component: "finalize-v2", error: getErrorMessage(incFinalizeErr) });
         }
       }
 
@@ -6257,7 +4546,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
       await this.storeFeedbackCache(cache);
     }
 
-    console.log(`[finalize-v2] improvements generated for session=${sessionId}`);
+    log("info", "finalize-v2: improvements generated", { component: "finalize-v2", session_id: sessionId });
   }
 
   // ── Tier 2 Status Management ───────────────────────────────────────────
@@ -6629,10 +4918,10 @@ export class MeetingSessionDO extends DurableObject<Env> {
         warnings: tier2Warnings
       });
 
-      console.log(`[tier2] completed for session=${sessionId}`);
+      log("info", "tier2: completed", { component: "tier2", session_id: sessionId });
     } catch (err) {
       const message = getErrorMessage(err);
-      console.error(`[tier2] failed for session=${sessionId}: ${message}`);
+      log("error", "tier2: failed", { component: "tier2", session_id: sessionId, error: message });
       await this.updateTier2Status({
         status: "failed",
         completed_at: this.currentIsoTs(),
@@ -6679,7 +4968,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     // Store session ID so resolveSessionIdForIncremental can find it before finalization
     await this.ctx.storage.put("incremental_session_id", sessionId);
     await this.ctx.storage.setAlarm(Date.now() + 500);
-    console.log(`[incremental] alarm scheduled for session=${sessionId} tag=${tag}`);
+    log("info", "incremental: alarm scheduled", { component: "incremental", session_id: sessionId, tag });
   }
 
   /**
@@ -7047,11 +5336,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
         error: null
       });
 
-      console.log(`[incremental] finalize succeeded for session=${sessionId}`);
+      log("info", "incremental: finalize succeeded", { component: "incremental", session_id: sessionId });
       return true;
     } catch (err) {
       const message = getErrorMessage(err);
-      console.warn(`[incremental] finalize failed (non-fatal) session=${sessionId}: ${message}`);
+      log("warn", "incremental: finalize failed (non-fatal)", { component: "incremental", session_id: sessionId, error: message });
       // Clean up utterance cache even on failure (Hard Point 5)
       await this.ctx.storage.delete(STORAGE_KEY_INCREMENTAL_UTTERANCES).catch(() => {});
       await this.updateIncrementalStatus({ status: "failed", error: message });
@@ -7153,13 +5442,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
             await this.enqueueRealtimeChunk(sessionId, streamRole, frame.seq, frame.timestamp_ms, bytes);
             await this.drainRealtimeQueue(sessionId, streamRole);
           })().catch((error) => {
-            console.error(`asr realtime enqueue failed session=${sessionId} stream=${streamRole}:`, error);
+            log("error", "asr realtime enqueue failed", { component: "asr", session_id: sessionId, stream_role: streamRole, error: getErrorMessage(error) });
           })
         );
       } else {
         this.ctx.waitUntil(
           this.maybeRunAsrWindows(sessionId, streamRole, false, 1).catch((error) => {
-            console.error(`asr window processing failed session=${sessionId} stream=${streamRole}:`, error);
+            log("error", "asr window processing failed", { component: "asr", session_id: sessionId, stream_role: streamRole, error: getErrorMessage(error) });
           })
         );
       }
@@ -7191,12 +5480,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private deriveMixedCaptureState(captureByStream: Record<StreamRole, CaptureState>): CaptureState["capture_state"] {
-    const teacher = captureByStream.teacher.capture_state;
-    const students = captureByStream.students.capture_state;
-    if (teacher === "recovering" || students === "recovering") return "recovering";
-    if (teacher === "running" || students === "running") return "running";
-    if (teacher === "failed" || students === "failed") return "failed";
-    return "idle";
+    return deriveMixedCaptureStateFn(captureByStream);
   }
 
   private async applyCaptureStatus(
@@ -7308,6 +5592,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
             // Record session start time on first hello for caption timestamp normalization
             if (this.sessionStartMs === 0) {
               this.sessionStartMs = Date.now();
+              // E6: Transition idle → recording on first hello
+              await this.setSessionPhase("recording");
             }
             await this.updateSessionConfigFromHello(message);
 
@@ -7481,8 +5767,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
       const qualityMetrics = this.buildQualityMetrics(metricsTranscript, normalizedState.capture_by_stream ?? defaultCaptureByStream());
       const speechBackendMode = this.speechBackendMode(normalizedState, dependencyHealth);
 
+      const sessionPhase = await this.loadSessionPhase();
+
       return jsonResponse({
         session_id: sessionId,
+        session_phase: sessionPhase,
         state: normalizedState,
         event_count: events.length,
         updated_at: updatedAt ?? null,
@@ -8206,9 +6495,14 @@ export class MeetingSessionDO extends DurableObject<Env> {
       if (jobId && jobId !== status.job_id) {
         return jsonResponse({ detail: "job_id not found", job_id: jobId }, 404);
       }
+      const stageCheckpoint = await this.loadFinalizeStageCheckpoint();
       return jsonResponse({
         session_id: sessionId,
-        ...status
+        ...status,
+        stage_checkpoint: stageCheckpoint ? {
+          completed_stage: stageCheckpoint.completed_stage,
+          saved_at: stageCheckpoint.saved_at
+        } : null
       });
     }
 
@@ -8665,6 +6959,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
           finished_at: null
         };
         await this.storeFinalizeV2Status(nextStatus);
+        // E6: Transition to finalizing phase
+        await this.setSessionPhase("finalizing");
         const mode = (payload as Record<string, unknown>).mode === 'report-only' ? 'report-only' : 'full';
         this.ctx.waitUntil(
           this.enqueueMutation(async () => {
@@ -8731,6 +7027,52 @@ export class MeetingSessionDO extends DurableObject<Env> {
         result_key: key,
         event_count: events.length,
         finalized_at: finalizedAt
+      });
+    }
+
+    // ── GDPR: Purge all session data ──────────────────────────────────
+    if (action === "purge-data" && request.method === "DELETE") {
+      const startMs = Date.now();
+      const summary: Record<string, number> = { do_keys: 0, r2_objects: 0, r2_history: 0 };
+
+      // 1. Delete all R2 objects under sessions/{sessionId}/
+      const safeId = safeObjectSegment(sessionId);
+      const r2Prefix = `sessions/${safeId}/`;
+      let cursor: string | undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({ prefix: r2Prefix, cursor, limit: R2_LIST_LIMIT });
+        if (listing.objects.length > 0) {
+          await Promise.all(listing.objects.map((obj) => this.env.RESULT_BUCKET.delete(obj.key)));
+          summary.r2_objects += listing.objects.length;
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      // 2. Delete history index entries matching this session
+      const historyPrefix = HISTORY_PREFIX;
+      const historySuffix = `_${safeId}.json`;
+      cursor = undefined;
+      do {
+        const listing = await this.env.RESULT_BUCKET.list({ prefix: historyPrefix, cursor, limit: R2_LIST_LIMIT });
+        const matching = listing.objects.filter((obj) => obj.key.endsWith(historySuffix));
+        if (matching.length > 0) {
+          await Promise.all(matching.map((obj) => this.env.RESULT_BUCKET.delete(obj.key)));
+          summary.r2_history += matching.length;
+        }
+        cursor = listing.truncated ? (listing.cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      // 3. Delete all Durable Object storage (atomic wipe)
+      await this.ctx.storage.deleteAll();
+      summary.do_keys = 1; // deleteAll() is atomic — count as single wipe operation
+
+      log("info", "gdpr-purge: completed", { component: "gdpr-purge", session_id: sessionId, r2_objects: summary.r2_objects, r2_history: summary.r2_history, elapsed_ms: Date.now() - startMs });
+
+      return jsonResponse({
+        session_id: sessionId,
+        purged: true,
+        summary,
+        elapsed_ms: Date.now() - startMs
       });
     }
 
