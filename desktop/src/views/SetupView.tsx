@@ -27,12 +27,11 @@ import { Button } from '../components/ui/Button';
 import { TextField } from '../components/ui/TextField';
 import { TextArea } from '../components/ui/TextArea';
 import { Chip } from '../components/ui/Chip';
-import { Modal } from '../components/ui/Modal';
 import { ShimmerButton } from '../components/magicui/shimmer-button';
 import { RubricTemplateModal, type CustomTemplate } from '../components/RubricTemplateModal';
 
-const RECORDING_CONSENT_KEY = 'ifb_recording_consent_accepted';
 import { DIMENSION_PRESETS, type DimensionPresetItem } from '../lib/dimensionPresets';
+import { ConsentDialog, hasValidConsent } from '../components/ConsentDialog';
 
 /* ─── Motion Variants ────────────────────────── */
 
@@ -811,7 +810,7 @@ export function SetupView() {
 
   // ── Recording consent (GDPR) ──
   const [showConsent, setShowConsent] = useState(false);
-  const hasConsented = useRef(localStorage.getItem(RECORDING_CONSENT_KEY) === 'true');
+  const hasConsented = useRef(hasValidConsent());
   const pendingStartRef = useRef(false);
 
   const handleStartInner = useCallback(async () => {
@@ -884,7 +883,6 @@ export function SetupView() {
   }, [handleStartInner]);
 
   const acceptConsent = useCallback(() => {
-    localStorage.setItem(RECORDING_CONSENT_KEY, 'true');
     hasConsented.current = true;
     setShowConsent(false);
     if (pendingStartRef.current) {
@@ -1282,32 +1280,15 @@ export function SetupView() {
         editTemplate={editingTemplate}
       />
 
-      {/* Recording Consent Modal (GDPR) */}
-      <Modal open={showConsent} onClose={() => setShowConsent(false)} title="Recording Consent" size="sm">
-        <div className="space-y-4">
-          <p className="text-sm text-ink-secondary leading-relaxed">
-            This session will record audio from your microphone and system audio
-            for real-time transcription and AI-powered feedback analysis.
-          </p>
-          <ul className="text-sm text-ink-secondary space-y-1 list-disc pl-4">
-            <li>Audio is processed in real-time and stored temporarily</li>
-            <li>Recordings are automatically deleted after 30 days</li>
-            <li>You can delete session data at any time from History</li>
-          </ul>
-          <p className="text-xs text-ink-tertiary">
-            By continuing, you confirm that all participants have been informed
-            and consent to being recorded.
-          </p>
-          <div className="flex gap-3 pt-2">
-            <Button variant="ghost" onClick={() => setShowConsent(false)} className="flex-1">
-              Cancel
-            </Button>
-            <Button variant="primary" onClick={acceptConsent} className="flex-1">
-              I Agree, Start Recording
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      {/* Recording Consent Dialog (GDPR/E1) */}
+      <ConsentDialog
+        open={showConsent}
+        onAccept={acceptConsent}
+        onCancel={() => {
+          setShowConsent(false);
+          pendingStartRef.current = false;
+        }}
+      />
     </div>
   );
 }

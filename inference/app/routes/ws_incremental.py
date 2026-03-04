@@ -52,7 +52,7 @@ def register_ws_routes(app: FastAPI, runtime) -> None:
             logger.error("WS error: %s", e, exc_info=True)
             try:
                 await ws.send_text(
-                    json.dumps(ErrorFrame(code="INTERNAL_ERROR", message=str(e)).to_dict())
+                    json.dumps(ErrorFrame(code="INTERNAL_ERROR", message="internal server error").to_dict())
                 )
             except Exception:
                 pass
@@ -85,8 +85,9 @@ async def _handle_increment(ws: WebSocket, runtime) -> None:
         start_data = json.loads(raw_start)
         start = validate_start_frame(start_data)
     except (json.JSONDecodeError, ValueError) as e:
+        logger.warning("Invalid start frame: %s", e)
         await ws.send_text(
-            json.dumps(ErrorFrame(code="INVALID_START_FRAME", message=str(e)).to_dict())
+            json.dumps(ErrorFrame(code="INVALID_START_FRAME", message="invalid start frame").to_dict())
         )
         return
 

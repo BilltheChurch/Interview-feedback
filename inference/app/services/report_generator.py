@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -24,6 +25,8 @@ from app.schemas import (
     TeamDynamics,
 )
 from app.services.backends.llm_dashscope import DashScopeLLMAdapter
+
+logger = logging.getLogger(__name__)
 
 DIMENSIONS: tuple[str, ...] = (
     "leadership",
@@ -655,7 +658,8 @@ class ReportGenerator:
             report_source = "llm_enhanced"
         except Exception as exc:
             report_source = "llm_failed"
-            report_error = self._normalize_text(str(exc))[:300]
+            logger.error("LLM report polish failed: %s", exc, exc_info=True)
+            report_error = "report generation failed"
             report_degraded = True
 
         claim_count = 0

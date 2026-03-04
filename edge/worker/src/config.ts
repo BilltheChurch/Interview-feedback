@@ -605,16 +605,18 @@ export function emptyFeedbackCache(sessionId: string, nowIso: string): FeedbackC
 }
 
 // ── Route regex patterns ────────────────────────────────────────────
+// Canonical prefix is /api/v1/; legacy /v1/ prefix is also accepted for
+// backward compatibility (optional /api segment).
 export const SESSION_ROUTE_REGEX =
-  /^\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|feedback-claim-evidence|export)$/;
-export const SESSION_ENROLL_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state|profiles)$/;
-export const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/finalize\/status$/;
-export const SESSION_TIER2_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/tier2-status$/;
-export const SESSION_INCREMENTAL_STATUS_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/incremental-status$/;
-export const SESSION_HISTORY_ROUTE_REGEX = /^\/v1\/sessions\/history$/;
-export const SESSION_PURGE_ROUTE_REGEX = /^\/v1\/sessions\/([^/]+)\/data$/;
-export const WS_INGEST_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)$/;
-export const WS_INGEST_ROLE_ROUTE_REGEX = /^\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
+  /^(?:\/api)?\/v1\/sessions\/([^/]+)\/(resolve|state|finalize|utterances|asr-run|asr-reset|config|events|cluster-map|unresolved-clusters|memos|speaker-logs|result|feedback-ready|feedback-open|feedback-regenerate-claim|feedback-claim-evidence|export)$/;
+export const SESSION_ENROLL_ROUTE_REGEX = /^(?:\/api)?\/v1\/sessions\/([^/]+)\/enrollment\/(start|stop|state|profiles)$/;
+export const SESSION_FINALIZE_STATUS_ROUTE_REGEX = /^(?:\/api)?\/v1\/sessions\/([^/]+)\/finalize\/status$/;
+export const SESSION_TIER2_STATUS_ROUTE_REGEX = /^(?:\/api)?\/v1\/sessions\/([^/]+)\/tier2-status$/;
+export const SESSION_INCREMENTAL_STATUS_ROUTE_REGEX = /^(?:\/api)?\/v1\/sessions\/([^/]+)\/incremental-status$/;
+export const SESSION_HISTORY_ROUTE_REGEX = /^(?:\/api)?\/v1\/sessions\/history$/;
+export const SESSION_PURGE_ROUTE_REGEX = /^(?:\/api)?\/v1\/sessions\/([^/]+)\/data$/;
+export const WS_INGEST_ROUTE_REGEX = /^(?:\/api)?\/v1\/audio\/ws\/([^/]+)$/;
+export const WS_INGEST_ROLE_ROUTE_REGEX = /^(?:\/api)?\/v1\/audio\/ws\/([^/]+)\/([^/]+)$/;
 
 // ── Storage key constants ───────────────────────────────────────────
 export const STORAGE_KEY_STATE = "state";

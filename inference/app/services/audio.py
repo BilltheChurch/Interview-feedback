@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import subprocess
 from dataclasses import dataclass
 
@@ -8,6 +9,8 @@ import numpy as np
 
 from app.exceptions import AudioDecodeError, PayloadTooLargeError, ValidationError
 from app.schemas import AudioPayload
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -93,7 +96,8 @@ def normalize_audio_payload(
 
     if process.returncode != 0:
         stderr = process.stderr.decode("utf-8", errors="ignore")
-        raise AudioDecodeError(f"ffmpeg decode failed: {stderr.strip()}")
+        logger.error("ffmpeg decode failed (rc=%d): %s", process.returncode, stderr.strip())
+        raise AudioDecodeError("audio processing failed")
 
     pcm = process.stdout
     if len(pcm) < 2:

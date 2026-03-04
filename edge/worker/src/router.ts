@@ -231,7 +231,8 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
   }
 
   // ── D1: list sessions with pagination + filtering ──
-  if (path === "/v1/sessions" && request.method === "GET") {
+  // Canonical: /api/v1/sessions; legacy: /v1/sessions (both accepted)
+  if ((path === "/api/v1/sessions" || path === "/v1/sessions") && request.method === "GET") {
     if (!env.DB) {
       return jsonResponse({ detail: "D1 not configured" }, 501);
     }
@@ -253,7 +254,8 @@ export async function handleWorkerFetch(request: Request, env: Env): Promise<Res
   }
 
   // ── D1: get dimension scores for a session ──
-  const scoresMatch = path.match(/^\/v1\/sessions\/([^/]+)\/scores$/);
+  // Canonical: /api/v1/sessions/:id/scores; legacy: /v1/sessions/:id/scores (both accepted)
+  const scoresMatch = path.match(/^(?:\/api)?\/v1\/sessions\/([^/]+)\/scores$/);
   if (scoresMatch && request.method === "GET") {
     if (!env.DB) {
       return jsonResponse({ detail: "D1 not configured" }, 501);

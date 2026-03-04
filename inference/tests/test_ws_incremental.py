@@ -114,7 +114,7 @@ def test_ws_rejects_bad_version(app):
         ws.send_text(json.dumps({"v": 99, "type": "start", "session_id": "s"}))
         result = json.loads(ws.receive_text())
         assert result["type"] == "error"
-        assert "version" in result["message"].lower()
+        assert result["message"] == "invalid start frame"
 
 
 def test_ws_rejects_duplicate_increment(app, mock_runtime):

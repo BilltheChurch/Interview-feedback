@@ -62,7 +62,7 @@ def test_ffmpeg_nonzero_exit_raises_audio_decode_error() -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=["ffmpeg"], returncode=1, stdout=b"", stderr=b"invalid data"
         )
-        with pytest.raises(AudioDecodeError, match="ffmpeg decode failed"):
+        with pytest.raises(AudioDecodeError, match="audio processing failed"):
             normalize_audio_payload(
                 payload,
                 target_sample_rate=16000,
