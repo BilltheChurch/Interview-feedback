@@ -91,6 +91,56 @@ import { buildFinalizePayloadV1 } from "./incremental_v1";
 import type { R2AudioRefV1, RecomputeSegment } from "./incremental_v1";
 import { persistSessionToD1 } from "./d1-helpers";
 
+import {
+  loadIngestByStream as loadIngestByStreamFn,
+  storeIngestByStream as storeIngestByStreamFn,
+  loadAsrByStream as loadAsrByStreamFn,
+  storeAsrByStream as storeAsrByStreamFn,
+  loadUtterancesRawByStream as loadUtterancesRawByStreamFn,
+  storeUtterancesRawByStream as storeUtterancesRawByStreamFn,
+  loadUtterancesMergedByStream as loadUtterancesMergedByStreamFn,
+  storeUtterancesMergedByStream as storeUtterancesMergedByStreamFn,
+  loadSpeakerEvents as loadSpeakerEventsFn,
+  storeSpeakerEvents as storeSpeakerEventsFn,
+  appendSpeakerEvent as appendSpeakerEventFn,
+  storeDependencyHealth as storeDependencyHealthFn,
+  loadDependencyHealth as loadDependencyHealthFn,
+  loadAsrCursorByStream as loadAsrCursorByStreamFn,
+  patchAsrCursor as patchAsrCursorFn,
+  loadMemos as loadMemosFn,
+  storeMemos as storeMemosFn,
+  loadSpeakerLogs as loadSpeakerLogsFn,
+  storeSpeakerLogs as storeSpeakerLogsFn,
+  loadFeedbackCache as loadFeedbackCacheFn,
+  storeFeedbackCache as storeFeedbackCacheFn,
+  loadFinalizeV2Status as loadFinalizeV2StatusFn,
+  storeFinalizeV2Status as storeFinalizeV2StatusFn,
+  setFinalizeLock as setFinalizeLockFn,
+  isFinalizeLocked as isFinalizeLockedFn,
+  loadSessionPhase as loadSessionPhaseFn,
+  setSessionPhase as setSessionPhaseFn,
+  resetSessionPhase as resetSessionPhaseFn,
+  loadFinalizeStageCheckpoint as loadFinalizeStageCheckpointFn,
+  saveFinalizeStageCheckpoint as saveFinalizeStageCheckpointFn,
+  clearFinalizeStageCheckpoint as clearFinalizeStageCheckpointFn,
+  defaultTier2Status as defaultTier2StatusFn,
+  loadTier2Status as loadTier2StatusFn,
+  storeTier2Status as storeTier2StatusFn,
+  updateTier2Status as updateTier2StatusFn,
+  loadIncrementalStatus as loadIncrementalStatusFn,
+  storeIncrementalStatus as storeIncrementalStatusFn,
+  updateIncrementalStatus as updateIncrementalStatusFn,
+  scheduleIncrementalAlarm as scheduleIncrementalAlarmFn,
+  loadCheckpoints as loadCheckpointsFn,
+  storeCheckpoints as storeCheckpointsFn,
+  loadLastCheckpointAt as loadLastCheckpointAtFn,
+  storeLastCheckpointAt as storeLastCheckpointAtFn
+} from "./session-manager";
+import {
+  type WsHandlerContext,
+  handleWebSocketUpgrade
+} from "./websocket-handler";
+
 import { handleWorkerFetch } from "./router";
 import {
   buildEvidenceIndex as buildEvidenceIndexFn,
@@ -314,18 +364,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
   private localWhisperProvider: LocalWhisperASRProvider | null = null;
   /** Embedding cache for global speaker clustering at finalization. */
   readonly embeddingCache: EmbeddingCache = new EmbeddingCache();
-  /** Buffer for ACS Teams caption events. */
-  private captionBuffer: CaptionEvent[] = [];
+  /** Buffer for ACS Teams caption events. Public to satisfy WsHandlerContext. */
+  captionBuffer: CaptionEvent[] = [];
   private captionFlushPending = 0;        // count of un-flushed captions
   private captionFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly CAPTION_FLUSH_BATCH = 10;
   private readonly CAPTION_FLUSH_INTERVAL_MS = 5_000;
   private readonly CAPTION_BUFFER_MAX = 2000;
-  /** Caption data source for this session. */
-  private captionSource: CaptionSource = 'none';
+  /** Caption data source for this session. Public to satisfy WsHandlerContext. */
+  captionSource: CaptionSource = 'none';
   /** Session start time in epoch ms, set on first "hello". 0 = not yet initialized.
-   *  NOTE: In-memory only — does not survive DO eviction. Acceptable for active sessions. */
-  private sessionStartMs: number = 0;
+   *  NOTE: In-memory only — does not survive DO eviction. Acceptable for active sessions.
+   *  Public to satisfy WsHandlerContext. */
+  sessionStartMs: number = 0;
 
   /** Get the caption buffer for finalization. */
   getCaptionBuffer(): CaptionEvent[] {
@@ -348,7 +399,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   /** Schedule a batched flush: immediately if batch size reached, else after interval. */
-  private scheduleCaptionFlush(): void {
+  scheduleCaptionFlush(): void {
     this.captionFlushPending++;
     if (this.captionFlushPending >= this.CAPTION_FLUSH_BATCH) {
       this.flushCaptionBuffer();
@@ -514,11 +565,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
-  private asrRealtimeEnabled(): boolean {
+  asrRealtimeEnabled(): boolean {
     return asrRealtimeEnabledFn(this.env);
   }
 
-  private async enqueueMutation<T>(fn: () => Promise<T>): Promise<T> {
+  async enqueueMutation<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.mutationQueue.then(fn);
     this.mutationQueue = run.then(
       () => undefined,
@@ -738,11 +789,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return buildRealtimeRuntimeFn(streamRole);
   }
 
-  private sendWsJson(socket: WebSocket, payload: unknown): void {
+  sendWsJson(socket: WebSocket, payload: unknown): void {
     sendWsJsonFn(socket, payload);
   }
 
-  private sendWsError(socket: WebSocket, detail: string): void {
+  sendWsError(socket: WebSocket, detail: string): void {
     sendWsErrorFn(socket, detail);
   }
 
@@ -762,112 +813,48 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return defaultAsrByStreamFn(this.env);
   }
 
-  private async loadIngestByStream(sessionId: string): Promise<Record<StreamRole, IngestState>> {
-    const current = await this.ctx.storage.get<Record<StreamRole, IngestState>>(STORAGE_KEY_INGEST_BY_STREAM);
-    if (current?.mixed && current?.teacher && current?.students) {
-      return current;
-    }
-
-    const migrated = emptyIngestByStream(sessionId);
-    const legacy = await this.ctx.storage.get<IngestState>(STORAGE_KEY_INGEST_STATE);
-    if (legacy) {
-      migrated.mixed = legacy;
-    }
-
-    await this.storeIngestByStream(migrated);
-    return migrated;
+  async loadIngestByStream(sessionId: string): Promise<Record<StreamRole, IngestState>> {
+    return loadIngestByStreamFn(this.ctx.storage, sessionId);
   }
 
   private async storeIngestByStream(state: Record<StreamRole, IngestState>): Promise<void> {
-    for (const role of STREAM_ROLES) {
-      state[role].updated_at = new Date().toISOString();
-    }
-    await this.ctx.storage.put(STORAGE_KEY_INGEST_BY_STREAM, state);
-    await this.ctx.storage.put(STORAGE_KEY_INGEST_STATE, state.mixed);
+    return storeIngestByStreamFn(this.ctx.storage, state);
   }
 
   private async loadAsrByStream(): Promise<Record<StreamRole, AsrState>> {
-    const current = await this.ctx.storage.get<Record<StreamRole, AsrState>>(STORAGE_KEY_ASR_BY_STREAM);
-    if (current?.mixed && current?.teacher && current?.students) {
-      current.mixed = this.sanitizeAsrState(current.mixed);
-      current.teacher = this.sanitizeAsrState(current.teacher);
-      current.students = this.sanitizeAsrState(current.students);
-      return current;
-    }
-
-    const migrated = this.defaultAsrByStream();
-    const legacy = await this.ctx.storage.get<AsrState>(STORAGE_KEY_ASR_STATE);
-    if (legacy) {
-      migrated.mixed = this.sanitizeAsrState(legacy);
-    }
-
-    await this.storeAsrByStream(migrated);
-    return migrated;
+    return loadAsrByStreamFn(this.ctx.storage, this.env);
   }
 
   private async storeAsrByStream(state: Record<StreamRole, AsrState>): Promise<void> {
-    for (const role of STREAM_ROLES) {
-      state[role].updated_at = new Date().toISOString();
-    }
-    await this.ctx.storage.put(STORAGE_KEY_ASR_BY_STREAM, state);
-    await this.ctx.storage.put(STORAGE_KEY_ASR_STATE, state.mixed);
+    return storeAsrByStreamFn(this.ctx.storage, state);
   }
 
   private async loadUtterancesRawByStream(): Promise<Record<StreamRole, UtteranceRaw[]>> {
-    const current = await this.ctx.storage.get<Record<StreamRole, UtteranceRaw[]>>(STORAGE_KEY_UTTERANCES_RAW_BY_STREAM);
-    if (current?.mixed && current?.teacher && current?.students) {
-      return current;
-    }
-
-    const migrated = emptyUtterancesRawByStream();
-    const legacy = await this.ctx.storage.get<UtteranceRaw[]>(STORAGE_KEY_UTTERANCES_RAW);
-    if (legacy && Array.isArray(legacy)) {
-      migrated.mixed = legacy.map((item) => ({ ...item, stream_role: item.stream_role ?? "mixed" }));
-    }
-
-    await this.storeUtterancesRawByStream(migrated);
-    return migrated;
+    return loadUtterancesRawByStreamFn(this.ctx.storage);
   }
 
   private async storeUtterancesRawByStream(state: Record<StreamRole, UtteranceRaw[]>): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_UTTERANCES_RAW_BY_STREAM, state);
-    await this.ctx.storage.put(STORAGE_KEY_UTTERANCES_RAW, state.mixed);
+    return storeUtterancesRawByStreamFn(this.ctx.storage, state);
   }
 
   private async loadUtterancesMergedByStream(): Promise<Record<StreamRole, UtteranceMerged[]>> {
-    const current = await this.ctx.storage.get<Record<StreamRole, UtteranceMerged[]>>(STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM);
-    if (current?.mixed && current?.teacher && current?.students) {
-      return current;
-    }
-
-    const raw = await this.loadUtterancesRawByStream();
-    const rebuilt: Record<StreamRole, UtteranceMerged[]> = {
-      mixed: mergeUtterances(raw.mixed),
-      teacher: mergeUtterances(raw.teacher),
-      students: mergeUtterances(raw.students)
-    };
-    await this.ctx.storage.put(STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM, rebuilt);
-    return rebuilt;
+    return loadUtterancesMergedByStreamFn(this.ctx.storage);
   }
 
   private async storeUtterancesMergedByStream(state: Record<StreamRole, UtteranceMerged[]>): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_UTTERANCES_MERGED_BY_STREAM, state);
+    return storeUtterancesMergedByStreamFn(this.ctx.storage, state);
   }
 
   private async loadSpeakerEvents(): Promise<SpeakerEvent[]> {
-    return (await this.ctx.storage.get<SpeakerEvent[]>(STORAGE_KEY_EVENTS)) ?? [];
+    return loadSpeakerEventsFn(this.ctx.storage);
   }
 
   private async storeDependencyHealth(health: DependencyHealthSnapshot): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_DEPENDENCY_HEALTH, health);
+    return storeDependencyHealthFn(this.ctx.storage, health);
   }
 
   private async loadDependencyHealth(): Promise<DependencyHealthSnapshot> {
-    const stored = await this.ctx.storage.get<DependencyHealthSnapshot>(STORAGE_KEY_DEPENDENCY_HEALTH);
-    if (stored) return stored;
-    const snapshot = this.inferenceClient.snapshot();
-    await this.storeDependencyHealth(snapshot);
-    return snapshot;
+    return loadDependencyHealthFn(this.ctx.storage, this.inferenceClient.snapshot());
   }
 
   private confidenceBucketFromEvidence(evidence: ResolveEvidence | null | undefined): "high" | "medium" | "low" | "unknown" {
@@ -900,13 +887,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async appendSpeakerEvent(event: SpeakerEvent): Promise<void> {
-    const events = await this.loadSpeakerEvents();
-    events.push(event);
-    await this.ctx.storage.put(STORAGE_KEY_EVENTS, events);
+    return appendSpeakerEventFn(this.ctx.storage, event);
   }
 
   private async storeSpeakerEvents(events: SpeakerEvent[]): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_EVENTS, events);
+    return storeSpeakerEventsFn(this.ctx.storage, events);
   }
 
   private emptyAsrCursorByStream(): Record<StreamRole, AsrReplayCursor> {
@@ -914,76 +899,35 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async loadAsrCursorByStream(): Promise<Record<StreamRole, AsrReplayCursor>> {
-    const current = await this.ctx.storage.get<Record<StreamRole, AsrReplayCursor>>(STORAGE_KEY_ASR_CURSOR_BY_STREAM);
-    if (current?.mixed && current?.teacher && current?.students) {
-      return current;
-    }
-    const created = this.emptyAsrCursorByStream();
-    await this.ctx.storage.put(STORAGE_KEY_ASR_CURSOR_BY_STREAM, created);
-    return created;
+    return loadAsrCursorByStreamFn(this.ctx.storage, this.currentIsoTs());
   }
 
   private async patchAsrCursor(streamRole: StreamRole, patch: Partial<AsrReplayCursor>): Promise<void> {
-    const current = await this.loadAsrCursorByStream();
-    const next = {
-      ...current[streamRole],
-      ...patch,
-      updated_at: this.currentIsoTs()
-    };
-    current[streamRole] = next;
-    await this.ctx.storage.put(STORAGE_KEY_ASR_CURSOR_BY_STREAM, current);
+    return patchAsrCursorFn(this.ctx.storage, streamRole, patch, this.currentIsoTs());
   }
 
   private async loadMemos(): Promise<MemoItem[]> {
-    return (await this.ctx.storage.get<MemoItem[]>(STORAGE_KEY_MEMOS)) ?? [];
+    return loadMemosFn(this.ctx.storage);
   }
 
   private async storeMemos(memos: MemoItem[]): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_MEMOS, memos);
+    return storeMemosFn(this.ctx.storage, memos);
   }
 
   private async loadSpeakerLogs(): Promise<SpeakerLogs> {
-    const stored = await this.ctx.storage.get<SpeakerLogs>(STORAGE_KEY_SPEAKER_LOGS);
-    if (stored) return stored;
-    const created = emptySpeakerLogs(this.currentIsoTs());
-    await this.ctx.storage.put(STORAGE_KEY_SPEAKER_LOGS, created);
-    return created;
+    return loadSpeakerLogsFn(this.ctx.storage, this.currentIsoTs());
   }
 
   private async storeSpeakerLogs(logs: SpeakerLogs): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_SPEAKER_LOGS, logs);
+    return storeSpeakerLogsFn(this.ctx.storage, logs);
   }
 
   private async loadFeedbackCache(sessionId: string): Promise<FeedbackCache> {
-    const existing = await this.ctx.storage.get<FeedbackCache>(STORAGE_KEY_FEEDBACK_CACHE);
-    if (existing && existing.session_id === sessionId) {
-      const normalized: FeedbackCache = {
-        ...existing,
-        timings: {
-          assemble_ms: Number(existing.timings?.assemble_ms ?? 0),
-          events_ms: Number(existing.timings?.events_ms ?? 0),
-          report_ms: Number(existing.timings?.report_ms ?? 0),
-          validation_ms: Number(existing.timings?.validation_ms ?? 0),
-          persist_ms: Number(existing.timings?.persist_ms ?? 0),
-          total_ms: Number(existing.timings?.total_ms ?? 0)
-        },
-        report_source: (existing.report_source ?? existing.quality?.report_source ?? "memo_first") as
-          | "memo_first"
-          | "llm_enhanced"
-          | "llm_failed",
-        blocking_reason: existing.blocking_reason ?? null,
-        quality_gate_passed: Boolean(existing.quality_gate_passed ?? false)
-      };
-      return normalized;
-    }
-    const created = emptyFeedbackCache(sessionId, this.currentIsoTs());
-    await this.ctx.storage.put(STORAGE_KEY_FEEDBACK_CACHE, created);
-    return created;
+    return loadFeedbackCacheFn(this.ctx.storage, sessionId, this.currentIsoTs());
   }
 
   private async storeFeedbackCache(cache: FeedbackCache): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_FEEDBACK_CACHE, cache);
-    await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, cache.updated_at);
+    return storeFeedbackCacheFn(this.ctx.storage, cache);
   }
 
   private resolveStudentBindingForFeedback(
@@ -1363,46 +1307,20 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async loadFinalizeV2Status(): Promise<FinalizeV2Status | null> {
-    const stored = (await this.ctx.storage.get<FinalizeV2Status>(STORAGE_KEY_FINALIZE_V2_STATUS)) ?? null;
-    if (!stored) return null;
-    const heartbeat = typeof stored.heartbeat_at === "string" ? stored.heartbeat_at : stored.started_at;
-    const normalized: FinalizeV2Status = {
-      ...stored,
-      heartbeat_at: heartbeat ?? this.currentIsoTs(),
-      warnings: Array.isArray(stored.warnings) ? stored.warnings : [],
-      degraded: Boolean(stored.degraded),
-      backend_used: stored.backend_used ?? "primary"
-    };
-    if (
-      stored.heartbeat_at === normalized.heartbeat_at &&
-      Array.isArray(stored.warnings) &&
-      stored.degraded === normalized.degraded &&
-      stored.backend_used === normalized.backend_used
-    ) {
-      return normalized;
-    }
-    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_V2_STATUS, normalized);
-    return normalized;
+    return loadFinalizeV2StatusFn(this.ctx.storage, this.currentIsoTs());
   }
 
   private async storeFinalizeV2Status(status: FinalizeV2Status): Promise<void> {
-    const normalized: FinalizeV2Status = {
-      ...status,
-      heartbeat_at: status.heartbeat_at ?? status.started_at ?? this.currentIsoTs(),
-      warnings: Array.isArray(status.warnings) ? status.warnings : [],
-      degraded: Boolean(status.degraded),
-      backend_used: status.backend_used ?? "primary"
-    };
-    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_V2_STATUS, normalized);
+    const normalized = await storeFinalizeV2StatusFn(this.ctx.storage, status, this.currentIsoTs());
     await this.scheduleFinalizeWatchdog(normalized);
   }
 
   private async setFinalizeLock(locked: boolean): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_LOCK, locked);
+    return setFinalizeLockFn(this.ctx.storage, locked);
   }
 
   private async isFinalizeLocked(): Promise<boolean> {
-    return Boolean(await this.ctx.storage.get<boolean>(STORAGE_KEY_FINALIZE_LOCK));
+    return isFinalizeLockedFn(this.ctx.storage);
   }
 
   private isFinalizeTerminal(status: FinalizeV2Status["status"]): boolean {
@@ -1479,33 +1397,21 @@ export class MeetingSessionDO extends DurableObject<Env> {
 
   // ── Session Phase State Machine (E6) ────────────────────────────────
   private async loadSessionPhase(): Promise<SessionPhase> {
-    const stored = await this.ctx.storage.get<SessionPhase>(STORAGE_KEY_SESSION_PHASE);
-    if (stored && ["idle", "recording", "finalizing", "finalized", "archived"].includes(stored)) {
-      return stored;
-    }
-    return "idle";
+    return loadSessionPhaseFn(this.ctx.storage);
   }
 
-  private async setSessionPhase(target: SessionPhase): Promise<SessionPhase> {
-    const current = await this.loadSessionPhase();
-    const result = transitionSessionPhase(current, target);
-    if (result.valid) {
-      await this.ctx.storage.put(STORAGE_KEY_SESSION_PHASE, result.phase);
-      log("info", `session-phase: ${current} → ${result.phase}`, { component: "session-phase" });
-    } else {
-      log("warn", `session-phase: invalid transition ${current} → ${target}, staying at ${current}`, { component: "session-phase" });
-    }
-    return result.phase;
+  async setSessionPhase(target: SessionPhase): Promise<SessionPhase> {
+    return setSessionPhaseFn(this.ctx.storage, target);
   }
 
   /** Force-set session phase (bypass validation, used for GDPR purge reset). */
   private async resetSessionPhase(phase: SessionPhase): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_SESSION_PHASE, phase);
+    return resetSessionPhaseFn(this.ctx.storage, phase);
   }
 
   // ── Finalize Stage Checkpoint (E5) ──────────────────────────────────
   private async loadFinalizeStageCheckpoint(): Promise<FinalizeStageCheckpoint | null> {
-    return (await this.ctx.storage.get<FinalizeStageCheckpoint>(STORAGE_KEY_FINALIZE_STAGE_DATA)) ?? null;
+    return loadFinalizeStageCheckpointFn(this.ctx.storage);
   }
 
   private async saveFinalizeStageCheckpoint(
@@ -1513,17 +1419,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
     completedStage: FinalizeV2Status["stage"],
     stageData: Record<string, unknown>
   ): Promise<void> {
-    const checkpoint: FinalizeStageCheckpoint = {
-      job_id: jobId,
-      completed_stage: completedStage,
-      saved_at: Date.now(),
-      stage_data: stageData
-    };
-    await this.ctx.storage.put(STORAGE_KEY_FINALIZE_STAGE_DATA, checkpoint);
+    return saveFinalizeStageCheckpointFn(this.ctx.storage, jobId, completedStage, stageData);
   }
 
   private async clearFinalizeStageCheckpoint(): Promise<void> {
-    await this.ctx.storage.delete(STORAGE_KEY_FINALIZE_STAGE_DATA);
+    return clearFinalizeStageCheckpointFn(this.ctx.storage);
   }
 
   private currentRealtimeWsState(runtime: AsrRealtimeRuntime): "disconnected" | "connecting" | "running" | "error" {
@@ -1533,7 +1433,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return "disconnected";
   }
 
-  private async refreshAsrStreamMetrics(
+  async refreshAsrStreamMetrics(
     sessionId: string,
     streamRole: StreamRole,
     patch: Partial<AsrState> = {}
@@ -1553,7 +1453,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     await this.storeAsrByStream(asrByStream);
   }
 
-  private async closeRealtimeAsrSession(
+  async closeRealtimeAsrSession(
     streamRole: StreamRole,
     reason: string,
     clearQueue = false,
@@ -2925,19 +2825,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async loadCheckpoints(): Promise<CheckpointResult[]> {
-    return (await this.ctx.storage.get<CheckpointResult[]>(STORAGE_KEY_CHECKPOINTS)) ?? [];
+    return loadCheckpointsFn(this.ctx.storage);
   }
 
   private async storeCheckpoints(checkpoints: CheckpointResult[]): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_CHECKPOINTS, checkpoints);
+    return storeCheckpointsFn(this.ctx.storage, checkpoints);
   }
 
   private async loadLastCheckpointAt(): Promise<number> {
-    return (await this.ctx.storage.get<number>(STORAGE_KEY_LAST_CHECKPOINT_AT)) ?? 0;
+    return loadLastCheckpointAtFn(this.ctx.storage);
   }
 
   private async storeLastCheckpointAt(ms: number): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_LAST_CHECKPOINT_AT, ms);
+    return storeLastCheckpointAtFn(this.ctx.storage, ms);
   }
 
   private checkpointIntervalMs(): number {
@@ -4553,37 +4453,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private defaultTier2Status(): Tier2Status {
-    return {
-      enabled: this.tier2Enabled(),
-      status: "idle",
-      started_at: null,
-      completed_at: null,
-      error: null,
-      report_version: "tier1_instant",
-      progress: 0,
-      warnings: []
-    };
+    return defaultTier2StatusFn(this.tier2Enabled());
   }
 
   private async loadTier2Status(): Promise<Tier2Status> {
-    const stored = await this.ctx.storage.get<Tier2Status>(STORAGE_KEY_TIER2_STATUS);
-    if (!stored) return this.defaultTier2Status();
-    return {
-      ...stored,
-      enabled: stored.enabled ?? this.tier2Enabled(),
-      warnings: Array.isArray(stored.warnings) ? stored.warnings : []
-    };
+    return loadTier2StatusFn(this.ctx.storage, this.tier2Enabled());
   }
 
   private async storeTier2Status(status: Tier2Status): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_TIER2_STATUS, status);
+    return storeTier2StatusFn(this.ctx.storage, status);
   }
 
   private async updateTier2Status(patch: Partial<Tier2Status>): Promise<Tier2Status> {
-    const current = await this.loadTier2Status();
-    const next: Tier2Status = { ...current, ...patch };
-    await this.storeTier2Status(next);
-    return next;
+    return updateTier2StatusFn(this.ctx.storage, patch, this.tier2Enabled());
   }
 
   private isTier2Terminal(status: Tier2Status["status"]): boolean {
@@ -4930,24 +4812,15 @@ export class MeetingSessionDO extends DurableObject<Env> {
   // ── Incremental Processing ─────────────────────────────────────────────
 
   private async loadIncrementalStatus(): Promise<IncrementalStatus> {
-    const stored = await this.ctx.storage.get<IncrementalStatus>(STORAGE_KEY_INCREMENTAL_STATUS);
-    if (!stored) return createDefaultIncrementalStatus();
-    return {
-      ...createDefaultIncrementalStatus(),
-      ...stored,
-      enabled: incrementalV1Enabled(this.env)
-    };
+    return loadIncrementalStatusFn(this.ctx.storage, incrementalV1Enabled(this.env));
   }
 
   private async storeIncrementalStatus(status: IncrementalStatus): Promise<void> {
-    await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_STATUS, status);
+    return storeIncrementalStatusFn(this.ctx.storage, status);
   }
 
   private async updateIncrementalStatus(patch: Partial<IncrementalStatus>): Promise<IncrementalStatus> {
-    const current = await this.loadIncrementalStatus();
-    const next: IncrementalStatus = { ...current, ...patch };
-    await this.storeIncrementalStatus(next);
-    return next;
+    return updateIncrementalStatusFn(this.ctx.storage, patch, incrementalV1Enabled(this.env));
   }
 
   /**
@@ -4956,15 +4829,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
    * No-op if incremental is disabled or alarm already pending.
    */
   private async scheduleIncrementalAlarm(sessionId: string): Promise<void> {
-    const existing = await this.ctx.storage.get<string>(STORAGE_KEY_INCREMENTAL_ALARM_TAG);
-    if (existing) return; // alarm already queued
-
-    const tag = `incremental_${sessionId}_${Date.now()}`;
-    await this.ctx.storage.put(STORAGE_KEY_INCREMENTAL_ALARM_TAG, tag);
-    // Store session ID so resolveSessionIdForIncremental can find it before finalization
-    await this.ctx.storage.put("incremental_session_id", sessionId);
-    await this.ctx.storage.setAlarm(Date.now() + 500);
-    log("info", "incremental: alarm scheduled", { component: "incremental", session_id: sessionId, tag });
+    return scheduleIncrementalAlarmFn(this.ctx.storage, sessionId);
   }
 
   /**
@@ -5341,7 +5206,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     }
   }
 
-  private async handleChunkFrame(
+  async handleChunkFrame(
     sessionId: string,
     streamRole: StreamRole,
     socket: WebSocket,
@@ -5476,7 +5341,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return deriveMixedCaptureStateFn(captureByStream);
   }
 
-  private async applyCaptureStatus(
+  async applyCaptureStatus(
     sessionId: string,
     streamRole: StreamRole,
     patch: Partial<CaptureState>
@@ -5503,7 +5368,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return next;
   }
 
-  private async updateSessionConfigFromHello(message: Record<string, unknown>): Promise<void> {
+  async updateSessionConfigFromHello(message: Record<string, unknown>): Promise<void> {
     const currentState = normalizeSessionState(await this.ctx.storage.get<SessionState>(STORAGE_KEY_STATE));
     const config = { ...(currentState.config ?? {}) };
 
@@ -5532,7 +5397,7 @@ export class MeetingSessionDO extends DurableObject<Env> {
     await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, new Date().toISOString());
   }
 
-  private ingestByStreamPayload(sessionId: string, ingestByStream: Record<StreamRole, IngestState>) {
+  ingestByStreamPayload(sessionId: string, ingestByStream: Record<StreamRole, IngestState>) {
     return {
       mixed: ingestStatusPayload(sessionId, "mixed", ingestByStream.mixed),
       teacher: ingestStatusPayload(sessionId, "teacher", ingestByStream.teacher),
@@ -5540,171 +5405,19 @@ export class MeetingSessionDO extends DurableObject<Env> {
     };
   }
 
-  private async handleWebSocketRequest(
+  /** Satisfy WsHandlerContext: persist captionSource to storage (fire-and-forget). */
+  persistCaptionSource(sessionId: string, src: CaptionSource): void {
+    this.ctx.storage.put(STORAGE_KEY_CAPTION_SOURCE, src).catch((err) => {
+      log("warn", "caption-persist: captionSource flush failed", { sessionId, action: "caption_persist", error: getErrorMessage(err) });
+    });
+  }
+
+  private handleWebSocketRequest(
     request: Request,
     sessionId: string,
     connectionRole: StreamRole
-  ): Promise<Response> {
-    if (!isWebSocketRequest(request)) {
-      return jsonResponse({ detail: "websocket upgrade required" }, 426);
-    }
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    server.accept();
-
-    let messageQueue: Promise<void> = Promise.resolve();
-
-    server.addEventListener("message", (event) => {
-      messageQueue = messageQueue
-        .then(() => this.enqueueMutation(async () => {
-          if (typeof event.data !== "string") {
-            throw new Error("websocket frame must be text JSON");
-          }
-
-          let payload: unknown;
-          try {
-            payload = JSON.parse(event.data);
-          } catch {
-            throw new Error("websocket frame is not valid JSON");
-          }
-
-          if (!payload || typeof payload !== "object") {
-            throw new Error("websocket frame must be an object");
-          }
-
-          const message = payload as Record<string, unknown>;
-          const type = String(message.type ?? "");
-
-          if (type === "hello") {
-            const helloRole = message.stream_role ? parseStreamRole(String(message.stream_role), connectionRole) : connectionRole;
-            if (helloRole !== connectionRole) {
-              throw new Error(`hello.stream_role mismatch: expected ${connectionRole}, got ${helloRole}`);
-            }
-            // Record session start time on first hello for caption timestamp normalization
-            if (this.sessionStartMs === 0) {
-              this.sessionStartMs = Date.now();
-              // E6: Transition idle → recording on first hello
-              await this.setSessionPhase("recording");
-            }
-            await this.updateSessionConfigFromHello(message);
-
-            const ingestByStream = await this.loadIngestByStream(sessionId);
-            this.sendWsJson(server, {
-              type: "ready",
-              session_id: sessionId,
-              stream_role: connectionRole,
-              target_sample_rate: TARGET_SAMPLE_RATE,
-              target_channels: TARGET_CHANNELS,
-              target_format: TARGET_FORMAT,
-              ingest: ingestStatusPayload(sessionId, connectionRole, ingestByStream[connectionRole]),
-              ingest_by_stream: this.ingestByStreamPayload(sessionId, ingestByStream)
-            });
-            return;
-          }
-
-          if (type === "status") {
-            const ingestByStream = await this.loadIngestByStream(sessionId);
-            this.sendWsJson(server, {
-              ...ingestStatusPayload(sessionId, connectionRole, ingestByStream[connectionRole]),
-              ingest_by_stream: this.ingestByStreamPayload(sessionId, ingestByStream)
-            });
-            return;
-          }
-
-          if (type === "ping") {
-            this.sendWsJson(server, { type: "pong", ts: Date.now(), stream_role: connectionRole });
-            return;
-          }
-
-          if (type === "capture_status") {
-            const parsed = parseCaptureStatusPayload(message);
-            const frameRole = parsed.stream_role ?? connectionRole;
-            if (frameRole !== connectionRole) {
-              throw new Error(`capture_status.stream_role mismatch: expected ${connectionRole}, got ${frameRole}`);
-            }
-            const stored = await this.applyCaptureStatus(sessionId, frameRole, parsed.payload);
-            this.sendWsJson(server, {
-              type: "capture_status_ack",
-              stream_role: frameRole,
-              payload: stored
-            });
-            return;
-          }
-
-          if (type === "caption") {
-            const resultType = String(message.resultType ?? "");
-            if (resultType === "Final") {
-              const rawTs = Number(message.timestamp ?? 0);
-              const timestampMs = Number.isFinite(rawTs) ? rawTs - this.sessionStartMs : 0;
-              this.captionBuffer.push({
-                speaker: String(message.speaker ?? ""),
-                text: String(message.text ?? ""),
-                language: String(message.language ?? ""),
-                timestamp_ms: timestampMs,
-                teamsUserId: message.teamsUserId ? String(message.teamsUserId) : undefined,
-              });
-              this.scheduleCaptionFlush();
-            }
-            return;
-          }
-
-          if (type === "session_config") {
-            const src = String(message.captionSource ?? "");
-            if (src === "acs-teams" || src === "none") {
-              this.captionSource = src;
-              this.ctx.storage.put(STORAGE_KEY_CAPTION_SOURCE, src).catch((err) => {
-                log("warn", "caption-persist: captionSource flush failed", { sessionId, action: "caption_persist", error: getErrorMessage(err) });
-              });
-            }
-            return;
-          }
-
-          if (type === "close") {
-            const reason = String(message.reason ?? "client-close").slice(0, WS_CLOSE_REASON_MAX_LEN);
-            if (this.asrRealtimeEnabled()) {
-              await this.closeRealtimeAsrSession(connectionRole, `client-close:${reason}`, false);
-              await this.refreshAsrStreamMetrics(sessionId, connectionRole);
-            }
-            this.sendWsJson(server, { type: "closing", reason, stream_role: connectionRole });
-            server.close(1000, reason);
-            return;
-          }
-
-          if (type === "chunk") {
-            const frame = parseChunkFrame(message);
-            const frameRole = frame.stream_role ?? connectionRole;
-            if (frameRole !== connectionRole) {
-              throw new Error(`chunk.stream_role mismatch: expected ${connectionRole}, got ${frameRole}`);
-            }
-            await this.handleChunkFrame(sessionId, connectionRole, server, frame);
-            return;
-          }
-
-          throw new Error(`unsupported message type: ${type}`);
-        }))
-        .catch((error: Error) => {
-          this.sendWsError(server, error.message);
-        });
-    });
-
-    server.addEventListener("close", () => {
-      this.ctx.waitUntil(
-        (async () => {
-          if (this.asrRealtimeEnabled()) {
-            await this.closeRealtimeAsrSession(connectionRole, "ingest-ws-closed", false);
-            await this.refreshAsrStreamMetrics(sessionId, connectionRole);
-          }
-        })()
-      );
-      server.close();
-    });
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client
-    });
+  ): Response {
+    return handleWebSocketUpgrade(this, request, sessionId, connectionRole);
   }
 
   async fetch(request: Request): Promise<Response> {
