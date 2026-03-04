@@ -10,6 +10,8 @@ const TARGET_SAMPLE_RATE = 16000;
 const CHUNK_SAMPLES = 16000; // 1 second @ 16kHz mono
 const MAX_QUEUE_SAMPLES = CHUNK_SAMPLES * 30; // ~30 seconds of audio
 const SCRIPT_PROCESSOR_BUFFER = 4096;
+const WORKLET_NAME = 'chunk-processor';
+const WORKLET_URL = '/audio-worklet-processor.js';
 
 /* ── Audio conversion helpers ─────────────── */
 
@@ -141,9 +143,10 @@ class AudioService {
   private silentGain: GainNode | null = null;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
 
-  // PCM recording nodes
-  private micProcessor: ScriptProcessorNode | null = null;
-  private systemProcessor: ScriptProcessorNode | null = null;
+  // PCM recording nodes — AudioWorklet preferred, ScriptProcessorNode fallback
+  private micProcessor: AudioWorkletNode | ScriptProcessorNode | null = null;
+  private systemProcessor: AudioWorkletNode | ScriptProcessorNode | null = null;
+  private workletReady: Promise<void> | null = null;
 
   // Chunk queues for accumulating 1-second PCM chunks
   private teacherQueue: ChunkQueue = createChunkQueue();
@@ -178,31 +181,82 @@ class AudioService {
     mixedAnalyser.connect(silentGain);
     silentGain.connect(ctx.destination);
 
-    // ScriptProcessorNodes for PCM chunk capture
-    const micProcessor = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
-    micProcessor.onaudioprocess = (event) => {
-      this.handleAudioProcess(event, 'teacher');
-    };
-
-    const systemProcessor = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
-    systemProcessor.onaudioprocess = (event) => {
-      this.handleAudioProcess(event, 'students');
-    };
-
-    // Connect processors to silent gain so Chromium keeps them alive
-    micProcessor.connect(silentGain);
-    systemProcessor.connect(silentGain);
-
     this.audioCtx = ctx;
     this.micAnalyser = micAnalyser;
     this.systemAnalyser = systemAnalyser;
     this.mixedAnalyser = mixedAnalyser;
     this.mixGain = mixGain;
     this.silentGain = silentGain;
-    this.micProcessor = micProcessor;
-    this.systemProcessor = systemProcessor;
+
+    // Load AudioWorklet module — processors created lazily in initMic/initSystem
+    this.workletReady = this._loadWorklet(ctx);
 
     return ctx;
+  }
+
+  /**
+   * Loads the AudioWorklet module. Falls back gracefully if unsupported.
+   * The resolved promise signals that createWorkletNode() can be called.
+   */
+  private async _loadWorklet(ctx: AudioContext): Promise<void> {
+    if (!ctx.audioWorklet) {
+      console.warn('[AudioService] AudioWorklet not supported — using ScriptProcessorNode fallback');
+      return;
+    }
+    try {
+      // In Electron (file://) and Vite dev, the worklet file is served from
+      // the Vite root as a static asset at the root URL path.
+      const url = new URL(WORKLET_URL, globalThis.location?.href ?? 'http://localhost:5173/').href;
+      await ctx.audioWorklet.addModule(url);
+    } catch (err) {
+      console.warn('[AudioService] AudioWorklet load failed — using ScriptProcessorNode fallback:', err);
+    }
+  }
+
+  /**
+   * Creates an AudioWorkletNode for the given role.
+   * Returns null if worklet is unavailable (caller must use ScriptProcessorNode).
+   */
+  private _createWorkletNode(ctx: AudioContext, role: StreamRole): AudioWorkletNode | null {
+    if (!ctx.audioWorklet) return null;
+    try {
+      const node = new AudioWorkletNode(ctx, WORKLET_NAME, {
+        processorOptions: { targetRate: TARGET_SAMPLE_RATE },
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
+
+      node.port.onmessage = (event) => {
+        const { type, pcm, rms } = event.data as { type: string; pcm?: ArrayBuffer; rms: number };
+        if (type === 'chunk' && pcm) {
+          const queue = role === 'teacher' ? this.teacherQueue : this.studentsQueue;
+          // pcm ownership was transferred — wrap directly, no copy needed
+          enqueue(queue, new Int16Array(pcm));
+          this.processQueue(role, queue);
+        }
+        // 'level' messages: level metering is handled by the AnalyserNode poll
+        // in startCapture(); worklet rms is available but not used to avoid
+        // duplicate store updates.
+      };
+
+      return node;
+    } catch (err) {
+      console.warn(`[AudioService] AudioWorkletNode creation failed for ${role}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Creates a ScriptProcessorNode fallback for the given role.
+   * Used when AudioWorklet is unavailable.
+   */
+  private _createScriptProcessorNode(ctx: AudioContext, role: StreamRole): ScriptProcessorNode {
+    const node = ctx.createScriptProcessor(SCRIPT_PROCESSOR_BUFFER, 1, 1);
+    node.onaudioprocess = (event) => {
+      this.handleAudioProcess(event, role);
+    };
+    return node;
   }
 
   /* ── PCM chunk capture ─────────────────── */
@@ -257,6 +311,9 @@ class AudioService {
 
       if (ctx.state === 'suspended') await ctx.resume();
 
+      // Wait for worklet module to load before creating nodes
+      if (this.workletReady) await this.workletReady;
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -275,20 +332,30 @@ class AudioService {
 
       // Disconnect previous source if any
       if (this.micSource) this.micSource.disconnect();
+      if (this.micProcessor) this.micProcessor.disconnect();
       if (this.micStream) this.micStream.getTracks().forEach((t) => t.stop());
+
+      // Create processor: AudioWorkletNode preferred, ScriptProcessorNode fallback
+      const processor =
+        this._createWorkletNode(ctx, 'teacher') ??
+        this._createScriptProcessorNode(ctx, 'teacher');
+      this.micProcessor = processor;
 
       const source = ctx.createMediaStreamSource(stream);
       source.connect(this.micAnalyser!);
       source.connect(this.mixGain!);
-      // Connect to ScriptProcessorNode for PCM chunk capture
-      source.connect(this.micProcessor!);
+      source.connect(processor);
+      // Bug A fix: processor must also have a path to destination
+      processor.connect(this.silentGain!);
 
       this.micSource = source;
       this.micStream = stream;
 
       track.addEventListener('ended', () => {
         this.micSource?.disconnect();
+        this.micProcessor?.disconnect();
         this.micSource = null;
+        this.micProcessor = null;
         this.micStream = null;
         useSessionStore.getState().setAudioReady('mic', false);
       });
@@ -310,6 +377,9 @@ class AudioService {
       const ctx = this.ensureAudioGraph();
       if (ctx.state === 'suspended') await ctx.resume();
 
+      // Wait for worklet module to load before creating nodes
+      if (this.workletReady) await this.workletReady;
+
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: true,
@@ -323,6 +393,7 @@ class AudioService {
 
       // Disconnect previous
       if (this.systemSource) this.systemSource.disconnect();
+      if (this.systemProcessor) this.systemProcessor.disconnect();
       if (this.systemStream) this.systemStream.getTracks().forEach((t) => t.stop());
       if (this.displayStream) this.displayStream.getTracks().forEach((t) => t.stop());
 
@@ -331,12 +402,19 @@ class AudioService {
         t.enabled = false;
       });
 
+      // Create processor: AudioWorkletNode preferred, ScriptProcessorNode fallback
+      const processor =
+        this._createWorkletNode(ctx, 'students') ??
+        this._createScriptProcessorNode(ctx, 'students');
+      this.systemProcessor = processor;
+
       const audioStream = new MediaStream([audioTrack]);
       const source = ctx.createMediaStreamSource(audioStream);
       source.connect(this.systemAnalyser!);
       source.connect(this.mixGain!);
-      // Connect to ScriptProcessorNode for PCM chunk capture
-      source.connect(this.systemProcessor!);
+      source.connect(processor);
+      // Bug A fix: processor must also have a path to destination
+      processor.connect(this.silentGain!);
 
       this.systemSource = source;
       this.systemStream = audioStream;
@@ -344,7 +422,9 @@ class AudioService {
 
       audioTrack.addEventListener('ended', () => {
         this.systemSource?.disconnect();
+        this.systemProcessor?.disconnect();
         this.systemSource = null;
+        this.systemProcessor = null;
         this.systemStream = null;
         this.displayStream = null;
         useSessionStore.getState().setAudioReady('system', false);
@@ -412,6 +492,8 @@ class AudioService {
 
     this.micSource?.disconnect();
     this.systemSource?.disconnect();
+    this.micProcessor?.disconnect();
+    this.systemProcessor?.disconnect();
     this.micStream?.getTracks().forEach((t) => t.stop());
     this.systemStream?.getTracks().forEach((t) => t.stop());
     this.displayStream?.getTracks().forEach((t) => t.stop());
@@ -423,6 +505,7 @@ class AudioService {
     this.displayStream = null;
     this.micProcessor = null;
     this.systemProcessor = null;
+    this.workletReady = null;
 
     if (this.audioCtx && this.audioCtx.state !== 'closed') {
       this.audioCtx.close();
