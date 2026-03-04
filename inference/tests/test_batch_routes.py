@@ -226,8 +226,11 @@ def test_batch_diarize_endpoint(_tmp_audio: str):
 
     from app.main import app
 
+    mock_inc = MagicMock(_diarizer=mock_diarizer)
+    mock_runtime = MagicMock(incremental_processor=mock_inc)
+
     client = TestClient(app, raise_server_exceptions=False)
-    with _no_auth(), patch("app.routes.batch._get_diarizer", return_value=mock_diarizer):
+    with _no_auth(), patch.object(app.state, "runtime", mock_runtime):
         resp = client.post(
             "/batch/diarize",
             json={"audio_url": _tmp_audio, "num_speakers": 2},
@@ -255,11 +258,13 @@ def test_batch_process_endpoint(_tmp_audio: str):
 
     from app.main import app
 
+    mock_inc = MagicMock(_diarizer=mock_diarizer)
+    mock_runtime = MagicMock(asr_backend=mock_transcriber, incremental_processor=mock_inc)
+
     client = TestClient(app, raise_server_exceptions=False)
     with (
         _no_auth(),
-        patch.object(app.state, "runtime", MagicMock(asr_backend=mock_transcriber)),
-        patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+        patch.object(app.state, "runtime", mock_runtime),
     ):
         resp = client.post(
             "/batch/process",

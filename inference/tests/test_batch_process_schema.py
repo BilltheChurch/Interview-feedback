@@ -149,8 +149,7 @@ class TestBatchProcessResponseSchema:
         client = TestClient(app, raise_server_exceptions=False)
         with (
             _no_auth(),
-            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr)),
-            patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr, incremental_processor=MagicMock(_diarizer=mock_diarizer))),
         ):
             resp = client.post("/batch/process", json={
                 "audio_url": _tmp_audio,
@@ -186,8 +185,7 @@ class TestBatchProcessResponseSchema:
         client = TestClient(app, raise_server_exceptions=False)
         with (
             _no_auth(),
-            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr)),
-            patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr, incremental_processor=MagicMock(_diarizer=mock_diarizer))),
         ):
             resp = client.post("/batch/process", json={
                 "audio_url": _tmp_audio,
@@ -221,8 +219,7 @@ class TestBatchProcessResponseSchema:
         client = TestClient(app, raise_server_exceptions=False)
         with (
             _no_auth(),
-            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr)),
-            patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr, incremental_processor=MagicMock(_diarizer=mock_diarizer))),
         ):
             resp = client.post("/batch/process", json={
                 "audio_url": _tmp_audio,
@@ -262,8 +259,7 @@ class TestBatchProcessResponseSchema:
         client = TestClient(app, raise_server_exceptions=False)
         with (
             _no_auth(),
-            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr)),
-            patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr, incremental_processor=MagicMock(_diarizer=mock_diarizer))),
         ):
             resp = client.post("/batch/process", json={
                 "audio_url": _tmp_audio,
@@ -299,8 +295,7 @@ class TestBatchProcessResponseSchema:
         client = TestClient(app, raise_server_exceptions=False)
         with (
             _no_auth(),
-            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr)),
-            patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr, incremental_processor=MagicMock(_diarizer=mock_diarizer))),
         ):
             resp = client.post("/batch/process", json={
                 "audio_url": _tmp_audio,
@@ -337,8 +332,7 @@ class TestBatchProcessDataUri:
         client = TestClient(app, raise_server_exceptions=False)
         with (
             _no_auth(),
-            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr)),
-            patch("app.routes.batch._get_diarizer", return_value=mock_diarizer),
+            patch.object(app.state, "runtime", MagicMock(asr_backend=mock_asr, incremental_processor=MagicMock(_diarizer=mock_diarizer))),
         ):
             resp = client.post("/batch/process", json={
                 "audio_url": audio_data_uri,

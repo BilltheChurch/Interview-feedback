@@ -86,6 +86,14 @@ class RedisSessionState:
         if utterances:
             self._redis.rpush(key, *[json.dumps(u) for u in utterances])
             self._redis.expire(key, self._ttl)
+        # Keep increment_count in meta up to date so get_all_utterances works
+        # even when called without going through atomic_write_increment.
+        meta_key = self._key(session_id, "meta")
+        cur = self._redis.hget(meta_key, "increment_count")
+        cur_count = int(cur) if cur else 0
+        if increment_index + 1 > cur_count:
+            self._redis.hset(meta_key, "increment_count", str(increment_index + 1))
+            self._redis.expire(meta_key, self._ttl)
 
     def get_utterances(self, session_id: str, increment_index: int) -> list[dict]:
         raw = self._redis.lrange(
@@ -93,13 +101,17 @@ class RedisSessionState:
         )
         return [json.loads(item) for item in raw]
 
-    def get_all_utterances(self, session_id: str, max_increments: int = 100) -> list[dict]:
+    def get_increment_count(self, session_id: str) -> int:
+        """Return the number of increments written, from the meta hash."""
+        val = self._redis.hget(self._key(session_id, "meta"), "increment_count")
+        return int(val) if val else 0
+
+    def get_all_utterances(self, session_id: str) -> list[dict]:
+        """Fetch all utterances using the stored increment_count — no blind scan."""
+        count = self.get_increment_count(session_id)
         all_utts = []
-        for i in range(max_increments):
-            utts = self.get_utterances(session_id, i)
-            if not utts:
-                break
-            all_utts.extend(utts)
+        for i in range(count):
+            all_utts.extend(self.get_utterances(session_id, i))
         return all_utts
 
     # -- Idempotency (Hash) ----------------------------------------------------
@@ -142,6 +154,7 @@ class RedisSessionState:
     # KEYS: [1]=idem_key [2]=meta_key [3]=prof_key [4]=utt_key [5]=chkpt_key
     # ARGV: [1]=increment_id [2]=ttl [3]=meta_json [4]=profiles_json
     #        [5]=utterances_json [6]=checkpoint_json (empty string if none)
+    #        [7]=increment_index (integer, for increment_count tracking)
     _ATOMIC_WRITE_LUA = """
     -- Gate check: if already processed, return 0 (skip all writes)
     if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
@@ -158,6 +171,14 @@ class RedisSessionState:
         local flat = {}
         for k, v in pairs(meta) do flat[#flat+1] = k; flat[#flat+1] = tostring(v) end
         redis.call('HSET', KEYS[2], unpack(flat))
+        redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+    end
+
+    -- Track increment_count: max(current, increment_index + 1)
+    local idx = tonumber(ARGV[7])
+    local cur = tonumber(redis.call('HGET', KEYS[2], 'increment_count') or '0') or 0
+    if idx + 1 > cur then
+        redis.call('HSET', KEYS[2], 'increment_count', tostring(idx + 1))
         redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
     end
 
@@ -216,6 +237,7 @@ class RedisSessionState:
             json.dumps(speaker_profiles),
             json.dumps(utterances),
             json.dumps(checkpoint) if checkpoint else "",
+            str(increment_index),  # ARGV[7]: used to update increment_count
         )
         return bool(result)
 

@@ -25,13 +25,10 @@ from app.schemas import (
     WordTimestampOut as _SharedWordTimestampOut,
 )
 from app.services.whisper_batch import (
-    WhisperBatchTranscriber,
     TranscriptResult,
     Utterance as WhisperUtterance,
-    WordTimestamp as WhisperWord,
 )
 from app.services.diarize_full import (
-    PyannoteFullDiarizer,
     DiarizeResult,
     SpeakerSegment,
 )
@@ -40,35 +37,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/batch", tags=["batch"])
 
 # ---------------------------------------------------------------------------
-# Lazy service singletons (initialized on first request)
+# Runtime-aware service accessors (DI via request.app.state.runtime)
 # ---------------------------------------------------------------------------
 
-_whisper: WhisperBatchTranscriber | None = None
-_diarizer: PyannoteFullDiarizer | None = None
 
+def _get_diarizer_from_runtime(request: Request):
+    """Get the diarizer from the app runtime (respects DIARIZATION_BACKEND config).
 
-def _get_whisper() -> WhisperBatchTranscriber:
-    global _whisper
-    if _whisper is None:
-        settings = get_settings()
-        _whisper = WhisperBatchTranscriber(
-            model_size=settings.whisper_model_size,
-            device=settings.whisper_device,
-        )
-    return _whisper
-
-
-def _get_diarizer() -> PyannoteFullDiarizer:
-    global _diarizer
-    if _diarizer is None:
-        settings = get_settings()
-        _diarizer = PyannoteFullDiarizer(
-            device=settings.pyannote_device,
-            hf_token=settings.hf_token.get_secret_value(),
-            model_id=settings.pyannote_model_id,
-            embedding_model_id=settings.pyannote_embedding_model_id,
-        )
-    return _diarizer
+    Returns the runtime's incremental_processor diarizer which is configured
+    based on DIARIZATION_BACKEND (pyannote or nemo) in config.py.
+    """
+    runtime = request.app.state.runtime
+    return runtime.incremental_processor._diarizer
 
 
 # ---------------------------------------------------------------------------
@@ -310,13 +290,13 @@ async def batch_transcribe(req: BatchTranscribeRequest, request: Request) -> Bat
 
 
 @router.post("/diarize", response_model=BatchDiarizeResponse)
-async def batch_diarize(req: BatchDiarizeRequest) -> BatchDiarizeResponse:
-    """Batch diarize an audio file using pyannote.audio full pipeline."""
+async def batch_diarize(req: BatchDiarizeRequest, request: Request) -> BatchDiarizeResponse:
+    """Batch diarize an audio file using the configured diarization backend."""
     audio_path = await _resolve_audio(req.audio_url)
     is_temp = audio_path != req.audio_url
 
     try:
-        diarizer = _get_diarizer()
+        diarizer = _get_diarizer_from_runtime(request)
         result: DiarizeResult = await asyncio.to_thread(
             diarizer.diarize,
             audio_path,
@@ -365,7 +345,7 @@ async def batch_process(req: BatchProcessRequest, request: Request) -> BatchProc
 
     try:
         asr = request.app.state.runtime.asr_backend
-        diarizer = _get_diarizer()
+        diarizer = _get_diarizer_from_runtime(request)
 
         # Run transcription and diarization in parallel
         transcript_result, diarize_result = await asyncio.gather(
