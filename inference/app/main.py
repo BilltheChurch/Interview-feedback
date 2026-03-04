@@ -117,7 +117,7 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "x-api-key", "Authorization"],
 )
 app.state.runtime = runtime
 app.include_router(asr_router)
@@ -174,18 +174,14 @@ async def request_guard(request: Request, call_next: Callable) -> Response:
         if content_length:
             try:
                 if int(content_length) > settings.max_request_body_bytes:
-                    raise PayloadTooLargeError(
-                        f"request body exceeds MAX_REQUEST_BODY_BYTES={settings.max_request_body_bytes}"
-                    )
+                    raise PayloadTooLargeError("request body too large")
             except ValueError:
                 # Ignore malformed Content-Length and rely on actual body size check below.
                 pass
 
         body = await request.body()
         if len(body) > settings.max_request_body_bytes:
-            raise PayloadTooLargeError(
-                f"request body exceeds MAX_REQUEST_BODY_BYTES={settings.max_request_body_bytes}"
-            )
+            raise PayloadTooLargeError("request body too large")
 
     decision = None
     if rate_limiter is not None and request.url.path not in {"/health", "/docs", "/openapi.json", "/redoc"}:

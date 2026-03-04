@@ -136,9 +136,19 @@ async def _resolve_audio(audio_url: str) -> str:
     if parsed_url.scheme not in ("http", "https"):
         raise HTTPException(status_code=400, detail="Only http/https URLs allowed")
     hostname = parsed_url.hostname or ""
-    if hostname in ("localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "[::1]") or \
-       hostname.startswith(("10.", "192.168.")) or \
-       (hostname.startswith("172.") and 16 <= int(hostname.split(".")[1]) <= 31 if hostname.count(".") >= 1 and hostname.split(".")[1].isdigit() else False):
+
+    def _is_private_hostname(h: str) -> bool:
+        """Blocklist-based check for obviously private/internal hostnames."""
+        if h in ("localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "::1", "[::1]"):
+            return True
+        if h.startswith(("10.", "192.168.")):
+            return True
+        parts = h.split(".")
+        if len(parts) >= 2 and parts[0] == "172" and parts[1].isdigit():
+            return 16 <= int(parts[1]) <= 31
+        return False
+
+    if _is_private_hostname(hostname):
         raise HTTPException(status_code=400, detail="Internal URLs not allowed")
 
     # DNS rebinding protection: resolve hostname and verify the IP is not private
