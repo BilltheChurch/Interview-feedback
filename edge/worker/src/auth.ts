@@ -1,27 +1,48 @@
 /**
- * Validate API key from request headers or query params.
+ * Validate API key from request headers for HTTP endpoints.
  * Returns null if authorized, or a 401 Response if not.
  * If WORKER_API_KEY is not set (empty/undefined), auth is skipped (dev mode).
+ *
+ * NOTE: WebSocket connections are NOT authenticated here at the HTTP upgrade
+ * level. Instead, auth is performed via first-message frame after WS accept.
+ * See validateWsAuthFrame() below.
  */
 export function validateApiKey(request: Request, env: Record<string, unknown>): Response | null {
   const key = env.WORKER_API_KEY as string | undefined;
   if (!key) return null; // dev mode — no key configured
 
-  const url = new URL(request.url);
-  // Prefer Sec-WebSocket-Protocol header (for WS connections — key never appears in URL logs).
-  // Fall back to x-api-key header (HTTP endpoints), then query param (backward compat only).
-  const incoming =
-    request.headers.get('sec-websocket-protocol') ||
-    request.headers.get('x-api-key') ||
-    url.searchParams.get('api_key');
+  // For WebSocket upgrade requests, skip HTTP-level auth — WS auth is done
+  // via first-message frame after connection is accepted (see validateWsAuthFrame).
+  const upgrade = request.headers.get('upgrade');
+  if (upgrade && upgrade.toLowerCase() === 'websocket') return null;
 
-  if (!incoming || !timingSafeEqual(incoming, key)) {
+  // HTTP endpoints: validate x-api-key header only (no query param fallback).
+  const incoming = request.headers.get('x-api-key') || '';
+
+  if (!timingSafeEqual(incoming, key)) {
     return new Response(JSON.stringify({ detail: 'unauthorized' }), {
       status: 401,
       headers: { 'content-type': 'application/json' }
     });
   }
   return null;
+}
+
+/**
+ * Validate the first WebSocket auth frame.
+ * Expected frame: { type: "auth", key: "..." }
+ * Returns true if auth passes (or no key is configured — dev mode).
+ */
+export function validateWsAuthFrame(
+  frame: Record<string, unknown>,
+  env: Record<string, unknown>
+): boolean {
+  const key = env.WORKER_API_KEY as string | undefined;
+  if (!key) return true; // dev mode — no key configured
+
+  if (frame.type !== 'auth') return false;
+  const incoming = String(frame.key ?? '');
+  return timingSafeEqual(incoming, key);
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

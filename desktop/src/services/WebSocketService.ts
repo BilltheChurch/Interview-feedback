@@ -88,9 +88,9 @@ class WebSocketService {
       const apiKey = await getApiKey();
       useSessionStore.getState().setWsStatus(role, 'connecting');
 
-      // Pass API key via Sec-WebSocket-Protocol header (keeps it out of URL logs).
-      // The server echoes back the protocol in its 101 response.
-      const ws = apiKey ? new WebSocket(url, [apiKey]) : new WebSocket(url);
+      // API key is sent as the first message frame after connection opens (auth frame).
+      // This keeps the key out of URL logs and avoids misusing Sec-WebSocket-Protocol.
+      const ws = new WebSocket(url);
       this.sockets[role] = ws;
       this.ready[role] = false;
       this.closing[role] = false;
@@ -101,6 +101,12 @@ class WebSocketService {
         if (settled) return;
         settled = true;
         ws.removeEventListener('error', onError);
+
+        // Send auth frame first. Server validates this before processing any
+        // further messages. In dev mode (no key), server accepts immediately.
+        if (apiKey) {
+          ws.send(JSON.stringify({ type: 'auth', key: apiKey }));
+        }
 
         ws.send(
           JSON.stringify({
@@ -148,10 +154,18 @@ class WebSocketService {
       });
 
       // Close handler
-      ws.addEventListener('close', () => {
+      ws.addEventListener('close', (event: CloseEvent) => {
         if (this.sockets[role] !== ws) return;
         this.sockets[role] = null;
         this.ready[role] = false;
+
+        // 4401 = auth rejected by server — do not retry, it won't help.
+        if (event.code === 4401) {
+          useSessionStore.getState().setWsStatus(role, 'error');
+          useSessionStore.getState().setWsError(`${role} authentication failed`);
+          this.closing[role] = false;
+          return;
+        }
 
         if (this.closing[role]) {
           useSessionStore.getState().setWsStatus(role, 'disconnected');

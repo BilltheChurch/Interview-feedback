@@ -32,6 +32,7 @@ import {
   type IngestState
 } from "./config";
 import { TARGET_SAMPLE_RATE, TARGET_CHANNELS } from "./audio-utils";
+import { validateWsAuthFrame } from "./auth";
 import type { CaptionSource } from "./types_v2";
 import type { CaptionEvent } from "./providers/types";
 
@@ -243,12 +244,16 @@ export function parseWsFrame(data: unknown): Record<string, unknown> {
 export function setupWebSocketPair(
   ctx: WsHandlerContext,
   sessionId: string,
-  connectionRole: StreamRole
+  connectionRole: StreamRole,
+  env: Record<string, unknown>
 ): { client: WebSocket; server: WebSocket } {
   const pair = new WebSocketPair();
   const client = pair[0];
   const server = pair[1];
   server.accept();
+
+  // First-message auth gate. True once auth frame is validated.
+  let authenticated = false;
 
   let messageQueue: Promise<void> = Promise.resolve();
 
@@ -257,6 +262,19 @@ export function setupWebSocketPair(
       .then(() =>
         ctx.enqueueMutation(async () => {
           const message = parseWsFrame(event.data);
+
+          // Validate first message as auth frame before any normal dispatch.
+          if (!authenticated) {
+            if (!validateWsAuthFrame(message, env)) {
+              ctx.sendWsError(server, "unauthorized");
+              server.close(4401, "unauthorized");
+              return;
+            }
+            authenticated = true;
+            ctx.sendWsJson(server, { type: "auth_ok" });
+            return;
+          }
+
           await dispatchWsMessage(ctx, server, sessionId, connectionRole, message);
         })
       )
@@ -286,18 +304,21 @@ export function setupWebSocketPair(
 /**
  * Handle the full WebSocket upgrade request.
  * Returns a 426 if not a WS request, or a 101 WebSocket response.
+ * Auth is NOT performed at the HTTP upgrade level — it is deferred to the
+ * first WebSocket message frame (see setupWebSocketPair).
  */
 export function handleWebSocketUpgrade(
   ctx: WsHandlerContext,
   request: Request,
   sessionId: string,
-  connectionRole: StreamRole
+  connectionRole: StreamRole,
+  env: Record<string, unknown>
 ): Response {
   if (!isWebSocketRequest(request)) {
     return jsonResponse({ detail: "websocket upgrade required" }, 426);
   }
 
-  const { client } = setupWebSocketPair(ctx, sessionId, connectionRole);
+  const { client } = setupWebSocketPair(ctx, sessionId, connectionRole, env);
 
   return new Response(null, {
     status: 101,
