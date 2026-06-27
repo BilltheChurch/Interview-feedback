@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   clearPreferredCaptureSource: () => ipcRenderer.invoke('capture:clear-preferred-source'),
   getPreferredCaptureSource: () => ipcRenderer.invoke('capture:get-preferred-source'),
   getWorkerApiKey: () => ipcRenderer.invoke('auth:getWorkerApiKey'),
+  getEdgeBaseUrl: () => ipcRenderer.invoke('config:getEdgeBaseUrl'),
   copyToClipboard: (text) => ipcRenderer.invoke('clipboard:write', { text }),
   exportPDF: (options) => ipcRenderer.invoke('export:printToPDF', options),
   acsGetEnabled: () => ipcRenderer.invoke('acs:getEnabled'),

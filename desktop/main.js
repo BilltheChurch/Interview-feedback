@@ -1030,6 +1030,14 @@ function registerIpcHandlers() {
     return process.env.WORKER_API_KEY || '';
   });
 
+  // Provide the edge worker base URL at runtime via IPC. Single source of truth is the
+  // API_BASE_URL env var (loaded by dotenv in the main process); this keeps the URL
+  // configurable per environment without rebuilding the renderer bundle, and avoids the
+  // VITE_-prefix pitfall where the renderer's import.meta.env never sees API_BASE_URL.
+  ipcMain.handle('config:getEdgeBaseUrl', async () => {
+    return process.env.API_BASE_URL || process.env.WORKER_BASE_URL || '';
+  });
+
   ipcMain.handle('system:openExternalUrl', async (_event, payload) => {
     const target = String(payload?.url || '').trim();
     if (!target) {
@@ -1165,7 +1173,7 @@ app.whenReady().then(() => {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          `default-src 'self'; ${scriptSrc}; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:;`
+          `default-src 'self'; ${scriptSrc}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self' wss: ws: https:; worker-src 'self' blob:; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com data:;`
         ]
       }
     });

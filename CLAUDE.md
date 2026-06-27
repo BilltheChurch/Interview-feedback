@@ -270,3 +270,11 @@ The Worker implements automatic failover via circuit breaker:
 - **INFERENCE_CIRCUIT_OPEN_MS**: Circuit open duration (default 15000ms)
 
 When primary endpoint times out/fails, Worker automatically routes to `INFERENCE_BASE_URL_SECONDARY`. Update these in `wrangler.jsonc` before deploy.
+
+
+## Node Modules 清理记录
+
+> **2026-04-04:** node_modules 已被手动删除以释放磁盘空间。如需再次运行或部署本项目，请先执行依赖安装：
+> ```bash
+> npm install  # 或 pnpm install
+> ```

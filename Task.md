@@ -1,6 +1,6 @@
 # Task Tracking (Strictly Aligned With PRD / 开发计划 / 快速启动指南)
 
-Last Updated: 2026-02-15
+Last Updated: 2026-06-27
 Workspace: `/Users/billthechurch/Interview-feedback`
 
 ## 0. 文档基线（执行必须对齐）
@@ -12,8 +12,14 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - `/Users/billthechurch/Interview-feedback/docs/plans/*.md`
 
 ## 1. 当前阶段
-- Current Phase: **Phase 5（实机验收 + OAuth 配置 + Beta 上线）**
-- Why: Phase 4 Production Readiness 全部完成。Desktop 已具备 React + Vite + TypeScript + Tailwind v4 技术栈、OAuth 登录、日历集成、PiP、UI/UX 打磨。需要完成 Azure/Google OAuth 配置后进行首次实机端到端验收。
+- Current Phase: **Phase 6（架构重定向：云端化 + Companion + Speechmatics）**
+- Why: Phase 5 实机验收暴露根本性架构问题——旧架构依赖"开发机本地推理（`if.frontierace.ai` tunnel，现 1033 不健康）+ 自建 CAM++ 说话人识别"，**无法满足"用户开箱即用、零本地部署"**。2026-06-27 决策重定向为：云 API 起步（Speechmatics 实时 STT + 实时 diarization）、Companion 优先、LLM 合成移入 Worker、删除自建 `inference/`。
+- 设计基线：`docs/plans/2026-06-27-cloud-companion-speechmatics-architecture.md`
+- 锁定决策：D1 云 API 起步 / D2 Companion 优先 / D3 Speechmatics / D4 说话人分离硬需求(1v1 & 群面同等重要) / D5 一次性交付 ≤3-5min / D6 MVP 零自建服务器
+- **D7 迁移方式 = 渐进、纯云、零 GPU**（feature-flag 切换、验证后删旧码；生产全程不部署任何 GPU/服务器，旧 GPU 机器 if.frontierace.ai 退役）
+- **D8 群面命名 = 匿名 diarization(S1/S2) + 自我介绍自动抽名 + 手动纠正兜底**（不做两段式重型 enrollment）
+- **红队评审已完成（2026-06-27，6-agent）**：方向成立但 6 维度全 needs-adjustment，强制调整见设计文档 §9。关键修正：①逐字稿不过 LLM（确定性清洗，LLM 只做总结/memo/打分）②每场=2路并发流、付费从第一天、免费层实为~20h且仅1场并发 ③群面 diarization 是 best-effort 需兜底 ④删 global-cluster 前先把 /cluster-map 改接 Speechmatics 标签 ⑤静音保活帧是刚需（看题阶段全员静音）⑥inference 移植真实规模~2.4k 行跨4服务。
+- 注意：Phase 5 的 OAuth 配置与实机验收待办**仍然有效**，但需在 Phase 6 架构落地后再执行。
 
 ## 2. 里程碑总览（来自《开发计划》）
 - Phase 0: 账号/环境
@@ -80,7 +86,45 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - Phase 5: 实机验收 + Beta 上线
   - Status: **TODO**
 
-## 3. 当前待办（Phase 5）
+## 2.5 Phase 6 架构重定向待办（当前主线）
+
+> 详见 `docs/plans/2026-06-27-cloud-companion-speechmatics-architecture.md`
+
+### Phase A — P0：云端可用闭环（用户零部署 + 实时转写 + 能出报告）
+- [ ] A1 新增 Speechmatics 实时 provider（DO outbound WS / 每声道 / diarization=speaker / language=en|cmn_en）
+- [ ] A2 Worker→Desktop 转写下行协议 + Desktop 入站处理 + `transcriptSegments[]` 持久化
+- [x] A3 修 Desktop base URL 配置（`VITE_EDGE_BASE_URL` / 经 IPC 读 `API_BASE_URL`）+ `VITE_WORKER_API_KEY`
+  - ✅ 新增 `config:getEdgeBaseUrl` IPC（main.js 读 `API_BASE_URL || WORKER_BASE_URL`）+ preload 暴露 + `desktop-api.d.ts` 类型 + `SetupView` 经 IPC 解析 `baseApiUrl`（回退 `import.meta.env.VITE_EDGE_BASE_URL`）
+  - ✅ API key 链路已确认：`WebSocketService.getApiKey()` 先走 `getWorkerApiKey` IPC（main.js 读 `WORKER_API_KEY`）再回退 `VITE_WORKER_API_KEY`；WS 首帧 `{type:'auth',key}` + HTTP `x-api-key` 头均依赖此值
+  - ✅ 配置补齐：`API_BASE_URL=https://api.frontierace.ai` 与 `WORKER_API_KEY`（dev 值，须与生产 secret 一致）已入 `.env`；`.env.example` 补 `WORKER_API_KEY` 文档占位
+  - ✅ 验证：`tsc --noEmit` exit 0 / `vite build` 2559 模块成功 / main.js·preload.js `node --check` 通过；顺手清除 main.js 遗留 `[DEBUG]` 日志，CSP 头补 Google Fonts 白名单（与 index.html meta CSP 对齐）
+- [ ] A4 删 4 处 `127.0.0.1:8000` fallback + `wrangler.jsonc` 云端化（ASR_PROVIDER=speechmatics, 删 inference localhost, 加 SPEECHMATICS_API_KEY secret）
+- [ ] A5 LLM 合成移入 Worker（移植 `report_synthesizer.py`）+ finalize 摘除 inference 依赖 + 删 `local_asr` 阶段
+
+### Phase B — P1：Granola 交付物 + 说话人命名 + 质量
+- [ ] B1 `ResultV2`/合成 contract 新增 `cleaned_transcript`/`summary`/`personalized_memo`（一次性交付）
+- [ ] B2 note/mark 精确锚点（`anchor.time_ms`）+ 作为个性化信号
+- [ ] B3 diarization 标签 → 候选人命名（Speechmatics 命名声纹 enrollment 或复用手动映射 UI）
+- [ ] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦
+- [ ] B5 通用实时字幕面板（`CaptionPanel` 由 `transcriptSegments` 驱动，覆盖非 Teams 会议）
+
+### Phase C — P2：清理与通用性
+- [ ] C1 删本地 pyannote-rs sidecar / 重复 `useWebSocket` hook / Settings localhost 文案
+- [ ] C2 长会议分块清洗兜底
+- [ ] C3 归档 `inference/` + 退役 `if.frontierace.ai` tunnel
+
+### Phase A 前置验证门（删 inference 前必须通过 pilot，需 Speechmatics key）
+- [ ] cmn_en + 实时 + diarization=speaker 三者同时可用且返回每词 speaker（官方无矩阵，必须实测）
+- [ ] 真实 3–4 人群面**重叠音频**的 diarization 错误率（DER/误切换率）达标
+- [ ] 实时免费/付费**并发额度**与确切单价（portal 实测；注意每场=2路流）
+- [ ] CF DO **持久双出站 WS + 静音保活 + 重连** 实跑验证（dashscope-asr.ts 是短连，不能作证）
+- [ ] 16000Hz sample_rate 被 Speechmatics 接受
+
+> 注：v2 强制调整已并入下方 A/B/C（详见设计文档 §9）：A5 改为"逐字稿确定性清洗 + LLM 只做总结/memo/打分"；A1 含 teacher 声道关 diarization + 静音保活帧 + R2-replay 重连；删 global-cluster 前先在 B3 把 /cluster-map 改接 S 标签；inference 移植按真实规模(~2.4k 行跨4服务)拆分并补 TS 回归测试。
+
+---
+
+## 3. 历史待办（Phase 5：实机验收 + OAuth，架构落地后再执行）
 
 ### 5.1 OAuth 配置（阻塞实机测试）
 - [ ] Azure Portal 创建 App Registration（`MS_GRAPH_CLIENT_ID`）
@@ -187,11 +231,14 @@ Validation Date: 2026-02-15
 - [x] Total: **217 tests all passing**
 
 ## 7. 当前阻塞与处理
-- **OAuth 配置未完成**：需要创建 Azure App Registration 和 Google Cloud OAuth Client ID，否则无法进行实机登录测试。
-- **Speaker Diarization 模型缺失**：当前仅有 Speaker Verification（CAM++），无独立 SD 模型。MVP 阶段通过 SV+聚类+enrollment 覆盖需求，不阻塞 beta。
-- **实机验收未执行**：所有代码就绪，等待 OAuth 配置完成后进行首次端到端验收。
+- **[架构] 旧架构依赖自建推理**：`if.frontierace.ai` 是开发机 tunnel（现 1033 不健康），不满足"用户零部署"。→ Phase 6 用 Speechmatics + Worker 直调 LLM 取代，删除 `inference/`。
+- **[P0 bug] Desktop 生产版连不上云端**：`VITE_EDGE_BASE_URL` 未定义 → `baseApiUrl=''`。→ Phase 6 A3 修。
+- **[P0 bug] 录音时转写不回传 Desktop**：非 Teams 会议零实时字幕零持久化。→ Phase 6 A2 修。
+- **[待核实] Speechmatics `cmn_en` 实时可用性/单价 + CF 并发 outbound WS 限制**：commit 前实测。
+- **OAuth 配置未完成**（历史阻塞，架构落地后再处理）：需创建 Azure App Registration 和 Google Cloud OAuth Client ID。
 
 ## 8. 设计文档索引
+- `docs/plans/2026-06-27-cloud-companion-speechmatics-architecture.md` — **【当前主线】云端化 + Companion + Speechmatics 架构重定向设计**
 - `docs/plans/2026-02-14-backend-intelligence-upgrade-plan.md` — LLM 合成管线实施计划
 - `docs/plans/2026-02-14-backend-intelligence-upgrade-design.md` — 后端智能升级设计
 - `docs/plans/2026-02-14-pip-background-session-design.md` — PiP + Zustand 架构设计
@@ -219,9 +266,10 @@ Validation Date: 2026-02-15
 
 未通过验证的任务，不允许标记为完成。
 
-## 11. 下一步（立即执行）
-1. **Azure App Registration 创建** → 获取 `MS_GRAPH_CLIENT_ID`
-2. **Google Cloud OAuth 配置** → 获取 `GOOGLE_CALENDAR_CLIENT_ID` + `SECRET`
-3. **填入 desktop/.env** → 验证 OAuth 登录流程
-4. **首次实机端到端验收** → 录制 + 转写 + feedback 全流程
-5. **Phase 5 门禁验收** → P95<=5s, unknown_ratio<=15%, confirm_without_name=0
+## 11. 下一步（立即执行 — Phase 6 架构重定向）
+1. **前置核实** → Speechmatics `cmn_en` 实时端点可用性 + 单价 + CF 并发 outbound WS 限制
+2. **A1** → 新增 Speechmatics 实时 provider（DO outbound WS / 每声道 / diarization）
+3. **A2 + A3** → 转写下行协议 + Desktop 持久化 + 修 base URL
+4. **A4 + A5** → 删 localhost fallback + wrangler 云端化 + LLM 合成移入 Worker
+5. **B1** → Granola 一次性交付物（cleaned_transcript + summary + personalized_memo）
+6. （架构落地后）回到 Phase 5：OAuth 配置 + 实机端到端验收

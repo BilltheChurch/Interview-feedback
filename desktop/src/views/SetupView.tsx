@@ -857,6 +857,18 @@ export function SetupView() {
       },
     });
 
+    // Resolve the edge worker base URL from the main process (single source of truth:
+    // the API_BASE_URL env var), falling back to the build-time var for non-Electron contexts.
+    let baseApiUrl = '';
+    try {
+      if (window.desktopAPI?.getEdgeBaseUrl) {
+        baseApiUrl = (await window.desktopAPI.getEdgeBaseUrl()) || '';
+      }
+    } catch {
+      // IPC unavailable (e.g. browser/dev without Electron) — fall through to build-time var
+    }
+    if (!baseApiUrl) baseApiUrl = import.meta.env.VITE_EDGE_BASE_URL || '';
+
     // Orchestrator handles: audio init, WS connect, timer start, store update (non-blocking)
     startSession({
       sessionId,
@@ -864,7 +876,7 @@ export function SetupView() {
       mode,
       participants: participants.map(p => ({ name: p.name })),
       stages,
-      baseApiUrl: import.meta.env.VITE_EDGE_BASE_URL || '',
+      baseApiUrl,
       interviewerName: '',
       teamsJoinUrl: teamsUrl,
       templateId: template,

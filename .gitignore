@@ -15,6 +15,7 @@ desktop/artifacts/
 artifacts/
 
 # Secrets / local config
+.mcp.json
 inference/.env
 desktop/.env
 edge/worker/.dev.vars
