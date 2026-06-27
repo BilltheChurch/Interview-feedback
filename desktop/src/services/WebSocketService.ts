@@ -150,6 +150,23 @@ class WebSocketService {
           this.ready[role] = true;
           this.reconnectAttempts[role] = 0;
           useSessionStore.getState().setWsStatus(role, 'connected');
+          return;
+        }
+
+        // A2: realtime transcript downlink from the Worker. Append every segment to
+        // the store immediately so it persists and survives reload/crash/PiP — works
+        // for any meeting (not just Teams/ACS).
+        if (payload.type === 'transcript') {
+          const text = String(payload.text ?? '').trim();
+          if (!text) return;
+          useSessionStore.getState().appendTranscriptSegment({
+            role: (payload.role === 'students' ? 'students' : 'teacher') as StreamRole,
+            speaker: payload.speaker == null ? null : String(payload.speaker),
+            text,
+            isFinal: payload.is_final !== false,
+            tsMs: Number(payload.ts_ms ?? 0),
+            startMs: Number(payload.start_ms ?? 0),
+          });
         }
       });
 

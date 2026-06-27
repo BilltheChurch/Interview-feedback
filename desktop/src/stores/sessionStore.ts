@@ -53,6 +53,21 @@ export type CaptionEntry = {
 
 const MAX_CAPTIONS = 200;
 
+/** A2: realtime transcript segment pushed from the Worker over the ingest WS.
+ *  Universal (works for any STT provider), unlike CaptionEntry which is ACS/Teams-only. */
+export type TranscriptSegment = {
+  id: string;
+  role: StreamRole;
+  speaker: string | null;
+  text: string;
+  isFinal: boolean;
+  tsMs: number;
+  startMs: number;
+  createdAt: number;
+};
+
+const MAX_TRANSCRIPT_SEGMENTS = 1000;
+
 export type SessionStatus =
   | 'idle'
   | 'setup'
@@ -115,6 +130,7 @@ export type PersistedSession = {
   stageArchives: StageArchive[];
   micActiveSeconds: number;
   sysActiveSeconds: number;
+  transcriptSegments: TranscriptSegment[];
   savedAt: number;
 };
 
@@ -179,6 +195,9 @@ interface SessionStore {
   acsCaptionCount: number;
   captions: CaptionEntry[];
 
+  // A2: universal realtime transcript segments (Worker downlink)
+  transcriptSegments: TranscriptSegment[];
+
   // Finalization guard
   finalizeRequested: boolean;
 
@@ -211,6 +230,7 @@ interface SessionStore {
   setAcsStatus: (status: AcsStatus) => void;
   incrementAcsCaptionCount: () => void;
   addCaption: (entry: Omit<CaptionEntry, 'id'>) => void;
+  appendTranscriptSegment: (segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => void;
   setFinalizeRequested: (value: boolean) => void;
   reset: () => void;
 }
@@ -247,6 +267,7 @@ const INITIAL_STATE = {
   acsStatus: 'off' as AcsStatus,
   acsCaptionCount: 0,
   captions: [] as CaptionEntry[],
+  transcriptSegments: [] as TranscriptSegment[],
 
   finalizeRequested: false,
 
@@ -280,6 +301,7 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       elapsedSeconds: 0,
       memos: [],
       captions: [],
+      transcriptSegments: [],
       notes: '',
       stageArchives: [],
       micActiveSeconds: 0,
@@ -312,6 +334,7 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       stageArchives: persisted.stageArchives,
       micActiveSeconds: persisted.micActiveSeconds ?? 0,
       sysActiveSeconds: persisted.sysActiveSeconds ?? 0,
+      transcriptSegments: persisted.transcriptSegments ?? [],
     }),
 
   addMemo: (type, text) =>
@@ -378,6 +401,16 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       return { captions: next.length > MAX_CAPTIONS ? next.slice(-MAX_CAPTIONS) : next };
     }),
 
+  appendTranscriptSegment: (segment) =>
+    set((s) => {
+      const id = `ts_${segment.role}_${segment.tsMs}_${s.transcriptSegments.length}`;
+      const next = [...s.transcriptSegments, { ...segment, id, createdAt: Date.now() }];
+      return {
+        transcriptSegments:
+          next.length > MAX_TRANSCRIPT_SEGMENTS ? next.slice(-MAX_TRANSCRIPT_SEGMENTS) : next,
+      };
+    }),
+
   setFinalizeRequested: (value) => set({ finalizeRequested: value }),
 
   reset: () => {
@@ -418,6 +451,7 @@ useSessionStore.subscribe((state) => {
     stageArchives: state.stageArchives,
     micActiveSeconds: state.micActiveSeconds,
     sysActiveSeconds: state.sysActiveSeconds,
+    transcriptSegments: state.transcriptSegments,
     savedAt: now,
   };
 

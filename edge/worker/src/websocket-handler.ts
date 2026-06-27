@@ -93,6 +93,12 @@ export interface WsHandlerContext {
     server: WebSocket,
     frame: ReturnType<typeof parseChunkFrame>
   ): Promise<void>;
+
+  /** Register the server-side ingest socket for a stream role so the DO can push
+   *  realtime transcript frames back to the Desktop (A2 transcript downlink). */
+  registerIngestSocket(connectionRole: StreamRole, server: WebSocket): void;
+  /** Unregister the ingest socket for a stream role (on close). */
+  unregisterIngestSocket(connectionRole: StreamRole, server: WebSocket): void;
 }
 
 /**
@@ -251,6 +257,9 @@ export function setupWebSocketPair(
   const client = pair[0];
   const server = pair[1];
   server.accept();
+  // A2: track this server socket so the DO can push realtime transcript frames
+  // back down to the Desktop client over the same ingest connection.
+  ctx.registerIngestSocket(connectionRole, server);
 
   // First-message auth gate. True once auth frame is validated.
   let authenticated = false;
@@ -295,6 +304,7 @@ export function setupWebSocketPair(
 
   server.addEventListener("close", () => {
     clearTimeout(authTimer);
+    ctx.unregisterIngestSocket(connectionRole, server);
     if (ctx.asrRealtimeEnabled()) {
       ctx
         .closeRealtimeAsrSession(connectionRole, "ingest-ws-closed", false)

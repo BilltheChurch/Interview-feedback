@@ -17,6 +17,44 @@ import {
   parseBool
 } from "./config";
 
+// ── A2: realtime transcript downlink frame ──────────────────────────
+
+/** Wire contract for a realtime transcript frame pushed Worker → Desktop.
+ *  Both repos depend on these exact field names — keep them in sync with the
+ *  Desktop WebSocketService transcript handler and the sessionStore TranscriptSegment. */
+export interface TranscriptFrame {
+  type: "transcript";
+  role: StreamRole;
+  speaker: string | null;
+  text: string;
+  is_final: boolean;
+  ts_ms: number;
+  start_ms: number;
+  words: Array<{ text: string; start_ms: number; end_ms: number; speaker?: string | null }>;
+}
+
+/** Build a realtime transcript downlink frame (pure). */
+export function buildTranscriptFrame(
+  streamRole: StreamRole,
+  speaker: string | null,
+  text: string,
+  isFinal: boolean,
+  startMs: number,
+  endMs: number,
+  words: TranscriptFrame["words"] = []
+): TranscriptFrame {
+  return {
+    type: "transcript",
+    role: streamRole,
+    speaker,
+    text,
+    is_final: isFinal,
+    ts_ms: endMs,
+    start_ms: startMs,
+    words,
+  };
+}
+
 // ── ASR config resolution ───────────────────────────────────────────
 
 /** Subset of Env fields needed by ASR helpers. Accepts full Env without index signature issues. */

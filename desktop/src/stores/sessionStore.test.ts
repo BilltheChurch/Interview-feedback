@@ -182,3 +182,57 @@ describe('sessionStore', () => {
     removeItemSpy.mockRestore();
   });
 });
+
+describe('sessionStore — A2 transcript downlink', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ transcriptSegments: [] });
+  });
+
+  it('appendTranscriptSegment stores a segment with generated id + createdAt', () => {
+    useSessionStore.getState().appendTranscriptSegment({
+      role: 'students',
+      speaker: 'S1',
+      text: 'hello',
+      isFinal: true,
+      tsMs: 2000,
+      startMs: 1000,
+    });
+    const segs = useSessionStore.getState().transcriptSegments;
+    expect(segs).toHaveLength(1);
+    expect(segs[0]).toMatchObject({
+      role: 'students',
+      speaker: 'S1',
+      text: 'hello',
+      isFinal: true,
+      tsMs: 2000,
+      startMs: 1000,
+    });
+    expect(segs[0].id).toBeTruthy();
+    expect(typeof segs[0].createdAt).toBe('number');
+  });
+
+  it('preserves append order across multiple segments', () => {
+    const store = useSessionStore.getState();
+    store.appendTranscriptSegment({ role: 'teacher', speaker: null, text: 'one', isFinal: true, tsMs: 1000, startMs: 0 });
+    store.appendTranscriptSegment({ role: 'students', speaker: 'S1', text: 'two', isFinal: true, tsMs: 2000, startMs: 1000 });
+    expect(useSessionStore.getState().transcriptSegments.map((s) => s.text)).toEqual(['one', 'two']);
+  });
+
+  it('caps at 1000 segments, keeping the most recent', () => {
+    const store = useSessionStore.getState();
+    for (let i = 0; i < 1050; i++) {
+      store.appendTranscriptSegment({
+        role: 'students',
+        speaker: 'S1',
+        text: `seg-${i}`,
+        isFinal: true,
+        tsMs: i * 1000,
+        startMs: (i - 1) * 1000,
+      });
+    }
+    const segs = useSessionStore.getState().transcriptSegments;
+    expect(segs).toHaveLength(1000);
+    expect(segs[segs.length - 1].text).toBe('seg-1049');
+    expect(segs[0].text).toBe('seg-50');
+  });
+});

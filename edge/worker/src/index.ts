@@ -206,7 +206,8 @@ import {
   emptyAsrCursorByStream as emptyAsrCursorByStreamFn,
   buildRealtimeRuntime as buildRealtimeRuntimeFn,
   sendWsJson as sendWsJsonFn,
-  sendWsError as sendWsErrorFn
+  sendWsError as sendWsErrorFn,
+  buildTranscriptFrame
 } from "./asr-helpers";
 import {
   incrementalV1Enabled,
@@ -363,6 +364,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
     mixed: false,
     teacher: false,
     students: false
+  };
+  /** A2: server-side ingest WebSockets per stream role, used to push realtime
+   *  transcript frames back down to the Desktop client. null when not connected. */
+  private ingestWebSocketsByStream: Record<StreamRole, WebSocket | null> = {
+    mixed: null,
+    teacher: null,
+    students: null
   };
   private asrRealtimeByStream: Record<StreamRole, AsrRealtimeRuntime>;
   private inferenceClient: InferenceFailoverClient;
@@ -756,6 +764,39 @@ export class MeetingSessionDO extends DurableObject<Env> {
     sendWsErrorFn(socket, detail);
   }
 
+  /** A2: register/unregister the Desktop ingest socket so realtime transcript
+   *  frames can be pushed back to the client. */
+  registerIngestSocket(connectionRole: StreamRole, server: WebSocket): void {
+    this.ingestWebSocketsByStream[connectionRole] = server;
+  }
+
+  unregisterIngestSocket(connectionRole: StreamRole, server: WebSocket): void {
+    if (this.ingestWebSocketsByStream[connectionRole] === server) {
+      this.ingestWebSocketsByStream[connectionRole] = null;
+    }
+  }
+
+  /** A2: push a realtime transcript frame down to the Desktop client for a stream.
+   *  Best-effort: silently drops if the socket is missing or not open. */
+  broadcastTranscriptFrame(
+    streamRole: StreamRole,
+    speaker: string | null,
+    text: string,
+    isFinal: boolean,
+    startMs: number,
+    endMs: number
+  ): void {
+    const socket = this.ingestWebSocketsByStream[streamRole];
+    if (!socket) return;
+    // CF WebSocket OPEN === 1; guard against sending on a closing/closed socket.
+    if (typeof socket.readyState === "number" && socket.readyState !== 1) return;
+    try {
+      this.sendWsJson(socket, buildTranscriptFrame(streamRole, speaker, text, isFinal, startMs, endMs));
+    } catch {
+      // Socket closed between the readyState check and send; drop the frame.
+    }
+  }
+
   private asrEnabled(): boolean {
     return isAsrEnabledFn(this.env);
   }
@@ -1137,6 +1178,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       updateUnassignedEnrollmentByCluster: (s, c, d) => this.updateUnassignedEnrollmentByCluster(s, c, d),
       participantProgressFromProfiles: (s) => this.participantProgressFromProfiles(s),
       refreshEnrollmentMode: (s) => this.refreshEnrollmentMode(s),
+      broadcastTranscriptFrame: (role, speaker, text, isFinal, startMs, endMs) =>
+        this.broadcastTranscriptFrame(role, speaker, text, isFinal, startMs, endMs),
     };
   }
 

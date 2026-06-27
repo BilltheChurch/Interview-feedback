@@ -92,7 +92,12 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 
 ### Phase A — P0：云端可用闭环（用户零部署 + 实时转写 + 能出报告）
 - [ ] A1 新增 Speechmatics 实时 provider（DO outbound WS / 每声道 / diarization=speaker / language=en|cmn_en）
-- [ ] A2 Worker→Desktop 转写下行协议 + Desktop 入站处理 + `transcriptSegments[]` 持久化
+- [x] A2 Worker→Desktop 转写下行协议 + Desktop 入站处理 + `transcriptSegments[]` 持久化
+  - ✅ Worker 下行:DO 新增 `ingestWebSocketsByStream` 存 server socket（`setupWebSocketPair` accept 后 `registerIngestSocket`、close 时 `unregisterIngestSocket`）；`broadcastTranscriptFrame` 用纯函数 `buildTranscriptFrame`（asr-helpers.ts）按 `{type:'transcript',role,speaker,text,is_final,ts_ms,start_ms,words}` 推送；`emitRealtimeUtterance` 存完 utterance 后广播（teacher 解析面试官名，students 暂 null）
+  - ✅ Desktop 入站:`WebSocketService` onmessage 处理 `type==='transcript'` → `appendTranscriptSegment`
+  - ✅ 持久化:sessionStore 新增 `TranscriptSegment`/`transcriptSegments[]`/`appendTranscriptSegment`（上限 1000）；纳入 `PersistedSession` + `restoreSession` + 自动保存快照（reload/crash/PiP 不丢）
+  - ✅ 测试:Worker tests/transcript-frame.test.ts（契约 4 例）+ Desktop sessionStore A2（3 例）；Worker 478 / Desktop 241 全绿，tsc 双绿
+  - ⏳ 跟进:partial（is_final=false）下行待 Speechmatics `enable_partials` 落地后接入（当前 DashScope 实时路径只发 final）；B5 CaptionPanel 改由 transcriptSegments 驱动属 Phase B
 - [x] A3 修 Desktop base URL 配置（`VITE_EDGE_BASE_URL` / 经 IPC 读 `API_BASE_URL`）+ `VITE_WORKER_API_KEY`
   - ✅ 新增 `config:getEdgeBaseUrl` IPC（main.js 读 `API_BASE_URL || WORKER_BASE_URL`）+ preload 暴露 + `desktop-api.d.ts` 类型 + `SetupView` 经 IPC 解析 `baseApiUrl`（回退 `import.meta.env.VITE_EDGE_BASE_URL`）
   - ✅ API key 链路已确认：`WebSocketService.getApiKey()` 先走 `getWorkerApiKey` IPC（main.js 读 `WORKER_API_KEY`）再回退 `VITE_WORKER_API_KEY`；WS 首帧 `{type:'auth',key}` + HTTP `x-api-key` 头均依赖此值

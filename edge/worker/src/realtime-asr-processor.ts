@@ -104,6 +104,15 @@ export interface RealtimeAsrContext {
   updateUnassignedEnrollmentByCluster: (state: SessionState, clusterId: string | null | undefined, durationSeconds: number) => void;
   participantProgressFromProfiles: (state: SessionState) => Record<string, EnrollmentParticipantProgress>;
   refreshEnrollmentMode: (state: SessionState) => void;
+  /** A2: push a realtime transcript frame to the Desktop ingest socket (downlink). */
+  broadcastTranscriptFrame: (
+    streamRole: StreamRole,
+    speaker: string | null,
+    text: string,
+    isFinal: boolean,
+    startMs: number,
+    endMs: number
+  ) => void;
 }
 
 // ── currentRealtimeWsState ─────────────────────────────────────────────────
@@ -557,6 +566,22 @@ export async function emitRealtimeUtterance(
   utterances.push(utterance);
   utterancesByStream[streamRole] = utterances;
   await ctx.storeUtterancesRawByStream(utterancesByStream);
+
+  // A2: push the realtime transcript frame down to the Desktop client. teacher →
+  // resolve the interviewer identity; students → diarization label is not available
+  // on the DashScope realtime path yet (speaker stays null until Speechmatics lands).
+  let broadcastSpeaker: string | null = null;
+  if (streamRole === "teacher") {
+    try {
+      const state = normalizeSessionState(
+        await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE)
+      );
+      broadcastSpeaker = resolveTeacherIdentityFn(state, utterance.text).speakerName;
+    } catch {
+      broadcastSpeaker = null;
+    }
+  }
+  ctx.broadcastTranscriptFrame(streamRole, broadcastSpeaker, utterance.text, true, startMs, endMs);
 
   const mergedByStream = await ctx.loadUtterancesMergedByStream();
   mergedByStream[streamRole] = mergeUtterances(utterances);
