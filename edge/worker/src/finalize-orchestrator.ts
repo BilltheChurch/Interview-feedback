@@ -1628,7 +1628,13 @@ export async function triggerImprovementGenerationImpl(
   resultV2Key: string,
   ctx: ImprovementContext
 ): Promise<void> {
-  const inferenceBase = (ctx.env.INFERENCE_BASE_URL ?? "").trim() || "http://127.0.0.1:8000";
+  // A4/§2.1 bug#3: no silent localhost fallback. Improvements are optional post-report
+  // enhancement — skip gracefully if inference is not configured.
+  const inferenceBase = (ctx.env.INFERENCE_BASE_URL ?? "").trim();
+  if (!inferenceBase) {
+    log("warn", "improvements: INFERENCE_BASE_URL unset — skipping improvement generation (no localhost fallback)", { component: "finalize-v2", sessionId });
+    return;
+  }
   const apiKey = (ctx.env.INFERENCE_API_KEY ?? "").trim();
 
   const sessionContext = (await ctx.doCtx.storage.get("session_context")) as SessionContextMeta | undefined;

@@ -124,9 +124,13 @@ export async function runIncrementalJob(sessionId: string, ctx: IncrementalConte
     const state = normalizeSessionState(await storage.get(STORAGE_KEY_STATE));
     const locale = getSessionLocale(state, env);
 
-    const inferenceBase = (
-      (env.INFERENCE_BASE_URL ?? env.INFERENCE_BASE_URL_PRIMARY ?? "")
-    ).trim() || "http://127.0.0.1:8000";
+    // A4/§2.1 bug#3: no silent localhost fallback — require explicit config, fail loudly.
+    const inferenceBase = (env.INFERENCE_BASE_URL ?? env.INFERENCE_BASE_URL_PRIMARY ?? "").trim();
+    if (!inferenceBase) {
+      throw new Error(
+        "INFERENCE_BASE_URL/INFERENCE_BASE_URL_PRIMARY required for incremental process-chunk (no localhost fallback)"
+      );
+    }
     const apiKey = ((env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
 
     const incrementId = crypto.randomUUID();
@@ -287,9 +291,13 @@ export async function runIncrementalFinalize(
       return false;
     }
 
-    const inferenceBase = (
-      (env.INFERENCE_BASE_URL ?? env.INFERENCE_BASE_URL_PRIMARY ?? "")
-    ).trim() || "http://127.0.0.1:8000";
+    // A4/§2.1 bug#3: no silent localhost fallback — degrade gracefully if unconfigured.
+    const inferenceBase = (env.INFERENCE_BASE_URL ?? env.INFERENCE_BASE_URL_PRIMARY ?? "").trim();
+    if (!inferenceBase) {
+      log("warn", "incremental: INFERENCE_BASE_URL unset — skipping finalize (no localhost fallback)", { sessionId, action: "incremental_finalize" });
+      await updateIncrementalStatus({ status: "failed", error: "inference base url not configured" });
+      return false;
+    }
     const apiKey = ((env as unknown as Record<string, string | undefined>).INFERENCE_API_KEY ?? "").trim();
 
     const r2AudioRefs: Array<{ key: string; startMs: number; endMs: number }> = allChunkKeys.map((key) => {

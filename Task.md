@@ -103,7 +103,9 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - ✅ API key 链路已确认：`WebSocketService.getApiKey()` 先走 `getWorkerApiKey` IPC（main.js 读 `WORKER_API_KEY`）再回退 `VITE_WORKER_API_KEY`；WS 首帧 `{type:'auth',key}` + HTTP `x-api-key` 头均依赖此值
   - ✅ 配置补齐：`API_BASE_URL=https://api.frontierace.ai` 与 `WORKER_API_KEY`（dev 值，须与生产 secret 一致）已入 `.env`；`.env.example` 补 `WORKER_API_KEY` 文档占位
   - ✅ 验证：`tsc --noEmit` exit 0 / `vite build` 2559 模块成功 / main.js·preload.js `node --check` 通过；顺手清除 main.js 遗留 `[DEBUG]` 日志，CSP 头补 Google Fonts 白名单（与 index.html meta CSP 对齐）
-- [ ] A4 删 4 处 `127.0.0.1:8000` fallback + `wrangler.jsonc` 云端化（ASR_PROVIDER=speechmatics, 删 inference localhost, 加 SPEECHMATICS_API_KEY secret）
+- [~] A4 删 4 处 `127.0.0.1:8000` fallback + `wrangler.jsonc` 云端化（ASR_PROVIDER=speechmatics, 删 inference localhost, 加 SPEECHMATICS_API_KEY secret）
+  - ✅ A4.1 删 4 处代码 localhost fallback → fail-fast（§2.1 bug#3）:realtime-asr-processor(local-whisper)、incremental-processor×2、finalize-orchestrator(improvements)。配置缺失时抛错/优雅跳过，不再静默连 localhost。worker 487 全绿
+  - ⏳ wrangler.jsonc 云端化（ASR_PROVIDER→speechmatics、删 INFERENCE_* localhost、加 SPEECHMATICS_API_KEY secret）**deferred**:翻转 ASR_PROVIDER 依赖 A1 验证通过（无 key 会搞挂现有 DashScope 实时）；需可部署环境验证。当前保留 DashScope 实时路径不动（§9.2 迁移期 fallback）
 - [ ] A5 LLM 合成移入 Worker（移植 `report_synthesizer.py`）+ finalize 摘除 inference 依赖 + 删 `local_asr` 阶段
 
 ### Phase B — P1：Granola 交付物 + 说话人命名 + 质量

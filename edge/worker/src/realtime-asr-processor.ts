@@ -311,8 +311,13 @@ export function getAsrProvider(ctx: RealtimeAsrContext): "funASR" | "local-whisp
   if (provider === "local-whisper") {
     let lw = ctx.getLocalWhisperProvider();
     if (!lw) {
-      const endpoint =
-        ctx.env.ASR_ENDPOINT ?? ctx.env.INFERENCE_BASE_URL_PRIMARY ?? "http://127.0.0.1:8000";
+      // A4/§2.1 bug#3: no silent localhost fallback — require explicit config, fail loudly.
+      const endpoint = (ctx.env.ASR_ENDPOINT ?? ctx.env.INFERENCE_BASE_URL_PRIMARY ?? "").trim();
+      if (!endpoint) {
+        throw new Error(
+          "local-whisper ASR requires ASR_ENDPOINT or INFERENCE_BASE_URL_PRIMARY (no localhost fallback)"
+        );
+      }
       lw = new LocalWhisperASRProvider({
         endpoint,
         language: ctx.env.ASR_LANGUAGE ?? "auto",
