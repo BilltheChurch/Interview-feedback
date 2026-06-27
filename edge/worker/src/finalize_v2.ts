@@ -15,6 +15,7 @@ import type {
   SpeakerStatItem,
   SynthesizeRequestPayload,
 } from "./types_v2";
+import { cleanTranscript } from "./transcript-cleaner";
 
 export interface TranscriptItem {
   utterance_id: string;
@@ -1712,7 +1713,27 @@ export function buildResultV2(params: {
     blocking_reason?: string | null;
   };
   qualityGateFailures?: string[];
+  /** B1/§4.3 Granola deliverables. cleaned_transcript defaults to a deterministic
+   *  clean of `transcript` (no LLM) when not explicitly provided; summary and
+   *  personalizedMemo are supplied by the LLM synthesis stage (A5) when available. */
+  cleanedTranscript?: ResultV2["cleaned_transcript"];
+  summary?: string;
+  personalizedMemo?: string;
 }): ResultV2 {
+  // Deterministic cleaned_transcript (design §9.3.1: never via LLM). Computed from the
+  // reconciled transcript so every report carries it, independent of LLM availability.
+  const cleanedTranscript =
+    params.cleanedTranscript ??
+    cleanTranscript(
+      params.transcript.map((t) => ({
+        utterance_id: t.utterance_id,
+        stream_role: t.stream_role,
+        speaker_name: t.speaker_name ?? null,
+        text: t.text,
+        start_ms: t.start_ms,
+        end_ms: t.end_ms,
+      }))
+    );
   return {
     session: {
       session_id: params.sessionId,
@@ -1730,6 +1751,9 @@ export function buildResultV2(params: {
     evidence: params.evidence,
     overall: params.overall as OverallFeedback,
     per_person: params.perPerson,
+    cleaned_transcript: cleanedTranscript,
+    ...(params.summary !== undefined ? { summary: params.summary } : {}),
+    ...(params.personalizedMemo !== undefined ? { personalized_memo: params.personalizedMemo } : {}),
     quality: params.quality,
     trace: {
       finalize_job_id: params.finalizeJobId,

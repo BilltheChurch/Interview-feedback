@@ -269,6 +269,19 @@ export interface ResultV2 {
   evidence: EvidenceItem[];
   overall: OverallFeedback;
   per_person: PersonFeedbackItem[];
+  /** B1/§4.3 Granola deliverables. cleaned_transcript is DETERMINISTIC (no LLM,
+   *  §9.3.1); summary + personalized_memo come from LLM synthesis (A5). All optional
+   *  so older/degraded reports remain valid. */
+  cleaned_transcript?: Array<{
+    utterance_id: string;
+    stream_role: StreamRole;
+    speaker_name: string | null;
+    text: string;
+    start_ms: number;
+    end_ms: number;
+  }>;
+  summary?: string;
+  personalized_memo?: string;
   quality: ReportQualityMeta;
   improvements?: ImprovementReport;
   trace: {
@@ -399,6 +412,13 @@ export interface SynthesizeRequestPayload {
   locale: string;
   name_aliases?: Record<string, string[]>;
   stats_observations?: string[];
+  /** B1/§4.3 deliverable control flags. Default true when omitted. `deliverable`
+   *  gates whether memo/transcript are delivered independent of scorecard gating;
+   *  `personalize_to_notes` uses user notes/marks as personalization signal. */
+  deliverable?: boolean;
+  want_summary?: boolean;
+  want_cleaned_transcript?: boolean;
+  personalize_to_notes?: boolean;
 }
 
 // ── Incremental Checkpoint Types ────────────────────────────────────────

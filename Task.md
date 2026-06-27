@@ -107,7 +107,11 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [ ] A5 LLM 合成移入 Worker（移植 `report_synthesizer.py`）+ finalize 摘除 inference 依赖 + 删 `local_asr` 阶段
 
 ### Phase B — P1：Granola 交付物 + 说话人命名 + 质量
-- [ ] B1 `ResultV2`/合成 contract 新增 `cleaned_transcript`/`summary`/`personalized_memo`（一次性交付）
+- [~] B1 `ResultV2`/合成 contract 新增 `cleaned_transcript`/`summary`/`personalized_memo`（一次性交付）
+  - ✅ 类型:`ResultV2` 加 `cleaned_transcript`/`summary`/`personalized_memo`（均可选）；`SynthesizeRequestPayload` 加 `deliverable`/`want_summary`/`want_cleaned_transcript`/`personalize_to_notes`
+  - ✅ 确定性逐字稿:新增 `transcript-cleaner.ts`（§9.3.1 不过 LLM，仅去 filler `um/uh/嗯/呃…` + 规整空格，保守不误伤 `like/you know/就是`）；`buildResultV2` 默认对每份报告生成 `cleaned_transcript`
+  - ✅ 测试:`tests/transcript-cleaner.test.ts`（9 例），worker 487 全绿
+  - ⏳ `summary`/`personalized_memo` 由 A5 LLM 合成填充（buildResultV2 已留 `summary`/`personalizedMemo` 入参）
 - [ ] B2 note/mark 精确锚点（`anchor.time_ms`）+ 作为个性化信号
 - [ ] B3 diarization 标签 → 候选人命名（Speechmatics 命名声纹 enrollment 或复用手动映射 UI）
 - [ ] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦
