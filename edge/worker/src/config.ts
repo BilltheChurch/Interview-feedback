@@ -339,7 +339,7 @@ export interface UtteranceRaw {
   end_ms: number;
   duration_ms: number;
   asr_model: string;
-  asr_provider: "dashscope" | "local-whisper";
+  asr_provider: "dashscope" | "local-whisper" | "speechmatics";
   confidence?: number | null;
   created_at: string;
   latency_ms: number;
@@ -356,7 +356,7 @@ export interface UtteranceMerged {
   end_ms: number;
   duration_ms: number;
   asr_model: string;
-  asr_provider: "dashscope" | "local-whisper";
+  asr_provider: "dashscope" | "local-whisper" | "speechmatics";
   created_at: string;
   source_utterance_ids: string[];
 }
@@ -519,6 +519,7 @@ export interface Env {
   ALIYUN_DASHSCOPE_API_KEY?: string;
   SPEECHMATICS_API_KEY?: string;
   SPEECHMATICS_WS_URL?: string;
+  SPEECHMATICS_LANGUAGE?: string;
   ASR_ENABLED?: string;
   ASR_MODEL?: string;
   ASR_WS_URL?: string;

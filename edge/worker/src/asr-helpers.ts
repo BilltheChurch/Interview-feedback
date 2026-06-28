@@ -67,6 +67,7 @@ export interface AsrEnvConfig {
   ASR_HOP_SECONDS?: string;
   ASR_DEBUG_LOG_EVENTS?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
+  SPEECHMATICS_API_KEY?: string;
   INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
 }
 
@@ -83,6 +84,8 @@ export function isAsrEnabled(env: AsrEnvConfig): boolean {
   // local-whisper uses the inference service, not DashScope — no API key needed
   const provider = (env.ASR_PROVIDER ?? "funASR").toLowerCase();
   if (provider === "local-whisper") return true;
+  // Speechmatics realtime requires its own key, not the DashScope one.
+  if (provider === "speechmatics") return Boolean((env.SPEECHMATICS_API_KEY ?? "").trim());
   return Boolean((env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim());
 }
 

@@ -9,6 +9,14 @@
  */
 
 import { runFunAsrDashScope as runFunAsrDashScopeFn } from "./dashscope-asr";
+import {
+  openSpeechmaticsSocket,
+  buildStartRecognition,
+  buildEndOfStream,
+  parseSpeechmaticsMessage,
+  DEFAULT_SPEECHMATICS_CONFIG,
+  type SpeechmaticsTranscript,
+} from "./speechmatics-asr";
 import { InferenceRequestError } from "./inference_client";
 import type { InferenceCallContext } from "./inference-helpers";
 import { invokeInferenceResolve as invokeInferenceResolveFn } from "./inference-helpers";
@@ -176,21 +184,27 @@ export async function closeRealtimeAsrSession(
 
   if (ws) {
     try {
-      if (runtime.taskId && gracefulFinish) {
-        ws.send(
-          JSON.stringify({
-            header: {
-              action: "finish-task",
-              task_id: runtime.taskId,
-              streaming: "duplex",
-            },
-            payload: { input: {} },
-          })
-        );
-        await sleep(1000);
+      if (gracefulFinish) {
+        if (realtimeProvider(ctx) === "speechmatics") {
+          // Speechmatics: signal end-of-stream so it flushes the final transcript.
+          ws.send(JSON.stringify(buildEndOfStream(runtime.lastSentSeq)));
+          await sleep(1000);
+        } else if (runtime.taskId) {
+          ws.send(
+            JSON.stringify({
+              header: {
+                action: "finish-task",
+                task_id: runtime.taskId,
+                streaming: "duplex",
+              },
+              payload: { input: {} },
+            })
+          );
+          await sleep(1000);
+        }
       }
     } catch {
-      // ignore finish-task errors during close
+      // ignore finish errors during close
     }
     try {
       ws.close(1000, reason.slice(0, WS_CLOSE_REASON_MAX_LEN));
@@ -531,7 +545,8 @@ export async function emitRealtimeUtterance(
   sessionId: string,
   streamRole: StreamRole,
   text: string,
-  ctx: RealtimeAsrContext
+  ctx: RealtimeAsrContext,
+  speakerOverride: string | null = null
 ): Promise<void> {
   const runtime = ctx.asrRealtimeByStream[streamRole];
   const endSeq = Math.max(runtime.lastSentSeq, runtime.currentStartSeq ?? runtime.lastSentSeq);
@@ -563,7 +578,7 @@ export async function emitRealtimeUtterance(
     end_ms: endMs,
     duration_ms: endMs - startMs,
     asr_model: asrState.model,
-    asr_provider: "dashscope",
+    asr_provider: realtimeProvider(ctx),
     confidence: null,
     created_at: createdAt,
     latency_ms: latencyMs,
@@ -575,8 +590,8 @@ export async function emitRealtimeUtterance(
   // A2: push the realtime transcript frame down to the Desktop client. teacher →
   // resolve the interviewer identity; students → diarization label is not available
   // on the DashScope realtime path yet (speaker stays null until Speechmatics lands).
-  let broadcastSpeaker: string | null = null;
-  if (streamRole === "teacher") {
+  let broadcastSpeaker: string | null = speakerOverride;
+  if (broadcastSpeaker === null && streamRole === "teacher") {
     try {
       const state = normalizeSessionState(
         await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE)
@@ -699,6 +714,9 @@ export async function handleRealtimeAsrMessage(
   data: string | ArrayBuffer | ArrayBufferView,
   ctx: RealtimeAsrContext
 ): Promise<void> {
+  if (realtimeProvider(ctx) === "speechmatics") {
+    return handleSpeechmaticsMessage(sessionId, streamRole, data, ctx);
+  }
   if (typeof data !== "string") return;
 
   let payload: unknown;
@@ -789,6 +807,160 @@ export async function handleRealtimeAsrMessage(
   await emitRealtimeUtterance(sessionId, streamRole, text, ctx);
 }
 
+// ── Speechmatics realtime (A1b) ────────────────────────────────────────────
+
+/** Which provider the REALTIME path uses. Default dashscope (unchanged) unless
+ *  ASR_PROVIDER=speechmatics. The finalize/windowed path still uses getAsrProvider(). */
+export function realtimeProvider(ctx: RealtimeAsrContext): "dashscope" | "speechmatics" {
+  return (ctx.env.ASR_PROVIDER ?? "").toLowerCase() === "speechmatics" ? "speechmatics" : "dashscope";
+}
+
+/** Pick the diarization speaker label that owns the most words in a transcript. */
+function dominantSpeaker(t: SpeechmaticsTranscript): string | null {
+  const counts = new Map<string, number>();
+  for (const w of t.words) {
+    if (w.is_punctuation || !w.speaker) continue;
+    counts.set(w.speaker, (counts.get(w.speaker) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let bestN = 0;
+  for (const [spk, n] of counts) {
+    if (n > bestN) { best = spk; bestN = n; }
+  }
+  return best;
+}
+
+/**
+ * Open + maintain a Speechmatics realtime connection for a stream (A1b). Mirrors the
+ * DashScope connect flow: open WS → send StartRecognition → resolve readyPromise on
+ * RecognitionStarted (in handleSpeechmaticsMessage) → replay any R2 gap. The shared
+ * drain/queue/reconnect/backpressure infrastructure (drainRealtimeQueue) sends raw PCM
+ * frames, which Speechmatics accepts directly.
+ */
+async function connectSpeechmaticsRealtime(
+  sessionId: string,
+  streamRole: StreamRole,
+  ctx: RealtimeAsrContext
+): Promise<void> {
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+  const ws = await openSpeechmaticsSocket(ctx.env);
+  ws.accept();
+
+  runtime.ws = ws;
+  runtime.connected = true;
+  runtime.running = false;
+  runtime.startedAt = Date.now();
+  runtime.taskId = null; // Speechmatics has no task id; null marks the non-DashScope path.
+  runtime.readyPromise = new Promise<void>((resolve, reject) => {
+    runtime.readyResolve = resolve;
+    runtime.readyReject = reject;
+  });
+
+  ws.addEventListener("message", (event) => {
+    ctx.doCtx.waitUntil(
+      handleRealtimeAsrMessage(sessionId, streamRole, event.data, ctx).catch(async (error) => {
+        log("error", "asr realtime message handler failed", {
+          component: "asr", stream_role: streamRole, error: getErrorMessage(error),
+        });
+        await refreshAsrStreamMetrics(sessionId, streamRole, ctx, {
+          asr_ws_state: "error", last_error: getErrorMessage(error),
+        });
+      })
+    );
+  });
+  ws.addEventListener("error", () => {
+    ctx.doCtx.waitUntil(
+      refreshAsrStreamMetrics(sessionId, streamRole, ctx, {
+        asr_ws_state: "error", last_error: "speechmatics websocket error",
+      })
+    );
+  });
+  ws.addEventListener("close", () => {
+    runtime.connected = false;
+    runtime.running = false;
+    runtime.ws = null;
+    runtime.taskId = null;
+    runtime.readyPromise = null;
+    runtime.readyResolve = null;
+    runtime.readyReject = null;
+    ctx.doCtx.waitUntil(refreshAsrStreamMetrics(sessionId, streamRole, ctx));
+  });
+
+  // teacher = single speaker → diarization off (§9.3.4); students → diarization on.
+  const language = (ctx.env.SPEECHMATICS_LANGUAGE ?? "cmn_en").trim() || "cmn_en";
+  ws.send(JSON.stringify(buildStartRecognition({
+    ...DEFAULT_SPEECHMATICS_CONFIG,
+    language,
+    diarization: streamRole === "students",
+    sampleRate: TARGET_SAMPLE_RATE,
+  })));
+
+  const timeoutMs = parseTimeoutMs(ctx.env.ASR_TIMEOUT_MS ?? "45000");
+  const startedTimeout = setTimeout(() => {
+    runtime.readyReject?.(new Error("speechmatics RecognitionStarted timeout"));
+  }, Math.min(timeoutMs, DASHSCOPE_TIMEOUT_CAP_MS));
+
+  await runtime.readyPromise;
+  clearTimeout(startedTimeout);
+  runtime.reconnectBackoffMs = 500;
+  await replayGapFromR2(sessionId, streamRole, ctx);
+  await refreshAsrStreamMetrics(sessionId, streamRole, ctx, {
+    asr_ws_state: "running", last_error: null,
+  });
+}
+
+/** Handle a Speechmatics realtime message: ready signal, transcripts, errors. */
+async function handleSpeechmaticsMessage(
+  sessionId: string,
+  streamRole: StreamRole,
+  data: string | ArrayBuffer | ArrayBufferView,
+  ctx: RealtimeAsrContext
+): Promise<void> {
+  if (typeof data !== "string") return;
+  const msg = parseSpeechmaticsMessage(data);
+  if (!msg) return;
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+
+  if (msg.type === "RecognitionStarted") {
+    runtime.running = true;
+    runtime.readyResolve?.();
+    runtime.readyResolve = null;
+    runtime.readyReject = null;
+    await refreshAsrStreamMetrics(sessionId, streamRole, ctx, { asr_ws_state: "running", last_error: null });
+    return;
+  }
+
+  if (msg.type === "Error") {
+    runtime.readyReject?.(new Error(msg.reason));
+    runtime.readyResolve = null;
+    runtime.readyReject = null;
+    await refreshAsrStreamMetrics(sessionId, streamRole, ctx, { asr_ws_state: "error", last_error: msg.reason });
+    return;
+  }
+
+  if (msg.type !== "Transcript") return;       // AudioAdded / EndOfTranscript / Warning / Unknown
+  const t = msg.transcript;
+  if (t.is_partial) return;                     // MVP: emit on finals only
+  const text = t.text.trim();
+  if (!text) return;
+
+  const normalized = normalizeTextForMerge(text);
+  if (normalized && normalized === runtime.lastFinalTextNorm) return;
+  runtime.lastFinalTextNorm = normalized;
+
+  // Map word timestamps → chunk seq so emit's seq-based timing stays consistent.
+  if (t.start_ms >= 0 && t.end_ms >= t.start_ms) {
+    const startSeq = Math.max(1, Math.floor(t.start_ms / 1000) + 1);
+    const inferredEndSeq = Math.max(startSeq, Math.ceil(t.end_ms / 1000));
+    runtime.currentStartSeq = startSeq;
+    runtime.lastSentSeq = Math.max(runtime.lastSentSeq, inferredEndSeq);
+  }
+
+  // students → carry the Speechmatics diarization label (S1/S2…); teacher → resolved in emit.
+  const speaker = streamRole === "students" ? dominantSpeaker(t) : null;
+  await emitRealtimeUtterance(sessionId, streamRole, text, ctx, speaker);
+}
+
 // ── ensureRealtimeAsrConnected ─────────────────────────────────────────────
 
 export async function ensureRealtimeAsrConnected(
@@ -804,6 +976,13 @@ export async function ensureRealtimeAsrConnected(
   runtime.connectPromise = (async () => {
     runtime.connecting = true;
     await refreshAsrStreamMetrics(sessionId, streamRole, ctx);
+
+    // A1b: realtime provider dispatch. Default stays DashScope (unchanged below);
+    // ASR_PROVIDER=speechmatics routes to the Speechmatics outbound WS instead.
+    if (realtimeProvider(ctx) === "speechmatics") {
+      await connectSpeechmaticsRealtime(sessionId, streamRole, ctx);
+      return;
+    }
 
     const apiKey = (ctx.env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim();
     if (!apiKey) throw new Error("ALIYUN_DASHSCOPE_API_KEY is missing");
