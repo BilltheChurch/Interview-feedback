@@ -91,7 +91,9 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 > 详见 `docs/plans/2026-06-27-cloud-companion-speechmatics-architecture.md`
 
 ### Phase A — P0：云端可用闭环（用户零部署 + 实时转写 + 能出报告）
-- [ ] A1 新增 Speechmatics 实时 provider（DO outbound WS / 每声道 / diarization=speaker / language=en|cmn_en）
+- [~] A1 新增 Speechmatics 实时 provider（DO outbound WS / 每声道 / diarization=speaker / language=en|cmn_en）
+  - ✅ A1a 协议纯模块 `speechmatics-asr.ts`:`buildStartRecognition`(diarization 可关——teacher 声道 §9.3.4)/`buildEndOfStream`/`parseSpeechmaticsMessage`(解析 AddTranscript→words[].speaker+词级时间戳+文本重建,标点不带前空格)/`openSpeechmaticsSocket`(CF fetch-upgrade 出站 WS,Bearer 鉴权)。`Env` 加 `SPEECHMATICS_API_KEY`/`SPEECHMATICS_WS_URL`。基于**实测验证过的真实消息结构**。测试 10 例,worker 497 全绿
+  - ⏳ A1b dispatch 接线:`getAsrProvider`/`ensureRealtimeAsrConnected` 支持 speechmatics(`ASR_PROVIDER` 选择,flag 默认仍 dashscope 可回滚)+ 持久流/静音保活(§9.3.6)/R2-replay 重连/背压(§9.3.8)+ 把 parsed transcript 接到 `emitRealtimeUtterance`/广播(students 用 S 标签)
 - [x] A2 Worker→Desktop 转写下行协议 + Desktop 入站处理 + `transcriptSegments[]` 持久化
   - ✅ Worker 下行:DO 新增 `ingestWebSocketsByStream` 存 server socket（`setupWebSocketPair` accept 后 `registerIngestSocket`、close 时 `unregisterIngestSocket`）；`broadcastTranscriptFrame` 用纯函数 `buildTranscriptFrame`（asr-helpers.ts）按 `{type:'transcript',role,speaker,text,is_final,ts_ms,start_ms,words}` 推送；`emitRealtimeUtterance` 存完 utterance 后广播（teacher 解析面试官名，students 暂 null）
   - ✅ Desktop 入站:`WebSocketService` onmessage 处理 `type==='transcript'` → `appendTranscriptSegment`

@@ -517,6 +517,8 @@ export interface Env {
   INFERENCE_EXTRACT_EMBEDDING_PATH?: string;
   INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
+  SPEECHMATICS_API_KEY?: string;
+  SPEECHMATICS_WS_URL?: string;
   ASR_ENABLED?: string;
   ASR_MODEL?: string;
   ASR_WS_URL?: string;
