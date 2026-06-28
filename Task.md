@@ -125,11 +125,13 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [ ] C3 归档 `inference/` + 退役 `if.frontierace.ai` tunnel
 
 ### Phase A 前置验证门（删 inference 前必须通过 pilot，需 Speechmatics key）
-- [ ] cmn_en + 实时 + diarization=speaker 三者同时可用且返回每词 speaker（官方无矩阵，必须实测）
-- [ ] 真实 3–4 人群面**重叠音频**的 diarization 错误率（DER/误切换率）达标
-- [ ] 实时免费/付费**并发额度**与确切单价（portal 实测；注意每场=2路流）
-- [ ] CF DO **持久双出站 WS + 静音保活 + 重连** 实跑验证（dashscope-asr.ts 是短连，不能作证）
-- [ ] 16000Hz sample_rate 被 Speechmatics 接受
+> **2026-06-27 实测**（`scripts/speechmatics_rt_validate.mjs`，真实 Speechmatics key + 真实样本）
+- [x] cmn_en + 实时 + diarization=speaker 三者同时可用且返回每词 speaker（官方无矩阵，必须实测）✅ language_pack="English and Mandarin"；alice+bob→S1/S2 切换点 6.11s≈拼接边界 6.0s；每词带 speaker+词级时间戳；三者同会话共存
+- [~] 真实 3–4 人群面**重叠音频**的 diarization 错误率（DER/误切换率）达标 —— 顺序双人正确;**重叠场景仍需真实群面音频 pilot**
+- [ ] 实时免费/付费**并发额度**与确切单价（portal 实测；注意每场=2路流）—— 账户实时用量当前为空,需 portal 查
+- [ ] CF DO **持久双出站 WS + 静音保活 + 重连** 实跑验证（dashscope-asr.ts 是短连，不能作证）—— 待 A1 实现 + 部署
+- [x] 16000Hz sample_rate 被 Speechmatics 接受 ✅
+- 备注:cmn_en 下英文 ASR 正常("History and belonging…passionate");en/zh 3s 短样本转写为空(样本质量),中文 ASR 质量待真实样本验证
 
 > 注：v2 强制调整已并入下方 A/B/C（详见设计文档 §9）：A5 改为"逐字稿确定性清洗 + LLM 只做总结/memo/打分"；A1 含 teacher 声道关 diarization + 静音保活帧 + R2-replay 重连；删 global-cluster 前先在 B3 把 /cluster-map 改接 S 标签；inference 移植按真实规模(~2.4k 行跨4服务)拆分并补 TS 回归测试。
 
