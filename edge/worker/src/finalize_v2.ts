@@ -777,20 +777,35 @@ export function addStageMetadata(
   });
 }
 
+/** Resolve the unknown-ratio quality gate threshold from env (default 0.25). */
+export function resolveUnknownRatioThreshold(raw: string | undefined): number {
+  // Treat unset/empty as "use default" — Number("") is 0, which would wrongly mean
+  // "any unknown speech fails the gate".
+  if (raw === undefined || raw.trim() === "") return 0.25;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : 0.25;
+}
+
 export function enforceQualityGates(params: {
   perPerson: PersonFeedbackItem[];
   unknownRatio: number;
+  /** B4: env-configurable threshold (default 0.25). */
+  unknownRatioThreshold?: number;
 }): {
   passed: boolean;
   failures: string[];
   tentative: boolean;
 } {
   const failures: string[] = [];
+  const threshold =
+    typeof params.unknownRatioThreshold === "number" && params.unknownRatioThreshold >= 0
+      ? params.unknownRatioThreshold
+      : 0.25;
 
-  // Gate 1: Unknown speaker ratio must be <= 25%
-  if (params.unknownRatio > 0.25) {
+  // Gate 1: Unknown speaker ratio must be <= threshold
+  if (params.unknownRatio > threshold) {
     failures.push(
-      `unknown_ratio ${(params.unknownRatio * 100).toFixed(1)}% > 25%`
+      `unknown_ratio ${(params.unknownRatio * 100).toFixed(1)}% > ${(threshold * 100).toFixed(1)}%`
     );
   }
 

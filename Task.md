@@ -123,7 +123,9 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - ✅ 测试:transcript-cleaner 9 例 + llm-synthesizer 27 例,worker 524 全绿,tsc 绿
 - [ ] B2 note/mark 精确锚点（`anchor.time_ms`）+ 作为个性化信号
 - [ ] B3 diarization 标签 → 候选人命名（Speechmatics 命名声纹 enrollment 或复用手动映射 UI）
-- [ ] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦
+- [~] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦
+  - ✅ Part1 阈值 env 化:`enforceQualityGates` 加 `unknownRatioThreshold`(默认 0.25),两处调用从 `env.QUALITY_GATE_UNKNOWN_RATIO` 读取(新 `resolveUnknownRatioThreshold`,空/越界→默认)。测试 5 例(顺手修了 `Number("")===0` 导致空 env→阈值0 的 bug)。worker 529 全绿
+  - ⏳ Part2 交付解耦:cleaned_transcript/summary/personalized_memo 已随 resultV2 持久化(不被门禁拦截存储);真正的"tentative 也照展示纪要/逐字稿"属 Desktop 展示侧(读 cache 时即使 ready=false 也渲染 deliverables）——留作 Desktop 跟进
 - [x] B5 通用实时字幕面板（`CaptionPanel` 由 `transcriptSegments` 驱动，覆盖非 Teams 会议）
   - ✅ CaptionPanel 统一字幕源:ACS captions 优先,否则把 `transcriptSegments`(A2 下行)映射成 caption 显示;渲染条件改为"ACS off 且无转写才隐藏";speaker 用 S 标签/回退 Interviewer/Candidate。SidecarView 传入 `transcriptSegments`。desktop tsc + 241 测试绿（UI glue,无新增单测）
 

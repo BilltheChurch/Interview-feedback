@@ -524,6 +524,8 @@ export interface Env {
    *  back to the legacy inference /analysis/synthesize path. */
   REPORT_SYNTHESIS_MODE?: string;
   LLM_MODEL?: string;
+  /** B4: unknown-speaker-ratio quality gate threshold (0..1, default 0.25). */
+  QUALITY_GATE_UNKNOWN_RATIO?: string;
   ASR_ENABLED?: string;
   ASR_MODEL?: string;
   ASR_WS_URL?: string;

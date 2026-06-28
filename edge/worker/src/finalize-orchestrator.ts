@@ -18,6 +18,7 @@ import {
   computeSpeakerStats,
   computeUnknownRatio,
   enforceQualityGates,
+  resolveUnknownRatioThreshold,
   enrichEvidencePack,
   extractMemoNames,
   generateStatsObservations,
@@ -491,6 +492,7 @@ export async function runFinalizeV2Job(
         const synthQualityGate = enforceQualityGates({
           perPerson: finalPerPerson,
           unknownRatio: computeUnknownRatio(transcript),
+          unknownRatioThreshold: resolveUnknownRatioThreshold(ctx.env.QUALITY_GATE_UNKNOWN_RATIO),
         });
 
         const captureByStream = (normalizeSessionState(await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE))).capture_by_stream ?? defaultCaptureByStream();
@@ -1343,6 +1345,7 @@ export async function runFinalizeV2Job(
     const synthQualityGate = enforceQualityGates({
       perPerson: finalPerPerson,
       unknownRatio: computeUnknownRatio(transcript),
+      unknownRatioThreshold: resolveUnknownRatioThreshold(ctx.env.QUALITY_GATE_UNKNOWN_RATIO),
     });
 
     if (abortController.signal.aborted) {
