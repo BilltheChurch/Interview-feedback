@@ -124,7 +124,8 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [ ] B2 note/mark 精确锚点（`anchor.time_ms`）+ 作为个性化信号
 - [ ] B3 diarization 标签 → 候选人命名（Speechmatics 命名声纹 enrollment 或复用手动映射 UI）
 - [ ] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦
-- [ ] B5 通用实时字幕面板（`CaptionPanel` 由 `transcriptSegments` 驱动，覆盖非 Teams 会议）
+- [x] B5 通用实时字幕面板（`CaptionPanel` 由 `transcriptSegments` 驱动，覆盖非 Teams 会议）
+  - ✅ CaptionPanel 统一字幕源:ACS captions 优先,否则把 `transcriptSegments`(A2 下行)映射成 caption 显示;渲染条件改为"ACS off 且无转写才隐藏";speaker 用 S 标签/回退 Interviewer/Candidate。SidecarView 传入 `transcriptSegments`。desktop tsc + 241 测试绿（UI glue,无新增单测）
 
 ### Phase C — P2：清理与通用性
 - [ ] C1 删本地 pyannote-rs sidecar / 重复 `useWebSocket` hook / Settings localhost 文案

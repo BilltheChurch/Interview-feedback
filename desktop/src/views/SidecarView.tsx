@@ -55,6 +55,7 @@ export function SidecarView() {
   const acsStatus = useSessionStore((s) => s.acsStatus);
   const acsCaptionCount = useSessionStore((s) => s.acsCaptionCount);
   const captions = useSessionStore((s) => s.captions);
+  const transcriptSegments = useSessionStore((s) => s.transcriptSegments);
 
   const { end } = useSessionOrchestrator();
 
@@ -395,7 +396,7 @@ export function SidecarView() {
       {/* Body */}
       <div className="flex flex-1 min-h-0 relative">
         {/* Caption panel — left side, conditional on ACS status */}
-        <CaptionPanel captions={captions} acsStatus={acsStatus} />
+        <CaptionPanel captions={captions} acsStatus={acsStatus} transcriptSegments={transcriptSegments} />
 
         {/* Notes workspace */}
         <div className="flex-1 flex flex-col min-w-0">

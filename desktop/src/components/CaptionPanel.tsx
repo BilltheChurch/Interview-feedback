@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageSquareText, ChevronLeft, ChevronRight, ArrowDown } from 'lucide-react';
-import type { CaptionEntry, AcsStatus } from '../stores/sessionStore';
+import type { CaptionEntry, AcsStatus, TranscriptSegment } from '../stores/sessionStore';
 
 /* ── Speaker color palette (6 colors, cycling) ── */
 
@@ -46,15 +46,31 @@ function groupCaptions(captions: CaptionEntry[]): CaptionGroup[] {
 /* ── CaptionPanel ── */
 
 export function CaptionPanel({
-  captions,
+  captions: acsCaptions,
   acsStatus,
+  transcriptSegments = [],
 }: {
   captions: CaptionEntry[];
   acsStatus: AcsStatus;
+  transcriptSegments?: TranscriptSegment[];
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
+
+  // Unified caption source: prefer ACS/Teams captions; otherwise render the universal
+  // realtime transcript segments (Speechmatics/DashScope downlink, A2/B5) as captions so
+  // non-Teams meetings still get live captions.
+  const captions = useMemo<CaptionEntry[]>(() => {
+    if (acsCaptions.length > 0) return acsCaptions;
+    return transcriptSegments.map((seg) => ({
+      id: seg.id,
+      speaker: seg.speaker ?? (seg.role === 'teacher' ? 'Interviewer' : 'Candidate'),
+      text: seg.text,
+      timestamp: seg.tsMs,
+      language: '',
+    }));
+  }, [acsCaptions, transcriptSegments]);
 
   // Build stable speaker → color index map
   const speakerColorMap = useMemo(() => {
@@ -93,8 +109,8 @@ export function CaptionPanel({
     }
   };
 
-  // Don't render at all if ACS is off
-  if (acsStatus === 'off') return null;
+  // Don't render only when there is nothing to show: ACS off AND no transcript segments.
+  if (acsStatus === 'off' && captions.length === 0) return null;
 
   // Collapsed state — narrow icon bar
   if (collapsed) {
