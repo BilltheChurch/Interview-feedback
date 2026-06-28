@@ -110,14 +110,13 @@ describe('SettingsView', () => {
     expect(tier2Toggle).toBeDefined();
   });
 
-  it('enables Tier 2 toggle and shows batch endpoint field', async () => {
+  it('enables Tier 2 toggle', async () => {
     const user = userEvent.setup();
     render(<SettingsView />);
     const toggles = screen.getAllByRole('switch');
     const tier2Toggle = toggles[0];
     await user.click(tier2Toggle);
     expect(tier2Toggle).toHaveAttribute('aria-checked', 'true');
-    expect(screen.getByPlaceholderText('http://localhost:8000/batch/process')).toBeInTheDocument();
   });
 
   it('renders ASR Provider selector', () => {

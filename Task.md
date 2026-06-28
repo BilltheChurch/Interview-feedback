@@ -130,7 +130,10 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - ✅ CaptionPanel 统一字幕源:ACS captions 优先,否则把 `transcriptSegments`(A2 下行)映射成 caption 显示;渲染条件改为"ACS off 且无转写才隐藏";speaker 用 S 标签/回退 Interviewer/Candidate。SidecarView 传入 `transcriptSegments`。desktop tsc + 241 测试绿（UI glue,无新增单测）
 
 ### Phase C — P2：清理与通用性
-- [ ] C1 删本地 pyannote-rs sidecar / 重复 `useWebSocket` hook / Settings localhost 文案
+- [~] C1 删本地 pyannote-rs sidecar / 重复 `useWebSocket` hook / Settings localhost 文案
+  - ✅ 删死代码 `useWebSocket.ts` + 测试 + hooks barrel re-export(确认无任何 `../hooks` 消费者;WebSocketService 是唯一实现）
+  - ✅ 删 SettingsView "Batch Processor Endpoint" 字段(localhost:8000/batch/process 死端点)+ batchEndpoint state + 更新测试。desktop tsc + 234 测试绿
+  - ⏳ `lib/diarizationSidecar.js`(pyannote-rs)移除留作专门 pass:它在 main.js 启动期创建且被多处 IPC 用,需 Electron 主进程手术 + 启动验证(此环境无法 E2E)
 - [ ] C2 长会议分块清洗兜底
 - [ ] C3 归档 `inference/` + 退役 `if.frontierace.ai` tunnel
 

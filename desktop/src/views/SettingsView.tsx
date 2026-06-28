@@ -381,7 +381,6 @@ function Preferences() {
 
 function ProviderSettings() {
   const [tier2Enabled, setTier2Enabled] = useState(false);
-  const [batchEndpoint, setBatchEndpoint] = useState('');
   const [asrProvider, setAsrProvider] = useState('funASR');
   const [llmProvider, setLlmProvider] = useState('dashscope');
 
@@ -439,15 +438,6 @@ function ProviderSettings() {
               />
             </button>
           </div>
-
-          {tier2Enabled && (
-            <TextField
-              label="Batch Processor Endpoint"
-              placeholder="http://localhost:8000/batch/process"
-              value={batchEndpoint}
-              onChange={(e) => setBatchEndpoint(e.target.value)}
-            />
-          )}
         </div>
       </div>
     </Card>
