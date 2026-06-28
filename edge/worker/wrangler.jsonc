@@ -48,7 +48,6 @@
     "TIER2_ENABLED": "true",
     "TIER2_AUTO_TRIGGER": "false",
     "TIER2_BATCH_ENDPOINT": "http://127.0.0.1:8000/batch/process",
-    "WORKER_API_KEY": "",
     "DEFAULT_LOCALE": "zh-CN",
     "CAPTION_PROVIDER": "acs-teams",
     "CAPTION_FALLBACK_TO_ASR": "true",
