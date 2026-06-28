@@ -116,11 +116,11 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - ⏳ 未完:① 把 synthData.summary/personalized_memo 接进 buildResultV2(B1 收尾,call site 作用域需加外层变量)② 删 `local_asr` finalize 阶段(§5.1)③ checkpoint/regenerate-claim/improvements/tier2 仍调 inference,按 §9.3.7 决定移植/降级 ④ 无法 E2E(需部署+DashScope 账户有额度)
 
 ### Phase B — P1：Granola 交付物 + 说话人命名 + 质量
-- [~] B1 `ResultV2`/合成 contract 新增 `cleaned_transcript`/`summary`/`personalized_memo`（一次性交付）
+- [x] B1 `ResultV2`/合成 contract 新增 `cleaned_transcript`/`summary`/`personalized_memo`（一次性交付）
   - ✅ 类型:`ResultV2` 加 `cleaned_transcript`/`summary`/`personalized_memo`（均可选）；`SynthesizeRequestPayload` 加 `deliverable`/`want_summary`/`want_cleaned_transcript`/`personalize_to_notes`
   - ✅ 确定性逐字稿:新增 `transcript-cleaner.ts`（§9.3.1 不过 LLM，仅去 filler `um/uh/嗯/呃…` + 规整空格，保守不误伤 `like/you know/就是`）；`buildResultV2` 默认对每份报告生成 `cleaned_transcript`
-  - ✅ 测试:`tests/transcript-cleaner.test.ts`（9 例），worker 487 全绿
-  - ⏳ `summary`/`personalized_memo` 由 A5 LLM 合成填充（buildResultV2 已留 `summary`/`personalizedMemo` 入参）
+  - ✅ `summary`/`personalized_memo`:A5 synthesizer 产出 → finalize 两条路径(report-only + 主)均接入 `buildResultV2`（外层 finalSummary/finalPersonalizedMemo,LLM 产出即 surface）
+  - ✅ 测试:transcript-cleaner 9 例 + llm-synthesizer 27 例,worker 524 全绿,tsc 绿
 - [ ] B2 note/mark 精确锚点（`anchor.time_ms`）+ 作为个性化信号
 - [ ] B3 diarization 标签 → 候选人命名（Speechmatics 命名声纹 enrollment 或复用手动映射 UI）
 - [ ] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦

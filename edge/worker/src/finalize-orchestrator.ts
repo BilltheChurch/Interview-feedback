@@ -386,6 +386,8 @@ export async function runFinalizeV2Job(
         const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats });
         let finalOverall = memoFirstReport.overall;
         let finalPerPerson = memoFirstReport.per_person;
+        let finalSummary: string | undefined;
+        let finalPersonalizedMemo: string | undefined;
         let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
         let reportModel: string | null = null;
         let reportError: string | null = null;
@@ -449,6 +451,9 @@ export async function runFinalizeV2Job(
           const synthData = synthResult.data;
           if (synthResult.warnings.length > 0) finalizeWarnings.push(...synthResult.warnings);
           if (synthResult.degraded) finalizeDegraded = true;
+          // B1: surface Granola summary/personalized_memo whenever the LLM produced them.
+          if (typeof synthData?.summary === "string") finalSummary = synthData.summary;
+          if (typeof synthData?.personalized_memo === "string") finalPersonalizedMemo = synthData.personalized_memo;
 
           const candidatePerPerson = Array.isArray(synthData?.per_person) ? (synthData.per_person as PersonFeedbackItem[]) : [];
           if (candidatePerPerson.length > 0) {
@@ -530,6 +535,8 @@ export async function runFinalizeV2Job(
           evidence,
           overall: finalOverall,
           perPerson: finalPerPerson,
+          summary: finalSummary,
+          personalizedMemo: finalPersonalizedMemo,
           quality,
           finalizeJobId: jobId,
           modelVersions: existingResult.trace?.model_versions ?? {},
@@ -1111,6 +1118,8 @@ export async function runFinalizeV2Job(
     const reportStart = Date.now();
     let finalOverall = memoFirstReport.overall;
     let finalPerPerson = memoFirstReport.per_person;
+    let finalSummary: string | undefined;
+    let finalPersonalizedMemo: string | undefined;
     let reportSource: "memo_first" | "llm_enhanced" | "llm_failed"
       | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
     let reportModel: string | null = null;
@@ -1232,6 +1241,9 @@ export async function runFinalizeV2Job(
       const candidateOverall = (synthData?.overall ?? memoFirstReport.overall) as unknown;
       const candidateQuality =
         synthData?.quality && typeof synthData.quality === "object" ? (synthData.quality as Partial<ReportQualityMeta>) : null;
+      // B1: capture Granola summary/personalized_memo into outer scope for buildResultV2.
+      if (typeof synthData?.summary === "string") finalSummary = synthData.summary;
+      if (typeof synthData?.personalized_memo === "string") finalPersonalizedMemo = synthData.personalized_memo;
 
       if (candidatePerPerson.length > 0) {
         // Strip claims with empty/invalid evidence_refs before validation
@@ -1414,6 +1426,8 @@ export async function runFinalizeV2Job(
       evidence,
       overall: finalOverall,
       perPerson: finalPerPerson,
+      summary: finalSummary,
+      personalizedMemo: finalPersonalizedMemo,
       quality,
       finalizeJobId: jobId,
       modelVersions: {
