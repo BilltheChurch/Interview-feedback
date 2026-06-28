@@ -520,6 +520,10 @@ export interface Env {
   SPEECHMATICS_API_KEY?: string;
   SPEECHMATICS_WS_URL?: string;
   SPEECHMATICS_LANGUAGE?: string;
+  /** A5: "worker" (default) runs LLM report synthesis in the Worker; "inference" rolls
+   *  back to the legacy inference /analysis/synthesize path. */
+  REPORT_SYNTHESIS_MODE?: string;
+  LLM_MODEL?: string;
   ASR_ENABLED?: string;
   ASR_MODEL?: string;
   ASR_WS_URL?: string;

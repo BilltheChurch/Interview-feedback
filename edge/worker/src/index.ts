@@ -209,6 +209,7 @@ import {
   sendWsError as sendWsErrorFn,
   buildTranscriptFrame
 } from "./asr-helpers";
+import { synthesizeReportInWorker } from "./services/llm-synthesizer";
 import {
   incrementalV1Enabled,
   type StreamRole,
@@ -1289,6 +1290,25 @@ export class MeetingSessionDO extends DurableObject<Env> {
   }
 
   private async invokeInferenceSynthesizeReport(payload: SynthesizeRequestPayload) {
+    // A5: synthesize the report in the Worker by default (Worker → DashScope LLM
+    // directly), removing the dependency on the inference service. Set
+    // REPORT_SYNTHESIS_MODE=inference to roll back to the legacy /analysis/synthesize path.
+    const mode = (this.env.REPORT_SYNTHESIS_MODE ?? "worker").toLowerCase();
+    if (mode !== "inference") {
+      try {
+        const result = await synthesizeReportInWorker(this.env, payload);
+        return { ...result, timeline: [] as InferenceBackendTimelineItem[] };
+      } catch (err) {
+        // Never throw — return a degraded result so finalize falls back to memo_first.
+        return {
+          data: {} as Record<string, unknown>,
+          backend_used: "worker-dashscope",
+          degraded: true,
+          warnings: [`worker_synthesis_failed: ${getErrorMessage(err)}`],
+          timeline: [] as InferenceBackendTimelineItem[],
+        };
+      }
+    }
     return invokeInferenceSynthesizeReportFn(this.inferenceCallCtx, payload);
   }
 

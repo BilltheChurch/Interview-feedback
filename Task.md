@@ -109,7 +109,11 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [~] A4 删 4 处 `127.0.0.1:8000` fallback + `wrangler.jsonc` 云端化（ASR_PROVIDER=speechmatics, 删 inference localhost, 加 SPEECHMATICS_API_KEY secret）
   - ✅ A4.1 删 4 处代码 localhost fallback → fail-fast（§2.1 bug#3）:realtime-asr-processor(local-whisper)、incremental-processor×2、finalize-orchestrator(improvements)。配置缺失时抛错/优雅跳过，不再静默连 localhost。worker 487 全绿
   - ⏳ wrangler.jsonc 云端化（ASR_PROVIDER→speechmatics、删 INFERENCE_* localhost、加 SPEECHMATICS_API_KEY secret）**deferred**:翻转 ASR_PROVIDER 依赖 A1 验证通过（无 key 会搞挂现有 DashScope 实时）；需可部署环境验证。当前保留 DashScope 实时路径不动（§9.2 迁移期 fallback）
-- [ ] A5 LLM 合成移入 Worker（移植 `report_synthesizer.py`）+ finalize 摘除 inference 依赖 + 删 `local_asr` 阶段
+- [~] A5 LLM 合成移入 Worker（移植 `report_synthesizer.py`）+ finalize 摘除 inference 依赖 + 删 `local_asr` 阶段
+  - ✅ 核心:新增 `services/llm-synthesizer.ts`（直调 DashScope OpenAI-compatible `chat/completions`,读 `ALIYUN_DASHSCOPE_API_KEY`,model=`LLM_MODEL`默认 qwen-plus,temp 0.2,json mode;`buildSynthesisMessages`/`parseSynthesisResponse`(健壮,code-fence/空/畸形→安全默认)/`truncateTranscript`(CJK-aware 4000 tok 首现+近期)/`synthesizeReportInWorker`)。移植自 report_synthesizer.py（系统prompt+评分rubric+证据规则+输出schema）
+  - ✅ 接线:`invokeInferenceSynthesizeReport`(index.ts,两 context 共用)按 `REPORT_SYNTHESIS_MODE`(默认 **worker**)分流——worker 直调 DashScope(失败内部 catch→degraded→memo_first 回退),`=inference` 回滚旧路径。Tier2Context backend_used 放宽 string
+  - ✅ 测试:`tests/llm-synthesizer.test.ts` 27 例(fetch stub),worker 524 全绿,tsc 绿
+  - ⏳ 未完:① 把 synthData.summary/personalized_memo 接进 buildResultV2(B1 收尾,call site 作用域需加外层变量)② 删 `local_asr` finalize 阶段(§5.1)③ checkpoint/regenerate-claim/improvements/tier2 仍调 inference,按 §9.3.7 决定移植/降级 ④ 无法 E2E(需部署+DashScope 账户有额度)
 
 ### Phase B — P1：Granola 交付物 + 说话人命名 + 质量
 - [~] B1 `ResultV2`/合成 contract 新增 `cleaned_transcript`/`summary`/`personalized_memo`（一次性交付）

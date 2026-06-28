@@ -96,7 +96,7 @@ export interface Tier2Context {
   /** Call inference synthesize endpoint */
   invokeInferenceSynthesizeReport: (payload: unknown) => Promise<{
     data: Record<string, unknown>;
-    backend_used: "primary" | "secondary";
+    backend_used: string;
     degraded: boolean;
     warnings: string[];
     timeline: InferenceBackendTimelineItem[];
