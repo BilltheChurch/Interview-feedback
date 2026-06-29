@@ -122,7 +122,7 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - ✅ `summary`/`personalized_memo`:A5 synthesizer 产出 → finalize 两条路径(report-only + 主)均接入 `buildResultV2`（外层 finalSummary/finalPersonalizedMemo,LLM 产出即 surface）
   - ✅ 测试:transcript-cleaner 9 例 + llm-synthesizer 27 例,worker 524 全绿,tsc 绿
 - [ ] B2 note/mark 精确锚点（`anchor.time_ms`）+ 作为个性化信号
-- [ ] B3 diarization 标签 → 候选人命名（Speechmatics 命名声纹 enrollment 或复用手动映射 UI）
+- [x] B3 diarization S 标签 → 候选人命名（commit 1479225）：`buildReconciledTranscript` 云端模式也跑自我介绍抽名（此前仅 `diarizationBackend==='edge'`），每条 utterance 的名字绑定其 speaker-event 自身的 S 标签（1:1，不用 ±5s 时间搜索）；名字 patterns 接受大写句首（"My name is"/"This is"）；containment-first 匹配。修复"群面报告全 unknown"。手动纠正仍走 `/cluster-map`（`state.bindings` 优先）。worker 534 测试绿。未部署。
 - [~] B4 质量门禁阈值可配置 + 纪要交付与评分门禁解耦
   - ✅ Part1 阈值 env 化:`enforceQualityGates` 加 `unknownRatioThreshold`(默认 0.25),两处调用从 `env.QUALITY_GATE_UNKNOWN_RATIO` 读取(新 `resolveUnknownRatioThreshold`,空/越界→默认)。测试 5 例(顺手修了 `Number("")===0` 导致空 env→阈值0 的 bug)。worker 529 全绿
   - ⏳ Part2 交付解耦:cleaned_transcript/summary/personalized_memo 已随 resultV2 持久化(不被门禁拦截存储);真正的"tentative 也照展示纪要/逐字稿"属 Desktop 展示侧(读 cache 时即使 ready=false 也渲染 deliverables）——留作 Desktop 跟进
@@ -153,6 +153,14 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [ ] CF DO **持久双出站 WS + 静音保活 + 重连** 实跑验证（dashscope-asr.ts 是短连，不能作证）—— 待 A1 实现 + 部署
 - [x] 16000Hz sample_rate 被 Speechmatics 接受 ✅
 - 备注:cmn_en 下英文 ASR 正常("History and belonging…passionate");en/zh 3s 短样本转写为空(样本质量),中文 ASR 质量待真实样本验证
+
+**🧪 首次端到端云端 pilot（2026-06-29，合成 4 嗓音音频对生产 api.frontierace.ai）**:
+- ✅ 架构端到端通:WS 首帧鉴权 → Speechmatics 实时 ASR(英文质量好)→ A2 转写下行 → finalize(events/report/persist)→ ResultV2 + cleaned_transcript。
+- ❌→修:报告降级 memo_first(`report_model=null`)。根因实锤=**阿里云 DashScope 欠费 Arrearage**(直接 curl 实测),账户问题非 bug;待用户充值后重跑验真 LLM。
+- ❌→修:群面全 unknown → **B3 已修**(commit 1479225)。
+- ⚠️→修:finalize ~180s(死 inference 地址超时)→ **INFERENCE_ENABLED cleanup 已修**(commit 5ee03bf,events 走本地/improvements 跳过)。
+- ⚠️ 合成 TTS 4 嗓音 diarization 只分 S1/S2(嗓音太接近);真实重叠 DER 仍需真人群面录音。
+- ⏳ 待部署:feat/phase6-cloud-companion 的 3 个 commit(harness 1edc65d + cleanup 5ee03bf + B3 1479225)--ff-only 合 main + `wrangler deploy`;DashScope 充值后重跑 pilot。
 
 > 注：v2 强制调整已并入下方 A/B/C（详见设计文档 §9）：A5 改为"逐字稿确定性清洗 + LLM 只做总结/memo/打分"；A1 含 teacher 声道关 diarization + 静音保活帧 + R2-replay 重连；删 global-cluster 前先在 B3 把 /cluster-map 改接 S 标签；inference 移植按真实规模(~2.4k 行跨4服务)拆分并补 TS 回归测试。
 
