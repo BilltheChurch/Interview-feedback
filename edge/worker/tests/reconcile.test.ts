@@ -307,6 +307,45 @@ describe("buildReconciledTranscript", () => {
     expect(result[0].cluster_id).toBe("teacher");
   });
 
+  it("B3: binds cloud S-labels to roster names via self-introductions", () => {
+    const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_s1",
+        stream_role: "students",
+        text: "Hi everyone, I'm Tina.",
+        start_ms: 0,
+        end_ms: 3000,
+        duration_ms: 3000,
+      },
+      {
+        utterance_id: "u_s2",
+        stream_role: "students",
+        text: "My name is Daisy.",
+        start_ms: 3000,
+        end_ms: 6000,
+        duration_ms: 3000,
+      },
+    ];
+    // Cloud diarization labels (S1/S2) live on the speaker events, not the utterances.
+    const events: ReconcileSpeakerEvent[] = [
+      { stream_role: "students", utterance_id: "u_s1", cluster_id: "S1" },
+      { stream_role: "students", utterance_id: "u_s2", cluster_id: "S2" },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      roster: ["Tina", "Daisy"],
+    });
+    const u1 = result.find((r) => r.utterance_id === "u_s1");
+    const u2 = result.find((r) => r.utterance_id === "u_s2");
+    expect(u1?.speaker_name).toBe("Tina");
+    expect(u2?.speaker_name).toBe("Daisy");
+  });
+
   it("resolves student utterance via event cluster binding", () => {
     const state: ReconcileSessionState = {
       bindings: { c_01: "Alice" },

@@ -308,6 +308,26 @@ export function prepareEdgeTurns(
 }
 
 /**
+ * B3: cloud (Speechmatics) diarization has no edge speaker-logs. Derive per-utterance
+ * turns from each student utterance's speaker-event cluster_id (the S1/S2… diarization
+ * label) so self-introduction name extraction can bind S-labels to roster names — the
+ * same machinery the edge path uses, just over the cloud label space.
+ */
+export function buildCloudTurnsFromEvents(
+  utterances: ReconcileUtterance[],
+  eventByUtterance: Map<string, ReconcileSpeakerEvent>
+): Array<{ start_ms: number; end_ms: number; cluster_id: string }> {
+  const turns: Array<{ start_ms: number; end_ms: number; cluster_id: string }> = [];
+  for (const item of utterances) {
+    if (item.stream_role !== "students") continue;
+    const clusterId = valueAsStr(eventByUtterance.get(item.utterance_id)?.cluster_id ?? null);
+    if (!clusterId) continue;
+    turns.push({ start_ms: item.start_ms, end_ms: item.end_ms, cluster_id: clusterId });
+  }
+  return turns.sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+}
+
+/**
  * Build a speaker-resolved transcript from raw utterances, speaker events,
  * and diarization data. This is the shared reconciliation logic used across
  * the feedback cache, finalization pipeline, and state endpoint.
@@ -351,11 +371,15 @@ export function buildReconciledTranscript(options: {
     speakerLogs.speaker_map.map((item) => [item.cluster_id, item])
   );
 
-  // ── Name extraction: map edge cluster IDs to roster names ──
-  // Extract self-introduction names from utterance text, find which edge cluster was
-  // speaking at each name's position, roster-match the names, and build a clean
-  // consolidated edge turn timeline with speaker names replacing per-window cluster IDs.
-  if (diarizationBackend === "edge" && edgeTurns.length > 0) {
+  // ── Name extraction: map diarization cluster IDs to roster names ──
+  // Extract self-introduction names from utterance text, find which diarization cluster
+  // was speaking at each name's position, roster-match the names, and populate
+  // speakerMapByCluster. Edge uses pyannote turns; cloud (B3) uses Speechmatics S-labels
+  // derived from speaker events — the same machinery over either label space.
+  const introTurns = diarizationBackend === "edge"
+    ? edgeTurns
+    : buildCloudTurnsFromEvents(utterances, eventByUtterance);
+  if (introTurns.length > 0) {
     // Build extended roster from all available name sources
     const extendedRosterSet = new Set<string>(roster.map((r) => r));
     for (const [, sm] of speakerMapByCluster) {
@@ -373,12 +397,12 @@ export function buildReconciledTranscript(options: {
     // Note: Capture groups must NOT be too greedy — stop before common English words
     // like "and", "I", "in", "from" etc. to avoid capturing "Daisy and I am now..." as a name.
     const namePatterns: RegExp[] = [
-      /\bmy name is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,2})/g,
-      /\b(?:usually\s+)?go(?:es)?\s+by\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g,
-      /\b(?:(?:you\s+)?can\s+)?(?:call|just\s+call)\s+me\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g,
+      /\b[Mm]y name is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,2})/g,
+      /\b(?:[Uu]sually\s+)?[Gg]o(?:es)?\s+by\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g,
+      /\b(?:(?:[Yy]ou\s+)?[Cc]an\s+)?(?:[Cc]all|[Jj]ust\s+call)\s+me\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g,
       /\bI'm\s+([A-Z][a-z]{1,20})\b/g,
       /\bI am\s+([A-Z][a-z]{1,20})\b/g,
-      /\bthis is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})\b/g,
+      /\b[Tt]his is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})\b/g,
       /我(?:的名字)?(?:叫|是)\s*([\u4e00-\u9fff]{2,4})/g,
       // Fallback: "please call me [name]" with lowercase (ASR may not capitalize)
       /\bplease\s+call\s+me\s+([A-Za-z]{2,20})/gi,
@@ -397,6 +421,12 @@ export function buildReconciledTranscript(options: {
       if (item.stream_role !== "students") continue;
       const text = item.text;
       const anchors: NameAnchor[] = [];
+      // Cloud (Speechmatics): each utterance maps 1:1 to its own S-label (on the speaker
+      // event), so a name spoken in this utterance belongs to that label directly — no
+      // time-search needed (and time interpolation at the utterance boundary is unreliable).
+      const cloudClusterId = diarizationBackend === "cloud"
+        ? valueAsStr(eventByUtterance.get(item.utterance_id)?.cluster_id ?? null)
+        : null;
 
       for (const pattern of namePatterns) {
         pattern.lastIndex = 0; // Reset for global regex
@@ -410,11 +440,18 @@ export function buildReconciledTranscript(options: {
           const rosterName = matchToRoster(rawName, extendedRoster);
 
           // Find the edge turn active at this time (±5s tolerance)
-          let bestTurn: typeof edgeTurns[0] | null = null;
+          let bestTurn: typeof introTurns[0] | null = null;
           let bestOverlap = 0;
           const searchStart = timeMs - 5000;
           const searchEnd = timeMs + 5000;
-          for (const turn of edgeTurns) {
+          for (const turn of introTurns) {
+            // A turn that actually contains the name's timestamp wins outright — this
+            // disambiguates short adjacent turns (cloud S-labels) where the ±5s window
+            // would otherwise tie across neighbours.
+            if (timeMs >= turn.start_ms && timeMs <= turn.end_ms) {
+              bestTurn = turn;
+              break;
+            }
             const overlap = Math.min(searchEnd, turn.end_ms) - Math.max(searchStart, turn.start_ms);
             if (overlap > bestOverlap) {
               bestOverlap = overlap;
@@ -427,7 +464,7 @@ export function buildReconciledTranscript(options: {
             rosterName,
             charIndex: match.index,
             timeMs,
-            edgeClusterId: bestTurn?.cluster_id ?? null
+            edgeClusterId: cloudClusterId ?? bestTurn?.cluster_id ?? null
           });
         }
       }
