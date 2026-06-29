@@ -180,6 +180,7 @@ export async function closeRealtimeAsrSession(
     runtime.sentChunkTsBySeq.clear();
     runtime.lastEmitAt = null;
     runtime.lastFinalTextNorm = "";
+    runtime.sttBuffer = null;
   }
 
   if (ws) {
@@ -961,7 +962,12 @@ async function handleSpeechmaticsMessage(
     return;
   }
 
-  if (msg.type !== "Transcript") return;       // AudioAdded / EndOfTranscript / Warning / Unknown
+  if (msg.type === "EndOfTranscript") {
+    // Stream ended (e.g. EndOfStream during graceful close) — flush any buffered words.
+    await flushSttBuffer(sessionId, streamRole, ctx);
+    return;
+  }
+  if (msg.type !== "Transcript") return;       // AudioAdded / Warning / Unknown
   const t = msg.transcript;
   if (t.is_partial) return;                     // MVP: emit on finals only
   const text = t.text.trim();
@@ -971,17 +977,49 @@ async function handleSpeechmaticsMessage(
   if (normalized && normalized === runtime.lastFinalTextNorm) return;
   runtime.lastFinalTextNorm = normalized;
 
-  // Map word timestamps → chunk seq so emit's seq-based timing stays consistent.
-  if (t.start_ms >= 0 && t.end_ms >= t.start_ms) {
-    const startSeq = Math.max(1, Math.floor(t.start_ms / 1000) + 1);
-    const inferredEndSeq = Math.max(startSeq, Math.ceil(t.end_ms / 1000));
+  // students → carry the Speechmatics diarization label (S1/S2…); teacher → resolved in emit.
+  const speaker = streamRole === "students" ? dominantSpeaker(t) : null;
+
+  // Endpointing: Speechmatics emits word-level finals, which fragment self-introductions
+  // and evidence quotes. Accumulate finals into one sentence-level utterance, flushing
+  // when a silence gap exceeds the threshold or the diarization speaker changes.
+  const buf = runtime.sttBuffer;
+  if (buf && (t.start_ms - buf.endMs > STT_UTTERANCE_GAP_MS || speaker !== buf.speaker)) {
+    await flushSttBuffer(sessionId, streamRole, ctx);
+  }
+  if (!runtime.sttBuffer) {
+    runtime.sttBuffer = { texts: [text], speaker, startMs: t.start_ms, endMs: t.end_ms };
+  } else {
+    runtime.sttBuffer.texts.push(text);
+    runtime.sttBuffer.endMs = Math.max(runtime.sttBuffer.endMs, t.end_ms);
+  }
+}
+
+/** Silence gap (ms) between consecutive finals that ends the current utterance. */
+const STT_UTTERANCE_GAP_MS = 800;
+
+/**
+ * Emit the accumulated sentence-level utterance (endpointing). Maps the buffered span to
+ * chunk seq so emit's seq-based timing stays consistent, then clears the buffer.
+ */
+async function flushSttBuffer(
+  sessionId: string,
+  streamRole: StreamRole,
+  ctx: RealtimeAsrContext
+): Promise<void> {
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+  const buf = runtime.sttBuffer;
+  runtime.sttBuffer = null;
+  if (!buf || buf.texts.length === 0) return;
+  const text = buf.texts.join(" ").replace(/\s+/g, " ").trim();
+  if (!text) return;
+  if (buf.startMs >= 0 && buf.endMs >= buf.startMs) {
+    const startSeq = Math.max(1, Math.floor(buf.startMs / 1000) + 1);
+    const inferredEndSeq = Math.max(startSeq, Math.ceil(buf.endMs / 1000));
     runtime.currentStartSeq = startSeq;
     runtime.lastSentSeq = Math.max(runtime.lastSentSeq, inferredEndSeq);
   }
-
-  // students → carry the Speechmatics diarization label (S1/S2…); teacher → resolved in emit.
-  const speaker = streamRole === "students" ? dominantSpeaker(t) : null;
-  await emitRealtimeUtterance(sessionId, streamRole, text, ctx, speaker);
+  await emitRealtimeUtterance(sessionId, streamRole, text, ctx, buf.speaker);
 }
 
 // ── ensureRealtimeAsrConnected ─────────────────────────────────────────────

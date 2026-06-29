@@ -481,6 +481,9 @@ export interface AsrRealtimeRuntime {
   lastEmitAt: string | null;
   lastFinalTextNorm: string;
   drainGeneration: number;
+  /** Endpointing: accumulate Speechmatics word-level finals into one sentence-level
+   *  utterance, flushed on a silence gap, speaker change, EndOfTranscript, or close. */
+  sttBuffer: { texts: string[]; speaker: string | null; startMs: number; endMs: number } | null;
 }
 
 export interface AudioChunkFrame {

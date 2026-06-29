@@ -190,7 +190,8 @@ export function buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime
     sentChunkTsBySeq: new Map(),
     lastEmitAt: null,
     lastFinalTextNorm: "",
-    drainGeneration: 0
+    drainGeneration: 0,
+    sttBuffer: null
   };
 }
 
