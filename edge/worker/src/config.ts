@@ -516,6 +516,10 @@ export interface Env {
   INFERENCE_MERGE_CHECKPOINTS_PATH?: string;
   INFERENCE_EXTRACT_EMBEDDING_PATH?: string;
   INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS?: string;
+  /** All-cloud migration: set "false"/"0" to disable every legacy inference HTTP call
+   *  (events → local analyzer, improvements → skipped). Default: enabled only when a
+   *  base URL is configured. Lets cloud deploys avoid dead-endpoint timeouts. */
+  INFERENCE_ENABLED?: string;
   ALIYUN_DASHSCOPE_API_KEY?: string;
   SPEECHMATICS_API_KEY?: string;
   SPEECHMATICS_WS_URL?: string;
@@ -814,6 +818,21 @@ export function parseBool(raw: string | undefined, fallback: boolean): boolean {
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
   return fallback;
+}
+
+/**
+ * All-cloud migration switch. Returns false when INFERENCE_ENABLED is explicitly
+ * "false"/"0"/"no"/"off" — legacy inference HTTP calls are then skipped (events fall
+ * back to the local analyzer, improvements are skipped) so cloud deploys don't block
+ * on dead inference endpoints. When the flag is unset, inference is considered enabled
+ * only if a base URL is configured.
+ */
+export function isInferenceEnabled(env: Env): boolean {
+  const raw = (env.INFERENCE_ENABLED ?? "").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  const base = (env.INFERENCE_BASE_URL ?? "").trim() || (env.INFERENCE_BASE_URL_PRIMARY ?? "").trim();
+  return base.length > 0;
 }
 
 export function getSessionLocale(state: SessionState | undefined, env?: Env): string {

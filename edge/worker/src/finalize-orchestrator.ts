@@ -62,7 +62,7 @@ import type {
   SessionContextMeta,
   SessionPhase,
 } from "./types_v2";
-import { incrementalV1Enabled } from "./config";
+import { incrementalV1Enabled, isInferenceEnabled } from "./config";
 import type {
   StreamRole,
   AudioPayload,
@@ -1645,8 +1645,12 @@ export async function triggerImprovementGenerationImpl(
   resultV2Key: string,
   ctx: ImprovementContext
 ): Promise<void> {
-  // A4/§2.1 bug#3: no silent localhost fallback. Improvements are optional post-report
-  // enhancement — skip gracefully if inference is not configured.
+  // A4/§2.1 bug#3: no silent localhost fallback. Improvements are an optional post-report
+  // enhancement — skip gracefully when inference is disabled (all-cloud) or unconfigured.
+  if (!isInferenceEnabled(ctx.env)) {
+    log("info", "improvements: inference disabled — skipping improvement generation", { component: "finalize-v2", sessionId });
+    return;
+  }
   const inferenceBase = (ctx.env.INFERENCE_BASE_URL ?? "").trim();
   if (!inferenceBase) {
     log("warn", "improvements: INFERENCE_BASE_URL unset — skipping improvement generation (no localhost fallback)", { component: "finalize-v2", sessionId });

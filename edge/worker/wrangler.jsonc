@@ -26,6 +26,7 @@
     "INFERENCE_REPORT_PATH": "/analysis/report",
     "INFERENCE_REGENERATE_CLAIM_PATH": "/analysis/regenerate-claim",
     "INFERENCE_RESOLVE_AUDIO_WINDOW_SECONDS": "6",
+    "INFERENCE_ENABLED": "false",
     "ASR_PROVIDER": "speechmatics",
     "ASR_ENDPOINT": "http://127.0.0.1:8000",
     "ASR_LANGUAGE": "auto",

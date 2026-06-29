@@ -16,7 +16,7 @@ import {
 } from "./inference_client";
 import { analyzeEventsLocally } from "./local_events_analyzer";
 import type { Env } from "./config";
-import { parseTimeoutMs, log, getErrorMessage } from "./config";
+import { parseTimeoutMs, log, getErrorMessage, isInferenceEnabled } from "./config";
 import type {
   AudioPayload,
   ResolveResponse,
@@ -149,17 +149,70 @@ export async function invokeInferenceEnroll(
   };
 }
 
-export async function invokeInferenceAnalysisEvents(
-  ctx: InferenceCallContext,
-  payload: Record<string, unknown>
-): Promise<{
+type AnalysisEventsResult = {
   events: Record<string, unknown>[];
   backend_used: "primary" | "secondary" | "local";
   degraded: boolean;
   warnings: string[];
   timeline: InferenceBackendTimelineItem[];
   fallback_reason: string | null;
-}> {
+};
+
+/** Build an events result from the local analyzer (used both when inference is disabled
+ *  and as the failover path when all inference backends fail). */
+function buildLocalEventsResult(
+  payload: Record<string, unknown>,
+  opts: { warning: string; fallbackReason: string; timeline: InferenceBackendTimelineItem[] }
+): AnalysisEventsResult {
+  const sessionId = String(payload.session_id ?? "unknown-session");
+  const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
+  const memos = Array.isArray(payload.memos) ? payload.memos : [];
+  const stats = Array.isArray(payload.stats) ? payload.stats : [];
+  const localEvents = analyzeEventsLocally({
+    sessionId,
+    transcript: transcript as Array<{
+      utterance_id: string;
+      stream_role: "mixed" | "teacher" | "students";
+      cluster_id?: string | null;
+      speaker_name?: string | null;
+      text: string;
+      start_ms: number;
+      end_ms: number;
+      duration_ms: number;
+    }>,
+    memos: memos as Array<{
+      memo_id: string;
+      created_at_ms: number;
+      type: "observation" | "evidence" | "question" | "decision" | "score";
+      text: string;
+      anchors?: { mode: "time" | "utterance"; time_range_ms?: [number, number]; utterance_ids?: string[] };
+    }>,
+    stats: stats as Array<{ speaker_key: string; talk_time_ms: number; turns: number }>,
+  });
+  return {
+    events: localEvents as unknown as Record<string, unknown>[],
+    backend_used: "local",
+    degraded: true,
+    warnings: [opts.warning],
+    timeline: opts.timeline,
+    fallback_reason: opts.fallbackReason,
+  };
+}
+
+export async function invokeInferenceAnalysisEvents(
+  ctx: InferenceCallContext,
+  payload: Record<string, unknown>
+): Promise<AnalysisEventsResult> {
+  // All-cloud mode: skip the inference HTTP attempt entirely (avoids dead-endpoint
+  // timeout) and analyze events deterministically in the Worker.
+  if (!isInferenceEnabled(ctx.env)) {
+    return buildLocalEventsResult(payload, {
+      warning: "analysis/events: inference disabled — using local analyzer",
+      fallbackReason: "inference_disabled",
+      timeline: [],
+    });
+  }
+
   const path = ctx.env.INFERENCE_EVENTS_PATH ?? "/analysis/events";
   const timeoutMs = parseTimeoutMs(ctx.env.INFERENCE_TIMEOUT_MS ?? "15000");
   try {
@@ -182,40 +235,11 @@ export async function invokeInferenceAnalysisEvents(
     if (!(error instanceof InferenceRequestError)) {
       throw error;
     }
-    const sessionId = String(payload.session_id ?? "unknown-session");
-    const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
-    const memos = Array.isArray(payload.memos) ? payload.memos : [];
-    const stats = Array.isArray(payload.stats) ? payload.stats : [];
-    const localEvents = analyzeEventsLocally({
-      sessionId,
-      transcript: transcript as Array<{
-        utterance_id: string;
-        stream_role: "mixed" | "teacher" | "students";
-        cluster_id?: string | null;
-        speaker_name?: string | null;
-        text: string;
-        start_ms: number;
-        end_ms: number;
-        duration_ms: number;
-      }>,
-      memos: memos as Array<{
-        memo_id: string;
-        created_at_ms: number;
-        type: "observation" | "evidence" | "question" | "decision" | "score";
-        text: string;
-        anchors?: { mode: "time" | "utterance"; time_range_ms?: [number, number]; utterance_ids?: string[] };
-      }>,
-      stats: stats as Array<{ speaker_key: string; talk_time_ms: number; turns: number }>,
-    });
-    const warning = `analysis/events fallback local analyzer: ${error.message}`;
-    return {
-      events: localEvents as unknown as Record<string, unknown>[],
-      backend_used: "local",
-      degraded: true,
-      warnings: [warning],
+    return buildLocalEventsResult(payload, {
+      warning: `analysis/events fallback local analyzer: ${error.message}`,
+      fallbackReason: "analysis_events_all_backends_failed",
       timeline: error.timeline,
-      fallback_reason: "analysis_events_all_backends_failed",
-    };
+    });
   }
 }
 
