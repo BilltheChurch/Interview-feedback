@@ -64,11 +64,11 @@ const MAX_RETRIES = 2;
 const RETRYABLE_STATUS = new Set([429, 502, 503]);
 
 /**
- * Generous completion cap. The Python httpx client did not set max_tokens (the
- * model default applied); we set a sane ceiling so long multi-person reports are
- * not truncated mid-JSON. qwen-plus supports large outputs.
+ * Generous completion cap so long multi-person reports are not truncated mid-JSON.
+ * Headroom matters more with reasoning models (e.g. qwen3.7-plus) whose hidden
+ * reasoning_content shares the completion budget with the visible JSON answer.
  */
-const DEFAULT_MAX_TOKENS = 8_192;
+const DEFAULT_MAX_TOKENS = 16_384;
 
 /** Transcript truncation budget (Python: max_tokens=4000). */
 const TRANSCRIPT_MAX_TOKENS = 4000;
