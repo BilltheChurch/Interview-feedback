@@ -83,7 +83,7 @@ export function ClaimCard({
         <button
           type="button"
           onClick={onEditClick}
-          className="text-ink-tertiary opacity-0 group-hover:opacity-100 hover:text-accent transition-all cursor-pointer shrink-0 mt-0.5"
+          className="text-ink-tertiary opacity-0 group-hover:opacity-100 hover:text-accent-ink transition-all cursor-pointer shrink-0 mt-0.5"
           aria-label="Edit claim"
         >
           <Pencil className="w-3.5 h-3.5" />

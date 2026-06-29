@@ -14,7 +14,8 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import { Card } from '../components/ui/Card';
+import { GlassCard } from '../components/ui/GlassCard';
+import { SegmentedControl } from '../components/ui/SegmentedControl';
 import { Button } from '../components/ui/Button';
 import { TextField } from '../components/ui/TextField';
 import { EmptyState } from '../components/ui/EmptyState';
@@ -63,38 +64,21 @@ function StartInterviewCard({
   onStart: () => void;
 }) {
   return (
-    <Card className="p-5">
+    <GlassCard className="p-5">
       <h3 className="text-sm font-semibold text-ink-secondary mb-4">
         Start Interview
       </h3>
 
       {/* Mode toggle */}
-      <div className="flex rounded-[--radius-button] border border-border overflow-hidden mb-4">
-        <button
-          type="button"
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors duration-150 cursor-pointer ${
-            mode === '1v1'
-              ? 'bg-accent text-white'
-              : 'bg-surface text-ink-secondary hover:bg-surface-hover'
-          }`}
-          onClick={() => onModeChange('1v1')}
-        >
-          <User className="w-3.5 h-3.5" />
-          1 v 1
-        </button>
-        <button
-          type="button"
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors duration-150 cursor-pointer ${
-            mode === 'group'
-              ? 'bg-accent text-white'
-              : 'bg-surface text-ink-secondary hover:bg-surface-hover'
-          }`}
-          onClick={() => onModeChange('group')}
-        >
-          <Users className="w-3.5 h-3.5" />
-          Group
-        </button>
-      </div>
+      <SegmentedControl
+        className="mb-4"
+        value={mode}
+        onChange={onModeChange}
+        options={[
+          { value: '1v1', label: '1 v 1', icon: <User className="w-3.5 h-3.5" /> },
+          { value: 'group', label: 'Group', icon: <Users className="w-3.5 h-3.5" /> },
+        ]}
+      />
 
       <TextField
         label="Session name (optional)"
@@ -112,7 +96,7 @@ function StartInterviewCard({
         <Play className="w-4 h-4" />
         Start Session
       </Button>
-    </Card>
+    </GlassCard>
   );
 }
 
@@ -132,7 +116,7 @@ function ActiveSessionCard({
   const elapsed = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 
   return (
-    <Card className="p-5 border-accent/30 border">
+    <GlassCard className="p-5 border-accent/30 border">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-ink">Recoverable Session</h3>
         <span className="flex items-center gap-1.5 text-xs text-warning font-medium">
@@ -164,7 +148,7 @@ function ActiveSessionCard({
           <Trash2 className="w-3.5 h-3.5" />
         </Button>
       </div>
-    </Card>
+    </GlassCard>
   );
 }
 
@@ -183,7 +167,7 @@ function PendingFeedbackCard({
 
   if (pending.length === 0) {
     return (
-      <Card className="p-5 h-full">
+      <GlassCard className="p-5 h-full">
         <h3 className="text-sm font-semibold text-ink-secondary mb-2">
           Pending Feedback
         </h3>
@@ -192,17 +176,17 @@ function PendingFeedbackCard({
           title="All caught up"
           description="No sessions awaiting finalization"
         />
-      </Card>
+      </GlassCard>
     );
   }
 
   return (
-    <Card className="p-5 h-full flex flex-col">
+    <GlassCard className="p-5 h-full flex flex-col">
       <h3 className="text-sm font-semibold text-ink-secondary mb-3">
         Pending Feedback
       </h3>
       <div className="flex items-baseline gap-1 mb-3">
-        <span className="text-lg font-bold text-accent">{pending.length}</span>
+        <span className="text-lg font-bold text-accent-ink">{pending.length}</span>
         <span className="text-sm text-ink-secondary">
           {pending.length === 1 ? 'session' : 'sessions'} awaiting report
         </span>
@@ -241,7 +225,7 @@ function PendingFeedbackCard({
           </li>
         ))}
       </ul>
-    </Card>
+    </GlassCard>
   );
 }
 
@@ -301,20 +285,20 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
 
   if (status === 'loading') {
     return (
-      <Card className="p-5 h-full">
+      <GlassCard className="p-5 h-full">
         <h3 className="text-sm font-semibold text-ink-secondary mb-2">
           Upcoming Meetings
         </h3>
         <div className="flex items-center justify-center py-8">
-          <Loader2 className="w-5 h-5 animate-spin text-accent" />
+          <Loader2 className="w-5 h-5 animate-spin text-accent-ink" />
         </div>
-      </Card>
+      </GlassCard>
     );
   }
 
   if (status !== 'connected') {
     return (
-      <Card className="p-5 h-full">
+      <GlassCard className="p-5 h-full">
         <h3 className="text-sm font-semibold text-ink-secondary mb-2">
           Upcoming Meetings
         </h3>
@@ -353,7 +337,7 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
             </div>
           }
         />
-      </Card>
+      </GlassCard>
     );
   }
 
@@ -364,7 +348,7 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
 
   if (meetings.length === 0) {
     return (
-      <Card className="p-5 h-full">
+      <GlassCard className="p-5 h-full">
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-sm font-semibold text-ink-secondary">
             Upcoming Meetings
@@ -378,12 +362,12 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
           title="No upcoming meetings"
           description="Your calendar is clear for the next few days"
         />
-      </Card>
+      </GlassCard>
     );
   }
 
   return (
-    <Card className="p-5 h-full flex flex-col">
+    <GlassCard className="p-5 h-full flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-ink-secondary">
           Upcoming Meetings
@@ -427,7 +411,7 @@ function UpcomingMeetings({ onQuickStart }: { onQuickStart: (meeting: { subject:
           </div>
         ))}
       </div>
-    </Card>
+    </GlassCard>
   );
 }
 
@@ -483,9 +467,12 @@ export function HomeView() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
       >
-        <span className="text-sm text-ink-tertiary">{getGreeting()}</span>
+        <h1 className="text-xl font-semibold text-ink tracking-tight">{getGreeting()}</h1>
         <span className="flex-1 h-px bg-border" />
-        <span className="text-sm font-semibold text-ink">Chorus</span>
+        <span className="flex items-center gap-1.5 text-sm font-semibold text-accent-ink">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_rgba(255,122,26,0.5)]" />
+          Chorus
+        </span>
       </motion.div>
 
       {/* Main grid — no page-level scroll; each card handles its own overflow */}

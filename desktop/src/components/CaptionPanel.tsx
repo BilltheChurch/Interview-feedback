@@ -203,7 +203,7 @@ export function CaptionPanel({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 4 }}
             onClick={scrollToBottom}
-            className="absolute bottom-1 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1 rounded-full bg-accent text-white text-xs shadow-md hover:bg-accent-hover transition-colors z-10"
+            className="absolute bottom-1 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1 rounded-full bg-accent text-on-accent text-xs shadow-md hover:bg-accent-hover transition-colors z-10"
           >
             <ArrowDown className="w-3 h-3" />
             Latest

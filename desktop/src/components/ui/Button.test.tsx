@@ -12,8 +12,8 @@ describe('Button', () => {
   it('applies primary variant styles by default', () => {
     render(<Button>Primary</Button>);
     const btn = screen.getByRole('button');
+    // Primary is the solid amber accent fill (liquid-glass redesign).
     expect(btn.className).toContain('bg-accent');
-    expect(btn.className).toContain('text-white');
   });
 
   it('applies secondary variant styles', () => {

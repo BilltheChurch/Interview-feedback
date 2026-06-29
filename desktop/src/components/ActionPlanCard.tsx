@@ -21,13 +21,13 @@ export function ActionPlanCard({ items }: Props) {
         {items.map((item, i) => (
           <div key={i} className="border border-border rounded-[--radius-card] p-3">
             <div className="flex items-start gap-2">
-              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-accent text-white text-xs font-bold shrink-0">
+              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-accent text-on-accent text-xs font-bold shrink-0">
                 {i + 1}
               </span>
               <div>
                 <p className="text-sm font-medium text-ink">{item.action}</p>
                 <div className="mt-1.5 flex items-start gap-1.5 text-xs text-ink-secondary">
-                  <Target className="w-3.5 h-3.5 shrink-0 mt-0.5 text-accent" />
+                  <Target className="w-3.5 h-3.5 shrink-0 mt-0.5 text-accent-ink" />
                   <span>{item.practice_method}</span>
                 </div>
                 <div className="mt-1 flex items-start gap-1.5 text-xs text-ink-tertiary">

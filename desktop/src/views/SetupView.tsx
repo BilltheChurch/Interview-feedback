@@ -140,8 +140,8 @@ function ModeSelector({
               }
             `}
           >
-            <Icon className={`w-6 h-6 ${mode === value ? 'text-accent' : 'text-ink-secondary'}`} />
-            <span className={`text-sm font-medium ${mode === value ? 'text-accent' : 'text-ink'}`}>
+            <Icon className={`w-6 h-6 ${mode === value ? 'text-accent-ink' : 'text-ink-secondary'}`} />
+            <span className={`text-sm font-medium ${mode === value ? 'text-accent-ink' : 'text-ink'}`}>
               {title}
             </span>
             <span className="text-xs text-ink-tertiary text-center">{desc}</span>
@@ -193,7 +193,7 @@ function ParticipantEditor({
         </h3>
         <button
           onClick={() => setShowImport(!showImport)}
-          className="text-xs text-accent font-medium hover:underline flex items-center gap-1 cursor-pointer"
+          className="text-xs text-accent-ink font-medium hover:underline flex items-center gap-1 cursor-pointer"
         >
           <ClipboardPaste className="w-3 h-3" />
           Paste list
@@ -312,7 +312,7 @@ function FlowEditor({
             key={preset.label}
             type="button"
             onClick={() => onStagesChange(preset.stages)}
-            className="text-xs px-2.5 py-1 rounded-[--radius-chip] border border-border text-ink-secondary hover:border-accent hover:text-accent transition-colors cursor-pointer"
+            className="text-xs px-2.5 py-1 rounded-[--radius-chip] border border-border text-ink-secondary hover:border-accent hover:text-accent-ink transition-colors cursor-pointer"
           >
             {preset.label}
           </button>
@@ -600,7 +600,7 @@ function MeetingConnector({
           )}
         </div>
         {error && <p className="text-error text-xs">{error}</p>}
-        {copied && !teamsUrl && <p className="text-accent text-xs">Invite copied to clipboard!</p>}
+        {copied && !teamsUrl && <p className="text-accent-ink text-xs">Invite copied to clipboard!</p>}
       </div>
     </div>
   );
@@ -678,7 +678,7 @@ function SetupSummary({
               <p className="text-ink text-xs truncate flex-1">{teamsUrl}</p>
               <button
                 onClick={handleCopyInvite}
-                className="inline-flex items-center gap-1 text-xs text-accent hover:underline cursor-pointer shrink-0"
+                className="inline-flex items-center gap-1 text-xs text-accent-ink hover:underline cursor-pointer shrink-0"
               >
                 <ClipboardPaste className="w-3 h-3" />
                 {copied ? 'Copied!' : 'Copy Invite'}
@@ -956,7 +956,7 @@ export function SetupView() {
                 >
                   <div className={`
                     w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-colors
-                    ${i < step ? 'bg-accent text-white' : i === step ? 'bg-accent text-white' : 'bg-border text-ink-tertiary'}
+                    ${i < step ? 'bg-accent text-on-accent' : i === step ? 'bg-accent text-on-accent' : 'bg-border text-ink-tertiary'}
                   `}>
                     {i < step ? <Check className="w-3.5 h-3.5" /> : i + 1}
                   </div>
@@ -1071,7 +1071,7 @@ export function SetupView() {
                         >
                           <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-ink-tertiary" />
                           <div className="pr-6">
-                            <p className={`text-sm font-medium ${template === t.value ? 'text-accent' : 'text-ink'}`}>
+                            <p className={`text-sm font-medium ${template === t.value ? 'text-accent-ink' : 'text-ink'}`}>
                               {t.label}
                             </p>
                             <p className="text-xs text-ink-tertiary mt-0.5">
@@ -1084,7 +1084,7 @@ export function SetupView() {
                               e.stopPropagation();
                               handleEditTemplate(t.value);
                             }}
-                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent-ink transition-colors cursor-pointer"
                             aria-label={`Edit ${t.label}`}
                           >
                             <Pencil className="w-3 h-3" />
@@ -1110,9 +1110,9 @@ export function SetupView() {
                           `}
                           onClick={() => setTemplate(t.id)}
                         >
-                          <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-accent" />
+                          <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-accent-ink" />
                           <div className="pr-6">
-                            <p className={`text-sm font-medium ${template === t.id ? 'text-accent' : 'text-ink'}`}>
+                            <p className={`text-sm font-medium ${template === t.id ? 'text-accent-ink' : 'text-ink'}`}>
                               {t.name}
                             </p>
                             <p className="text-xs text-ink-tertiary mt-0.5">
@@ -1125,7 +1125,7 @@ export function SetupView() {
                               e.stopPropagation();
                               handleEditTemplate(t.id);
                             }}
-                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent transition-colors cursor-pointer"
+                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent-ink transition-colors cursor-pointer"
                             aria-label={`Edit ${t.name}`}
                           >
                             <Pencil className="w-3 h-3" />
@@ -1146,7 +1146,7 @@ export function SetupView() {
                         className="
                           w-full flex flex-col items-center justify-center gap-2 p-2.5
                           border-dashed border-2 border-border rounded-[--radius-card]
-                          text-ink-secondary hover:border-accent hover:text-accent
+                          text-ink-secondary hover:border-accent hover:text-accent-ink
                           transition-all cursor-pointer min-h-[76px]
                         "
                       >
@@ -1170,7 +1170,7 @@ export function SetupView() {
                           type="button"
                           className={`px-3 py-1.5 rounded-lg text-sm border transition-colors cursor-pointer ${
                             interviewType === preset.interview_type
-                              ? 'border-accent bg-accent/10 text-accent'
+                              ? 'border-accent bg-accent-soft text-accent-ink'
                               : 'border-border text-secondary hover:border-accent/50'
                           }`}
                           onClick={() => {
@@ -1190,7 +1190,7 @@ export function SetupView() {
                     </label>
                     {dimensionPresets.map((dim, i) => (
                       <div key={dim.key} className="flex items-center gap-2 p-2 rounded-lg bg-surface border border-border">
-                        <CheckSquare className="w-4 h-4 text-accent shrink-0" />
+                        <CheckSquare className="w-4 h-4 text-accent-ink shrink-0" />
                         <span className="text-sm font-medium">{dim.label_zh}</span>
                         <span className="text-xs text-secondary flex-1 truncate">{dim.description}</span>
                         {dimensionPresets.length > 3 && (
@@ -1217,7 +1217,7 @@ export function SetupView() {
                             setDimensionPresets(prev => [...prev, available]);
                           }
                         }}
-                        className="text-xs text-accent hover:underline flex items-center gap-1 cursor-pointer"
+                        className="text-xs text-accent-ink hover:underline flex items-center gap-1 cursor-pointer"
                       >
                         <Plus className="w-3 h-3" />
                         添加维度

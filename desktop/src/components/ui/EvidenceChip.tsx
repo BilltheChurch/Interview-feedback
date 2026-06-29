@@ -15,7 +15,7 @@ export function EvidenceChip({ timestamp, speaker, quote, onClick, className = '
       onClick={onClick}
       className={`
         inline-flex items-center gap-1.5 rounded-[--radius-pill] border
-        bg-accent-soft border-accent/20 text-accent
+        bg-accent-soft border-accent/20 text-accent-ink
         text-xs px-2.5 py-1 cursor-pointer hover:bg-accent/10
         transition-colors duration-150
         ${className}

@@ -8,7 +8,7 @@ export function FootnoteRef({ index, expanded, onClick }: FootnoteRefProps) {
   return (
     <sup
       className={`cursor-pointer font-medium text-[10px] ml-0.5 transition-colors ${
-        expanded ? 'text-white bg-accent rounded-full px-1' : 'text-accent hover:underline'
+        expanded ? 'text-on-accent bg-accent rounded-full px-1' : 'text-accent-ink hover:underline'
       }`}
       onClick={(e) => { e.stopPropagation(); onClick?.(); }}
       role="button"

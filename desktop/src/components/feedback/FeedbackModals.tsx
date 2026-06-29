@@ -50,7 +50,7 @@ export function EvidenceDetailModal({
     <Modal open={open} onClose={onClose} title="Evidence Detail" size="lg">
       <div className="space-y-4">
         <div className="flex items-center gap-3 flex-wrap">
-          <span className="font-mono text-sm text-accent font-medium">
+          <span className="font-mono text-sm text-accent-ink font-medium">
             [{formatTimestamp(evidence.timestamp_ms)}]
           </span>
           <span className="text-sm font-medium text-ink">{evidence.speaker}</span>
@@ -261,7 +261,7 @@ export function EditClaimModal({
                   onClick={() => handleAddRef(ev.id)}
                   className={`w-full text-left flex items-center gap-2 rounded-[--radius-button] px-2 py-1.5 hover:bg-surface-hover transition-colors cursor-pointer ${ev.weak ? 'border border-dashed border-amber-300' : ''}`}
                 >
-                  <span className="font-mono text-xs text-accent">[{formatTimestamp(ev.timestamp_ms)}]</span>
+                  <span className="font-mono text-xs text-accent-ink">[{formatTimestamp(ev.timestamp_ms)}]</span>
                   <span className="text-xs font-medium text-ink">{ev.speaker}:</span>
                   <span className="text-xs text-ink-secondary truncate flex-1">&ldquo;{ev.text}&rdquo;</span>
                   <ConfidenceBadge score={ev.confidence} />

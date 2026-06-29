@@ -29,7 +29,7 @@ export function InlineEvidenceCard({ quote, speaker, timestamp, confidence, onVi
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onViewContext(); }}
-              className="inline-flex items-center gap-0.5 text-accent hover:underline cursor-pointer"
+              className="inline-flex items-center gap-0.5 text-accent-ink hover:underline cursor-pointer"
             >
               查看上下文
               <ExternalLink className="w-3 h-3" />

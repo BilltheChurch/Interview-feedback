@@ -1,25 +1,29 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg: #F6F2EA;
+  /* ── Light liquid glass · single tangerine accent ── */
+  --color-bg: #F6F5F2;            /* clean warm-neutral light */
   --color-surface: #FFFFFF;
-  --color-surface-hover: #FAFAF7;
-  --color-ink: #1E2A32;
-  --color-ink-secondary: #566A77;
-  --color-ink-tertiary: #9CA8B2;
-  --color-border: #E8E4DC;
-  --color-accent: #0D6A63;
-  --color-accent-hover: #0A5650;
-  --color-accent-soft: #DCF0ED;
+  --color-surface-hover: #F1EFEA;
+  --color-ink: #1A1B1E;           /* near-black */
+  --color-ink-secondary: #585C66; /* AA on light (~6:1) */
+  --color-ink-tertiary: #8A8F99;  /* hints */
+  --color-border: rgba(20, 22, 30, 0.10);
+  --color-accent: #FF7A1A;        /* tangerine — FILL only (buttons, pill, dot) */
+  --color-accent-hover: #F06A05;
+  --color-accent-soft: rgba(255, 122, 26, 0.14);
+  --color-accent-ink: #B5560A;    /* tangerine — TEXT on light (AA ~4.6:1) */
+  --color-on-accent: #3A1500;     /* dark text/icons placed ON the tangerine fill */
   --color-warning: #B45309;
-  --color-error: #DC2626;
-  --color-success: #059669;
+  --color-error: #C92A2A;         /* deep enough that white text passes AA */
+  --color-success: #15803D;
 
-  /* Glass surface colors */
-  --color-glass: rgba(255, 255, 255, 0.72);
-  --color-glass-border: rgba(255, 255, 255, 0.45);
+  /* Glass surface colors (light frosted) */
+  --color-glass: rgba(255, 255, 255, 0.62);
+  --color-glass-strong: rgba(255, 255, 255, 0.74);
+  --color-glass-border: rgba(255, 255, 255, 0.7);
 
-  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
   /* Rounded radii — softer, less boxy */
@@ -29,10 +33,10 @@
   --radius-pill: 20px;
   --radius-modal: 20px;
 
-  --shadow-card: 0 1px 3px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03);
-  --shadow-card-hover: 0 2px 8px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.04);
-  --shadow-glass: 0 4px 24px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-  --shadow-modal: 0 8px 32px rgba(0,0,0,0.12);
+  --shadow-card: 0 12px 30px -16px rgba(20,22,40,0.18), 0 0 0 1px rgba(20,22,40,0.03);
+  --shadow-card-hover: 0 18px 40px -16px rgba(20,22,40,0.24), 0 0 0 1px rgba(20,22,40,0.04);
+  --shadow-glass: 0 12px 30px -16px rgba(20,22,40,0.16), 0 0 0 1px rgba(20,22,40,0.03);
+  --shadow-modal: 0 30px 70px -24px rgba(20,22,40,0.32);
 
   /* Animation tokens */
   --ease-out-smooth: cubic-bezier(0.22, 1, 0.36, 1);
@@ -86,14 +90,76 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* ── Glassmorphism utility ── */
+/* ── Liquid glass utilities (light frosted) ── */
 .glass {
-  background: var(--color-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  position: relative;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.46)),
+    var(--color-glass);
+  backdrop-filter: blur(22px) saturate(1.4);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4);
   border: 1px solid var(--color-glass-border);
-  box-shadow: var(--shadow-glass);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px rgba(20, 22, 40, 0.02),
+    var(--shadow-glass);
 }
+.glass-strong {
+  position: relative;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.62)),
+    var(--color-glass-strong);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid var(--color-glass-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(20, 22, 40, 0.02),
+    var(--shadow-glass);
+}
+/* Specular top-left sheen — the "liquid" highlight that sells the glass */
+.glass::before,
+.glass-strong::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(130% 85% at 10% -10%, rgba(255, 255, 255, 0.6), transparent 46%);
+}
+/* Accessibility / perf: drop transparency when the OS asks for it */
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .glass-strong {
+    background: #ffffff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .glass::before, .glass-strong::before { display: none; }
+}
+
+/* Animated dark scene backdrop (used by <GlassScene/>) */
+.glass-scene {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(110% 110% at 8% -12%, rgba(255, 122, 26, 0.06) 0%, rgba(255, 122, 26, 0) 46%),
+    linear-gradient(165deg, #F8F7F4 0%, #F4F3EF 60%, #F1EFEA 100%);
+}
+.glass-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.5;
+  pointer-events: none;
+  animation: glass-drift 18s ease-in-out infinite;
+}
+@keyframes glass-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(24px, -18px) scale(1.08); }
+}
+
 
 /* ── Thin scrollbar for horizontal card trays ── */
 ::-webkit-scrollbar {

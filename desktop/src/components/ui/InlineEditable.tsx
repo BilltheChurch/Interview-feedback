@@ -62,7 +62,7 @@ export function InlineEditable({
         }}
         onBlur={handleSave}
         onKeyDown={handleKeyDown}
-        className={`w-full resize-none border border-accent/40 rounded px-2 py-1 text-sm text-ink bg-white focus:outline-none focus:ring-1 focus:ring-accent ${textareaClassName}`}
+        className={`w-full resize-none border border-accent/40 rounded px-2 py-1 text-sm text-ink bg-surface focus:outline-none focus:ring-1 focus:ring-accent ${textareaClassName}`}
       />
     );
   }

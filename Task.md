@@ -20,6 +20,7 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - **D8 群面命名 = 匿名 diarization(S1/S2) + 自我介绍自动抽名 + 手动纠正兜底**（不做两段式重型 enrollment）
 - **红队评审已完成（2026-06-27，6-agent）**：方向成立但 6 维度全 needs-adjustment，强制调整见设计文档 §9。关键修正：①逐字稿不过 LLM（确定性清洗，LLM 只做总结/memo/打分）②每场=2路并发流、付费从第一天、免费层实为~20h且仅1场并发 ③群面 diarization 是 best-effort 需兜底 ④删 global-cluster 前先把 /cluster-map 改接 Speechmatics 标签 ⑤静音保活帧是刚需（看题阶段全员静音）⑥inference 移植真实规模~2.4k 行跨4服务。
 - 注意：Phase 5 的 OAuth 配置与实机验收待办**仍然有效**，但需在 Phase 6 架构落地后再执行。
+- **[并行轨道] 桌面端 UI 重设计（2026-06-29，分支 `feat/ui-liquid-glass`，未合 main）**：从暗色翻为**浅色液态玻璃** + **单一橘橙强调色**(3 token：`--color-accent`#FF7A1A 填充 / `--color-accent-ink`#B5560A 浅底文字 / `--color-on-accent`#3A1500 填充上文字) + **GSAP `back.out` 回弹 SegmentedControl**(gsap + @gsap/react) + **Plus Jakarta Sans**。全站对比度迁移(深→浅、teal→橘橙，66 处 text-accent→ink、白字→on-accent，26 文件)。用 design-taste-frontend + ui-ux-pro-max + gsap-react 三个 skill 完成。基础+全视图已验收,待回主线后择机合并。详见 memory `desktop-ui-redesign-direction`。
 
 ## 2. 里程碑总览（来自《开发计划》）
 - Phase 0: 账号/环境
@@ -274,6 +275,12 @@ Validation Date: 2026-02-15
 - [x] `cd edge/worker && npx vitest run` -> 59 tests passed
 - [x] `cd edge/worker && npm run typecheck` -> TypeScript check passed
 - [x] Total: **217 tests all passing**
+
+Validation Date: 2026-06-29（UI 重设计 `feat/ui-liquid-glass`）
+- [x] `cd desktop && npx tsc --noEmit` -> passed
+- [x] `cd desktop && npx vitest run` -> **234 tests passed**
+- [x] `cd desktop && npx vite build` -> production build passed
+- UI: 浅色液态玻璃 + 橘橙单 accent + GSAP `back.out` SegmentedControl;全站对比度迁移(text-accent→accent-ink、白字→on-accent，26 文件)；其余 5 视图自动翻浅 + 残留清理(隐形 tint、登录按钮、bg-white→bg-surface)
 
 ## 7. 当前阻塞与处理
 - **[架构] 旧架构依赖自建推理**：`if.frontierace.ai` 是开发机 tunnel（现 1033 不健康），不满足"用户零部署"。→ Phase 6 用 Speechmatics + Worker 直调 LLM 取代，删除 `inference/`。

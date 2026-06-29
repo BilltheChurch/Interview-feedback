@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 
 const variantStyles = {
   default: 'bg-surface-hover border-border text-ink-secondary',
-  accent: 'bg-accent-soft border-accent/20 text-accent',
+  accent: 'bg-accent-soft border-accent/20 text-accent-ink',
   info: 'bg-blue-50 border-blue-200 text-blue-700',
   warning: 'bg-amber-50 border-amber-200 text-amber-700',
   error: 'bg-red-50 border-red-200 text-error',

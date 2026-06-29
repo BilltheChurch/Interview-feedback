@@ -12,7 +12,7 @@ const typeStyles: Record<ToastType, string> = {
   success: 'border-success text-success',
   error: 'border-error text-error',
   warning: 'border-warning text-warning',
-  info: 'border-accent text-accent',
+  info: 'border-accent text-accent-ink',
 };
 
 function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: string) => void }) {

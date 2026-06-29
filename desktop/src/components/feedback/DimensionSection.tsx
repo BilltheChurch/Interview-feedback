@@ -53,13 +53,13 @@ export function DimensionSection({
           ? <ChevronDown className="w-3.5 h-3.5 text-ink-tertiary" />
           : <ChevronRight className="w-3.5 h-3.5 text-ink-tertiary" />
         }
-        <Icon className="w-4 h-4 text-accent" />
+        <Icon className="w-4 h-4 text-accent-ink" />
         <div className="flex items-center gap-2 flex-1 text-left">
           <span className="text-sm font-semibold text-ink">
             {dim.label_zh ?? (dim.dimension.charAt(0).toUpperCase() + dim.dimension.slice(1))}
           </span>
           {dim.score !== undefined && (
-            <span className={`text-sm font-mono ${dim.score < 4 ? 'text-red-500' : dim.score >= 8 ? 'text-accent' : 'text-secondary'}`}>
+            <span className={`text-sm font-mono ${dim.score < 4 ? 'text-red-500' : dim.score >= 8 ? 'text-accent-ink' : 'text-secondary'}`}>
               {typeof dim.score === 'number' ? dim.score.toFixed(1) : dim.score}
             </span>
           )}
@@ -118,7 +118,7 @@ export function DimensionSection({
                     </p>
                   )}
                   {dimensionImprovement.example_response && (
-                    <div className="bg-white/60 rounded p-2 mt-1">
+                    <div className="bg-surface-hover rounded p-2 mt-1">
                       <p className="text-xs text-secondary mb-1">示范回答:</p>
                       <p className="text-sm text-ink italic leading-relaxed">
                         &quot;{dimensionImprovement.example_response}&quot;
