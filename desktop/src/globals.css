@@ -1,29 +1,29 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── Midnight vibrancy (dark liquid glass) ── */
-  --color-bg: #0b0c16;
-  --color-surface: #161826;
-  --color-surface-hover: #1d2032;
-  --color-ink: #f4f5ff;
-  --color-ink-secondary: #a9aecb;
-  --color-ink-tertiary: #7a7f9c;
-  --color-border: rgba(255, 255, 255, 0.12);
-  --color-accent: #7c6bff;
-  --color-accent-hover: #8b7bff;
-  --color-accent-soft: rgba(124, 107, 255, 0.18);
-  --color-accent-2: #21d4fd;
-  --color-warning: #f5b042;
-  --color-error: #ff6b6b;
-  --color-success: #34d99a;
+  /* ── Light liquid glass · single tangerine accent ── */
+  --color-bg: #F6F5F2;            /* clean warm-neutral light */
+  --color-surface: #FFFFFF;
+  --color-surface-hover: #F1EFEA;
+  --color-ink: #1A1B1E;           /* near-black */
+  --color-ink-secondary: #585C66; /* AA on light (~6:1) */
+  --color-ink-tertiary: #8A8F99;  /* hints */
+  --color-border: rgba(20, 22, 30, 0.10);
+  --color-accent: #FF7A1A;        /* tangerine — FILL only (buttons, pill, dot) */
+  --color-accent-hover: #F06A05;
+  --color-accent-soft: rgba(255, 122, 26, 0.14);
+  --color-accent-ink: #B5560A;    /* tangerine — TEXT on light (AA ~4.6:1) */
+  --color-on-accent: #3A1500;     /* dark text/icons placed ON the tangerine fill */
+  --color-warning: #B45309;
+  --color-error: #C92A2A;         /* deep enough that white text passes AA */
+  --color-success: #15803D;
 
-  /* Glass surface colors */
-  --color-glass: rgba(28, 29, 44, 0.55);
-  --color-glass-strong: rgba(34, 36, 56, 0.66);
-  --color-glass-border: rgba(255, 255, 255, 0.14);
-  --gradient-accent: linear-gradient(120deg, #8b7bff 0%, #36dcff 100%);
+  /* Glass surface colors (light frosted) */
+  --color-glass: rgba(255, 255, 255, 0.62);
+  --color-glass-strong: rgba(255, 255, 255, 0.74);
+  --color-glass-border: rgba(255, 255, 255, 0.7);
 
-  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
   /* Rounded radii — softer, less boxy */
@@ -33,10 +33,10 @@
   --radius-pill: 20px;
   --radius-modal: 20px;
 
-  --shadow-card: 0 18px 40px -22px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.08);
-  --shadow-card-hover: 0 28px 56px -22px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.14);
-  --shadow-glass: 0 18px 40px -22px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.10);
-  --shadow-modal: 0 40px 90px -30px rgba(0,0,0,0.85);
+  --shadow-card: 0 12px 30px -16px rgba(20,22,40,0.18), 0 0 0 1px rgba(20,22,40,0.03);
+  --shadow-card-hover: 0 18px 40px -16px rgba(20,22,40,0.24), 0 0 0 1px rgba(20,22,40,0.04);
+  --shadow-glass: 0 12px 30px -16px rgba(20,22,40,0.16), 0 0 0 1px rgba(20,22,40,0.03);
+  --shadow-modal: 0 30px 70px -24px rgba(20,22,40,0.32);
 
   /* Animation tokens */
   --ease-out-smooth: cubic-bezier(0.22, 1, 0.36, 1);
@@ -90,20 +90,51 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* ── Liquid glass utilities (Midnight vibrancy) ── */
+/* ── Liquid glass utilities (light frosted) ── */
 .glass {
-  background: var(--color-glass);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  position: relative;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.46)),
+    var(--color-glass);
+  backdrop-filter: blur(22px) saturate(1.4);
+  -webkit-backdrop-filter: blur(22px) saturate(1.4);
   border: 1px solid var(--color-glass-border);
-  box-shadow: var(--shadow-glass);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px rgba(20, 22, 40, 0.02),
+    var(--shadow-glass);
 }
 .glass-strong {
-  background: var(--color-glass-strong);
-  backdrop-filter: blur(22px) saturate(1.5);
-  -webkit-backdrop-filter: blur(22px) saturate(1.5);
+  position: relative;
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.62)),
+    var(--color-glass-strong);
+  backdrop-filter: blur(24px) saturate(1.5);
+  -webkit-backdrop-filter: blur(24px) saturate(1.5);
   border: 1px solid var(--color-glass-border);
-  box-shadow: var(--shadow-glass);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 0 0 1px rgba(20, 22, 40, 0.02),
+    var(--shadow-glass);
+}
+/* Specular top-left sheen — the "liquid" highlight that sells the glass */
+.glass::before,
+.glass-strong::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(130% 85% at 10% -10%, rgba(255, 255, 255, 0.6), transparent 46%);
+}
+/* Accessibility / perf: drop transparency when the OS asks for it */
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .glass-strong {
+    background: #ffffff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .glass::before, .glass-strong::before { display: none; }
 }
 
 /* Animated dark scene backdrop (used by <GlassScene/>) */
@@ -113,29 +144,22 @@ body {
   overflow: hidden;
   pointer-events: none;
   background:
-    radial-gradient(120% 120% at 12% -10%, #2a2150 0%, rgba(42,33,80,0) 46%),
-    radial-gradient(110% 110% at 100% 0%, #0f3a4d 0%, rgba(15,58,77,0) 50%),
-    radial-gradient(120% 130% at 80% 110%, #3a1c4d 0%, rgba(58,28,77,0) 52%),
-    linear-gradient(160deg, #0a0b14 0%, #0d0f1c 55%, #08090f 100%);
+    radial-gradient(110% 110% at 8% -12%, rgba(255, 122, 26, 0.06) 0%, rgba(255, 122, 26, 0) 46%),
+    linear-gradient(165deg, #F8F7F4 0%, #F4F3EF 60%, #F1EFEA 100%);
 }
 .glass-blob {
   position: absolute;
   border-radius: 50%;
-  filter: blur(60px);
+  filter: blur(70px);
   opacity: 0.5;
   pointer-events: none;
-  animation: glass-drift 16s ease-in-out infinite;
+  animation: glass-drift 18s ease-in-out infinite;
 }
 @keyframes glass-drift {
   0%, 100% { transform: translate(0, 0) scale(1); }
   50% { transform: translate(24px, -18px) scale(1.08); }
 }
 
-/* Accent-gradient fill (primary buttons, active pills) */
-.btn-gradient {
-  background-image: var(--gradient-accent);
-  color: #0b0c16;
-}
 
 /* ── Thin scrollbar for horizontal card trays ── */
 ::-webkit-scrollbar {

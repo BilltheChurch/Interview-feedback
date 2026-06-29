@@ -113,7 +113,7 @@ export function PipOverlay() {
           {/* Row 4: current stage */}
           {stageName && (
             <div className="text-xs text-ink-tertiary truncate">
-              Stage: <span className="text-accent font-medium">{stageName}</span>
+              Stage: <span className="text-accent-ink font-medium">{stageName}</span>
             </div>
           )}
         </motion.div>

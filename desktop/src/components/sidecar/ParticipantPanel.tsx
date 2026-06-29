@@ -66,7 +66,7 @@ export function EnrollmentPanel({
           {p.status === 'needs_confirm' && (
             <button
               onClick={(e) => { e.stopPropagation(); onConfirm(p.name); }}
-              className="text-xs text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
+              className="text-xs text-accent-ink font-medium hover:underline transition-colors duration-150 cursor-pointer"
             >
               Confirm
             </button>
@@ -74,7 +74,7 @@ export function EnrollmentPanel({
           {(p.status === 'pending' || p.status === 'not_enrolled') && (
             <button
               onClick={(e) => { e.stopPropagation(); onEnroll(p.name); }}
-              className="text-xs text-accent font-medium hover:underline transition-colors duration-150 cursor-pointer"
+              className="text-xs text-accent-ink font-medium hover:underline transition-colors duration-150 cursor-pointer"
             >
               {p.status === 'not_enrolled' ? 'Retry' : 'Enroll'}
             </button>

@@ -30,7 +30,7 @@ export function FootnoteList({ entries, onFootnoteClick }: FootnoteListProps) {
             }
           }}
         >
-          <span className="text-accent font-medium shrink-0">{e.index}</span>
+          <span className="text-accent-ink font-medium shrink-0">{e.index}</span>
           <span className="text-secondary/60">[{e.timestamp}]</span>
           <span className="font-medium">{e.speaker}:</span>
           <span className="truncate italic">&quot;{e.quote}&quot;</span>

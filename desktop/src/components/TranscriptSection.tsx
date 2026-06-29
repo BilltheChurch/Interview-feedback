@@ -158,7 +158,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
         <button
           onClick={() => setActiveSpeaker(null)}
           className={`px-2.5 py-1 text-xs rounded-full border transition-colors cursor-pointer ${
-            !activeSpeaker ? 'bg-accent text-white border-accent' : 'border-border text-ink-secondary hover:bg-surface-hover'
+            !activeSpeaker ? 'bg-accent text-on-accent border-accent' : 'border-border text-ink-secondary hover:bg-surface-hover'
           }`}
         >
           All
@@ -185,7 +185,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="Search transcript..."
-            className="pl-7 pr-3 py-1 text-xs border border-border rounded-[--radius-button] bg-white focus:outline-none focus:ring-1 focus:ring-accent w-48"
+            className="pl-7 pr-3 py-1 text-xs border border-border rounded-[--radius-button] bg-surface focus:outline-none focus:ring-1 focus:ring-accent w-48"
           />
         </div>
       </div>
@@ -200,7 +200,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
       {/* Virtualized list */}
       <div
         ref={parentRef}
-        className={`${fillHeight ? 'flex-1 min-h-0' : 'h-[500px]'} overflow-y-auto rounded-[--radius-card] border border-border bg-white`}
+        className={`${fillHeight ? 'flex-1 min-h-0' : 'h-[500px]'} overflow-y-auto rounded-[--radius-card] border border-border bg-surface`}
       >
         <div
           style={{ height: `${virtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}
@@ -239,7 +239,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                     <div className="flex gap-1 ml-auto items-center">
                       <button
                         onClick={() => onEvidenceBadgeClick?.([...new Set(group.evidenceIds)][0])}
-                        className="px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent rounded cursor-pointer hover:bg-accent/20 transition-colors"
+                        className="px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent-ink rounded cursor-pointer hover:bg-accent/20 transition-colors"
                         title={`${[...new Set(group.evidenceIds)].length} 条证据引用`}
                       >
                         {[...new Set(group.evidenceIds)].length} 引用

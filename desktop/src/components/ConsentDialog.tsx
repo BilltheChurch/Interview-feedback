@@ -70,7 +70,7 @@ export function ConsentDialog({ open, onAccept, onCancel }: ConsentDialogProps) 
         {/* Icon + heading */}
         <div className="flex items-start gap-3">
           <div className="shrink-0 w-9 h-9 rounded-full bg-accent-soft flex items-center justify-center">
-            <ShieldCheck className="w-5 h-5 text-accent" />
+            <ShieldCheck className="w-5 h-5 text-accent-ink" />
           </div>
           <div>
             <h2 className="text-base font-semibold text-ink leading-snug">Recording Consent</h2>

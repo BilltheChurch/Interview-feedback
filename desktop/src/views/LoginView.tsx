@@ -49,7 +49,7 @@ export function LoginView({ onAuthenticated }: LoginViewProps) {
         {/* Branding */}
         <div className="flex flex-col items-center gap-3">
           <div className="w-16 h-16 rounded-2xl bg-accent flex items-center justify-center shadow-card">
-            <AudioLines className="w-8 h-8 text-white" />
+            <AudioLines className="w-8 h-8 text-on-accent" />
           </div>
           <h1 className="text-2xl font-semibold text-ink tracking-tight">Chorus</h1>
           <p className="text-sm text-ink-secondary">Every voice counts</p>
@@ -61,7 +61,7 @@ export function LoginView({ onAuthenticated }: LoginViewProps) {
           <button
             onClick={handleMicrosoft}
             disabled={loading !== null}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-[--radius-button] font-medium text-sm transition-colors duration-150 bg-[#2F2F2F] text-white hover:bg-[#404040] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-[--radius-button] font-medium text-sm transition-colors duration-150 bg-surface border border-border text-ink hover:bg-surface-hover disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
           >
             {loading === 'microsoft' ? (
               <Loader2 className="w-5 h-5 animate-spin" />
@@ -80,7 +80,7 @@ export function LoginView({ onAuthenticated }: LoginViewProps) {
           <button
             onClick={handleGoogle}
             disabled={loading !== null}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-[--radius-button] font-medium text-sm transition-colors duration-150 bg-white border border-border text-ink hover:bg-surface-hover disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            className="w-full flex items-center justify-center gap-3 px-4 py-3 rounded-[--radius-button] font-medium text-sm transition-colors duration-150 bg-surface border border-border text-ink hover:bg-surface-hover disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
           >
             {loading === 'google' ? (
               <Loader2 className="w-5 h-5 animate-spin text-ink-tertiary" />

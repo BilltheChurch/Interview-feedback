@@ -8,8 +8,12 @@ import { HomeView } from './HomeView';
 vi.mock('motion/react', () => ({
   motion: {
     div: ({ children, ...props }: React.HTMLAttributes<HTMLDivElement>) => <div {...props}>{children}</div>,
+    span: ({ children, ...props }: React.HTMLAttributes<HTMLSpanElement>) => <span {...props}>{children}</span>,
   },
   AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  // Pointer-spotlight + layout primitives used by GlassCard / SegmentedControl
+  useMotionValue: (init: number) => ({ set: () => {}, get: () => init }),
+  useMotionTemplate: () => '',
 }));
 
 // Mock hooks that have external dependencies

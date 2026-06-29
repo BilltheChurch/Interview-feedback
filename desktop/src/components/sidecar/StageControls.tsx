@@ -63,7 +63,7 @@ export function FlowControl({
             key={stage}
             className={`
               flex items-center gap-2 px-2 py-1 rounded-lg text-xs font-medium transition-colors duration-150
-              ${isCurrent ? 'bg-accent-soft text-accent' : ''}
+              ${isCurrent ? 'bg-accent-soft text-accent-ink' : ''}
               ${isPast ? 'text-ink-tertiary' : ''}
               ${!isPast && !isCurrent ? 'text-ink-tertiary opacity-50' : ''}
             `}
@@ -138,11 +138,11 @@ function StageTimelineEntry({
             <div className="px-4 pb-2 flex flex-col gap-1.5">
               {archive.freeformHtml ? (
                 <div
-                  className="text-sm text-ink-secondary bg-surface/50 rounded-lg px-2.5 py-1.5 leading-relaxed prose prose-sm max-w-none memo-highlight-view"
+                  className="text-sm text-ink-secondary bg-surface-hover rounded-lg px-2.5 py-1.5 leading-relaxed prose prose-sm max-w-none memo-highlight-view"
                   dangerouslySetInnerHTML={{ __html: sanitizeHtml(archive.freeformHtml) }}
                 />
               ) : archive.freeformText.trim() ? (
-                <p className="text-sm text-ink-secondary bg-surface/50 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap leading-relaxed">
+                <p className="text-sm text-ink-secondary bg-surface-hover rounded-lg px-2.5 py-1.5 whitespace-pre-wrap leading-relaxed">
                   {archive.freeformText}
                 </p>
               ) : null}
@@ -181,7 +181,7 @@ export function StageTimeline({
   if (archives.length === 0) return null;
 
   return (
-    <div className="border-t border-border/50 bg-ink/[0.015] shrink-0 max-h-[200px] overflow-y-auto">
+    <div className="border-t border-border/50 bg-surface-hover shrink-0 max-h-[200px] overflow-y-auto">
       {archives.map((archive) => {
         const stageMemos = allMemos.filter(
           (m) => archive.memoIds.includes(m.id),

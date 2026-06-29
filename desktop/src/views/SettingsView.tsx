@@ -44,7 +44,7 @@ function AudioSetup() {
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-4">
-        <Mic className="w-5 h-5 text-accent" />
+        <Mic className="w-5 h-5 text-accent-ink" />
         <h2 className="text-base font-semibold text-ink">Audio Setup</h2>
       </div>
 
@@ -189,7 +189,7 @@ function AccountSection() {
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-4">
-        <UserCircle className="w-5 h-5 text-accent" />
+        <UserCircle className="w-5 h-5 text-accent-ink" />
         <h2 className="text-base font-semibold text-ink">Account</h2>
       </div>
 
@@ -294,7 +294,7 @@ function TemplateManager() {
     <Card className="p-5">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <FileText className="w-5 h-5 text-accent" />
+          <FileText className="w-5 h-5 text-accent-ink" />
           <h2 className="text-base font-semibold text-ink">Rubric Templates</h2>
         </div>
         <Button variant="secondary" size="sm">
@@ -331,7 +331,7 @@ function Preferences() {
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-4">
-        <Settings className="w-5 h-5 text-accent" />
+        <Settings className="w-5 h-5 text-accent-ink" />
         <h2 className="text-base font-semibold text-ink">Preferences</h2>
       </div>
 
@@ -387,7 +387,7 @@ function ProviderSettings() {
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-4">
-        <Cpu className="w-5 h-5 text-accent" />
+        <Cpu className="w-5 h-5 text-accent-ink" />
         <h2 className="text-base font-semibold text-ink">Processing Providers</h2>
       </div>
 
@@ -432,7 +432,7 @@ function ProviderSettings() {
               }`}
             >
               <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-surface shadow ring-0 transition duration-200 ${
                   tier2Enabled ? 'translate-x-4' : 'translate-x-0'
                 }`}
               />
@@ -452,7 +452,7 @@ function SlackIntegration() {
   return (
     <Card className="p-5">
       <div className="flex items-center gap-2 mb-4">
-        <MessageSquare className="w-5 h-5 text-accent" />
+        <MessageSquare className="w-5 h-5 text-accent-ink" />
         <h2 className="text-base font-semibold text-ink">Slack Integration</h2>
       </div>
 
@@ -464,7 +464,7 @@ function SlackIntegration() {
           value={slackWebhookUrl}
           onChange={(e) => setSlackWebhookUrl(e.target.value)}
           onBlur={() => localStorage.setItem('ifb_slack_webhook', slackWebhookUrl)}
-          className="mt-1 w-full px-3 py-1.5 text-sm border border-border rounded-[--radius-button] bg-white"
+          className="mt-1 w-full px-3 py-1.5 text-sm border border-border rounded-[--radius-button] bg-surface"
         />
         <p className="text-xs text-ink-tertiary mt-1">
           Create a Slack app with Incoming Webhooks enabled and paste the URL here.

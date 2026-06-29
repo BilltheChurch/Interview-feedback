@@ -2,11 +2,11 @@ import { type ButtonHTMLAttributes, forwardRef } from 'react';
 
 const variantStyles = {
   primary:
-    'btn-gradient font-semibold hover:brightness-110 shadow-[0_12px_26px_-8px_rgba(124,107,255,0.55)]',
-  secondary: 'bg-surface border border-border text-ink hover:bg-surface-hover',
+    'bg-accent text-on-accent font-semibold hover:bg-accent-hover active:scale-[0.98] shadow-[0_8px_20px_-10px_rgba(255,122,26,0.5)]',
+  secondary: 'bg-surface border border-border text-ink hover:bg-surface-hover active:scale-[0.98]',
   ghost: 'bg-transparent text-ink-secondary hover:bg-surface-hover',
-  glass: 'glass text-ink hover:bg-white/[0.06]',
-  danger: 'bg-error text-white hover:brightness-110',
+  glass: 'glass text-ink hover:bg-surface-hover active:scale-[0.98]',
+  danger: 'bg-error text-white hover:brightness-110 active:scale-[0.98]',
 } as const;
 
 const sizeStyles = {

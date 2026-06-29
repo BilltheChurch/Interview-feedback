@@ -170,7 +170,7 @@ export function SidecarHeader({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 6 }}
               transition={{ duration: 0.15 }}
-              className="text-accent font-medium"
+              className="text-accent-ink font-medium"
             >
               {stages[currentStage]}
             </motion.span>

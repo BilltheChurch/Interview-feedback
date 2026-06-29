@@ -183,7 +183,7 @@ function WizardStep({
                 onClick={onToggleLock}
                 className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
                   enrollment.locked
-                    ? 'text-accent bg-accent-soft'
+                    ? 'text-accent-ink bg-accent-soft'
                     : 'text-ink-tertiary hover:text-ink-secondary'
                 }`}
                 title={enrollment.locked ? 'Unlock mapping' : 'Lock mapping'}

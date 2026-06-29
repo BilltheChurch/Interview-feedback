@@ -98,6 +98,6 @@ describe('ToastContainer', () => {
     );
     const alert = screen.getByRole('alert');
     expect(alert.className).toContain('border-accent');
-    expect(alert.className).toContain('text-accent');
+    expect(alert.className).toContain('text-accent-ink');
   });
 });

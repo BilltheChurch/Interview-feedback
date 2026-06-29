@@ -12,7 +12,7 @@ const navItems = [
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="relative flex flex-col h-screen bg-bg overflow-hidden">
-      {/* Global midnight-vibrancy backdrop — glass panels above refract this scene */}
+      {/* Global light backdrop — frosted panels above refract this scene */}
       <GlassScene />
 
       <div className="relative z-10 flex flex-col h-full min-h-0">
@@ -23,7 +23,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         {/* Sidebar */}
         <nav className="w-[52px] flex flex-col items-center py-3 gap-1 border-r border-border bg-surface/60 backdrop-blur-xl drag-region">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-accent-hover flex items-center justify-center mb-4 no-drag">
-            <AudioLines className="w-4 h-4 text-white" />
+            <AudioLines className="w-4 h-4 text-on-accent" />
           </div>
 
           {navItems.map(({ to, icon: Icon, label }) => (
@@ -33,7 +33,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               className={({ isActive }) =>
                 `no-drag w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200 ${
                   isActive
-                    ? 'bg-accent-soft text-accent'
+                    ? 'bg-accent-soft text-accent-ink'
                     : 'text-ink-tertiary hover:text-ink-secondary hover:bg-surface-hover'
                 }`
               }
@@ -49,7 +49,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
           {/* User avatar */}
           <div
-            className="no-drag w-8 h-8 rounded-full bg-accent-soft flex items-center justify-center text-xs font-semibold text-accent mb-1"
+            className="no-drag w-8 h-8 rounded-full bg-accent-soft flex items-center justify-center text-xs font-semibold text-accent-ink mb-1"
             title="Account"
           >
             U

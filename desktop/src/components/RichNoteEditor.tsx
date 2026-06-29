@@ -74,7 +74,7 @@ function ToolbarButton({
       aria-label={title}
       className={`
         w-7 h-7 flex items-center justify-center rounded-md transition-colors duration-150
-        ${isActive ? 'bg-accent-soft text-accent' : 'text-ink-secondary hover:bg-surface-hover'}
+        ${isActive ? 'bg-accent-soft text-accent-ink' : 'text-ink-secondary hover:bg-surface-hover'}
         ${disabled ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'}
       `}
     >

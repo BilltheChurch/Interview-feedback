@@ -251,7 +251,7 @@ export function RubricTemplateModal({
             w-full flex items-center justify-center gap-2 py-2.5
             border-2 border-dashed border-border rounded-[--radius-button]
             text-sm text-ink-secondary font-medium
-            hover:border-accent hover:text-accent
+            hover:border-accent hover:text-accent-ink
             transition-colors cursor-pointer mb-5
           "
         >

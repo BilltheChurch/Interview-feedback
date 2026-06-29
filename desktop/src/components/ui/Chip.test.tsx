@@ -19,7 +19,7 @@ describe('Chip', () => {
     render(<Chip variant="accent">Accent</Chip>);
     const chip = screen.getByText('Accent');
     expect(chip.className).toContain('bg-accent-soft');
-    expect(chip.className).toContain('text-accent');
+    expect(chip.className).toContain('text-accent-ink');
   });
 
   it('applies info variant styles', () => {

@@ -34,7 +34,7 @@ export function QuickMarkBar({
   pulsingType?: MemoType | null;
 }) {
   const buttons: { type: MemoType; icon: typeof Star; color: string; shortcut: string }[] = [
-    { type: 'highlight', icon: Star, color: 'text-accent hover:bg-accent-soft', shortcut: '1' },
+    { type: 'highlight', icon: Star, color: 'text-accent-ink hover:bg-accent-soft', shortcut: '1' },
     { type: 'issue', icon: AlertTriangle, color: 'text-warning hover:bg-amber-50', shortcut: '2' },
     { type: 'question', icon: HelpCircle, color: 'text-blue-600 hover:bg-blue-50', shortcut: '3' },
     { type: 'evidence', icon: Link2, color: 'text-purple-600 hover:bg-purple-50', shortcut: '4' },
@@ -265,7 +265,7 @@ export function MemoNotepadOverlay({
             onClick={() => hasPrev && onNavigate(memos[currentIndex - 1].id)}
             disabled={!hasPrev}
             className={`flex items-center gap-1.5 text-sm font-medium transition-colors cursor-pointer ${
-              hasPrev ? 'text-accent hover:text-accent-hover' : 'text-ink-tertiary/40 cursor-not-allowed'
+              hasPrev ? 'text-accent-ink hover:text-accent-hover' : 'text-ink-tertiary/40 cursor-not-allowed'
             }`}
           >
             <ArrowLeft className="w-4 h-4" />
@@ -278,7 +278,7 @@ export function MemoNotepadOverlay({
             onClick={() => hasNext && onNavigate(memos[currentIndex + 1].id)}
             disabled={!hasNext}
             className={`flex items-center gap-1.5 text-sm font-medium transition-colors cursor-pointer ${
-              hasNext ? 'text-accent hover:text-accent-hover' : 'text-ink-tertiary/40 cursor-not-allowed'
+              hasNext ? 'text-accent-ink hover:text-accent-hover' : 'text-ink-tertiary/40 cursor-not-allowed'
             }`}
           >
             Next
@@ -314,7 +314,7 @@ export const MemoTray = forwardRef<
       animate={{ height: 'auto', opacity: 1 }}
       exit={{ height: 0, opacity: 0 }}
       transition={{ duration: 0.25 }}
-      className="border-t border-border/50 bg-ink/[0.02] overflow-hidden shrink-0"
+      className="border-t border-border/50 bg-surface-hover overflow-hidden shrink-0"
     >
       <div
         ref={scrollRef}

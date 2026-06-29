@@ -164,7 +164,7 @@ function StageMemosSection({
     return (
       <Card glass className="border-t-2 border-t-accent p-5">
         <div className="flex items-center gap-2 mb-3">
-          <BookOpen className="w-4 h-4 text-accent" />
+          <BookOpen className="w-4 h-4 text-accent-ink" />
           <h2 className="text-sm font-semibold text-ink">Session Notes</h2>
         </div>
         <p className="text-sm text-ink-tertiary italic">No session notes captured</p>
@@ -175,7 +175,7 @@ function StageMemosSection({
   return (
     <Card glass className="border-t-2 border-t-accent p-5">
       <div className="flex items-center gap-2 mb-4">
-        <BookOpen className="w-4 h-4 text-accent" />
+        <BookOpen className="w-4 h-4 text-accent-ink" />
         <h2 className="text-sm font-semibold text-ink">Session Notes</h2>
         <Chip className="text-xs">{memos.length} memo{memos.length !== 1 ? 's' : ''}</Chip>
       </div>
@@ -232,7 +232,7 @@ function StageMemosSection({
                                   <MemoIcon className="w-3 h-3 mr-0.5 inline-block" />
                                   {config.label}
                                 </Chip>
-                                <span className="font-mono text-xs text-accent">
+                                <span className="font-mono text-xs text-accent-ink">
                                   {formatMemoTime(memo.timestamp)}
                                 </span>
                               </div>
@@ -260,7 +260,7 @@ function StageMemosSection({
                 onClick={() => toggleStage('__notes__')}
               >
                 {(openStages['__notes__'] ?? true) ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                <FileText className="w-3.5 h-3.5 text-accent" />
+                <FileText className="w-3.5 h-3.5 text-accent-ink" />
                 Free-form Notes
               </button>
               <AnimatePresence>
@@ -320,7 +320,7 @@ function StageMemosSection({
                                   <MemoIcon className="w-3 h-3 mr-0.5 inline-block" />
                                   {config.label}
                                 </Chip>
-                                <span className="font-mono text-xs text-accent">
+                                <span className="font-mono text-xs text-accent-ink">
                                   {formatMemoTime(memo.timestamp)}
                                 </span>
                               </div>
@@ -858,7 +858,7 @@ function OverallCard({
           onClick={() => setMemosOpen((v) => !v)}
         >
           {memosOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          <MessageSquare className="w-3.5 h-3.5 text-accent" />
+          <MessageSquare className="w-3.5 h-3.5 text-accent-ink" />
           Teacher Memos
         </button>
         <AnimatePresence>
@@ -872,7 +872,7 @@ function OverallCard({
             >
               {report.overall.teacher_memos.map((memo, i) => (
                 <li key={i} className="text-sm text-ink-secondary leading-relaxed flex items-start gap-2">
-                  <span className="text-accent mt-1.5 shrink-0">&#8226;</span>
+                  <span className="text-accent-ink mt-1.5 shrink-0">&#8226;</span>
                   {memo}
                 </li>
               ))}
@@ -889,7 +889,7 @@ function OverallCard({
             onClick={() => setEventsOpen((v) => !v)}
           >
             {eventsOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-            <Activity className="w-3.5 h-3.5 text-accent" />
+            <Activity className="w-3.5 h-3.5 text-accent-ink" />
             Interaction Events
           </button>
           <AnimatePresence>
@@ -916,7 +916,7 @@ function OverallCard({
       {report.persons.length > 1 && report.overall.team_dynamics.length > 0 && (
         <div className="border-t border-border pt-3">
           <div className="flex items-center gap-1.5 text-sm font-semibold text-ink mb-2">
-            <TrendingUp className="w-3.5 h-3.5 text-accent" />
+            <TrendingUp className="w-3.5 h-3.5 text-accent-ink" />
             Team Dynamics
           </div>
           <div className="space-y-1.5 pl-6">
@@ -965,7 +965,7 @@ function OverallCard({
 
       {suggestedDimensions && suggestedDimensions.length > 0 && (
         <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 mt-4">
-          <div className="flex items-center gap-2 text-sm font-medium text-accent mb-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-accent-ink mb-2">
             <Lightbulb className="w-4 h-4" />
             AI 建议
           </div>
@@ -979,7 +979,7 @@ function OverallCard({
           </div>
           <div className="flex gap-2 mt-3">
             <button
-              className="px-3 py-1 rounded-md bg-accent text-white text-xs hover:bg-accent/90 transition-colors cursor-pointer"
+              className="px-3 py-1 rounded-md bg-accent text-on-accent text-xs hover:bg-accent/90 transition-colors cursor-pointer"
               onClick={() => onAcceptSuggestions?.()}
             >
               接受建议
@@ -1217,7 +1217,7 @@ function SectionStickyHeader({ icon: Icon, title }: { icon: typeof Activity; tit
   return (
     <div className="sticky top-0 z-10 bg-bg">
       <div className="flex items-center gap-2 py-1.5 border-b border-border/40">
-        <Icon className="w-3.5 h-3.5 text-accent shrink-0" />
+        <Icon className="w-3.5 h-3.5 text-accent-ink shrink-0" />
         <span className="text-xs font-semibold text-ink-secondary uppercase tracking-wider">{title}</span>
       </div>
     </div>
@@ -1256,7 +1256,7 @@ function SectionNav({
               onClick={() => onSectionClick(section.id)}
               className={`w-full text-left px-2 py-1.5 rounded-[--radius-button] text-sm transition-colors cursor-pointer ${
                 activeSection === section.id
-                  ? 'bg-accent-soft text-accent font-medium'
+                  ? 'bg-accent-soft text-accent-ink font-medium'
                   : 'text-ink-secondary hover:bg-surface-hover hover:text-ink'
               }`}
             >
@@ -1460,7 +1460,7 @@ export function FeedbackView() {
       <div className="flex-1 min-h-0">
         {reportLoading ? (
           <div className="flex flex-col items-center justify-center h-full gap-3">
-            <Loader2 className="w-8 h-8 text-accent animate-spin" />
+            <Loader2 className="w-8 h-8 text-accent-ink animate-spin" />
             <p className="text-sm text-ink-secondary">Loading report...</p>
           </div>
         ) : (
@@ -1523,7 +1523,7 @@ export function FeedbackView() {
                   {report.persons.length === 0 && (finalizeStatus === 'awaiting' || finalizeStatus === 'finalizing') && !isDemo && (
                     <motion.div variants={fadeInUp} custom={3} className="py-4">
                       <Card className="p-8 text-center">
-                        <Loader2 className="w-6 h-6 animate-spin text-accent mx-auto mb-3" />
+                        <Loader2 className="w-6 h-6 animate-spin text-accent-ink mx-auto mb-3" />
                         <p className="text-sm text-ink-secondary">Generating feedback report...</p>
                         {finalizeProgressInfo ? (
                           <div className="mt-2">
@@ -1588,7 +1588,7 @@ export function FeedbackView() {
             </div>
 
             {transcriptOpen && (
-              <div className="w-[40%] border-l border-border flex flex-col bg-white shrink-0">
+              <div className="w-[40%] border-l border-border flex flex-col bg-surface shrink-0">
                 <div className="flex items-center justify-between p-3 border-b border-border shrink-0">
                   <span className="text-sm font-medium text-ink">Transcript</span>
                   <button

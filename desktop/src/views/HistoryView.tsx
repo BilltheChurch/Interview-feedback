@@ -146,13 +146,13 @@ function FilterChips({
             inline-flex items-center gap-1 rounded-[--radius-pill] border
             text-xs font-medium px-3 py-1.5 transition-colors duration-150 cursor-pointer
             ${active === value
-              ? 'bg-accent text-white border-accent'
+              ? 'bg-accent text-on-accent border-accent'
               : 'bg-surface text-ink-secondary border-border hover:bg-surface-hover'
             }
           `}
         >
           {label}
-          <span className={`text-xs ${active === value ? 'text-white/70' : 'text-ink-tertiary'}`}>
+          <span className={`text-xs ${active === value ? 'text-on-accent/70' : 'text-ink-tertiary'}`}>
             {counts[value]}
           </span>
         </button>
@@ -228,7 +228,7 @@ function SessionRow({
       >
         {/* Mode icon */}
         <div className="w-9 h-9 rounded-lg bg-accent-soft flex items-center justify-center shrink-0">
-          <ModeIcon className="w-4 h-4 text-accent" />
+          <ModeIcon className="w-4 h-4 text-accent-ink" />
         </div>
 
         {/* Session info */}
