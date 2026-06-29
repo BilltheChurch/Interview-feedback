@@ -172,7 +172,7 @@ class GraphCalendarClient {
     };
   }
 
-  async _acquireAccessToken() {
+  async _acquireAccessToken(silentOnly = false) {
     const pca = await this._loadCache();
     const accounts = await pca.getTokenCache().getAllAccounts();
     const account = accounts[0];
@@ -187,6 +187,12 @@ class GraphCalendarClient {
       });
       return token;
     } catch (_error) {
+      // Background callers (calendar polling, focus refresh) must NEVER pop an
+      // interactive login — silent failure there would re-prompt every poll and create
+      // an endless Microsoft sign-in loop. Interactive re-auth only on explicit user action.
+      if (silentOnly) {
+        throw new Error("Microsoft token expired — silent refresh failed (reconnect required)");
+      }
       const token = await pca.acquireTokenInteractive({
         scopes: this.scopes,
         openBrowser: this.openBrowser || undefined,
@@ -200,7 +206,8 @@ class GraphCalendarClient {
 
   async getUpcomingMeetings(options = {}) {
     const days = Number.isFinite(options.days) ? Math.max(1, Math.min(14, Number(options.days))) : 3;
-    const token = await this._acquireAccessToken();
+    // Silent-only: background polling must not trigger an interactive sign-in loop.
+    const token = await this._acquireAccessToken(true);
     const now = new Date();
     const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
 
