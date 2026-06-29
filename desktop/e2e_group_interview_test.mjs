@@ -31,7 +31,7 @@ const PCM_FILE = argVal('--audio') || '/tmp/group_interview_real_16k.pcm';
 const SESSION_ID = `e2e_group_${Date.now()}`;
 const CHUNK_SAMPLES = 16000; // 1 second @ 16kHz mono
 const CHUNK_BYTES = CHUNK_SAMPLES * 2; // 16-bit = 2 bytes per sample
-const CHUNK_DELAY_MS = 50; // send faster than real-time for testing
+const CHUNK_DELAY_MS = parseInt(argVal('--chunk-delay') || '50', 10); // ms between 1s chunks (use ~1000 for realtime Speechmatics)
 const SIDECAR_URL = argVal('--sidecar-url') || 'http://127.0.0.1:9705';
 const USE_EDGE_DIARIZATION = args.includes('--edge-diarization');
 
@@ -145,17 +145,22 @@ async function streamAudio() {
     let readyReceived = false;
 
     ws.on('open', () => {
-      console.log('  WebSocket connected');
-      ws.send(JSON.stringify({
-        type: 'hello',
-        stream_role: 'students',
-        interviewer_name: INTERVIEWER_NAME,
-        teams_participants: PARTICIPANTS,
-      }));
+      console.log('  WebSocket connected, authenticating (first-frame auth)...');
+      ws.send(JSON.stringify({ type: 'auth', key: API_KEY }));
     });
 
     ws.on('message', async (rawMsg) => {
       const msg = JSON.parse(rawMsg.toString());
+      if (msg.type === 'auth_ok') {
+        console.log('  Authenticated, sending hello...');
+        ws.send(JSON.stringify({
+          type: 'hello',
+          stream_role: 'students',
+          interviewer_name: INTERVIEWER_NAME,
+          teams_participants: PARTICIPANTS,
+        }));
+        return;
+      }
       if (msg.type === 'ready') {
         readyReceived = true;
         console.log('  Worker ready, streaming audio...');
