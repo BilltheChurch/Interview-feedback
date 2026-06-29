@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Home, Settings, Clock, AudioLines } from 'lucide-react';
+import { GlassScene } from './ui/GlassScene';
 
 const navItems = [
   { to: '/', icon: Home, label: 'Home' },
@@ -10,13 +11,17 @@ const navItems = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
-    <div className="flex flex-col h-screen bg-bg">
+    <div className="relative flex flex-col h-screen bg-bg overflow-hidden">
+      {/* Global midnight-vibrancy backdrop — glass panels above refract this scene */}
+      <GlassScene />
+
+      <div className="relative z-10 flex flex-col h-full min-h-0">
       {/* macOS title bar drag region — full width, above all content */}
       <div className="h-10 shrink-0 drag-region" />
 
       <div className="flex flex-1 min-h-0">
         {/* Sidebar */}
-        <nav className="w-[52px] flex flex-col items-center py-3 gap-1 border-r border-border bg-surface/80 backdrop-blur-sm drag-region">
+        <nav className="w-[52px] flex flex-col items-center py-3 gap-1 border-r border-border bg-surface/60 backdrop-blur-xl drag-region">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-accent to-accent-hover flex items-center justify-center mb-4 no-drag">
             <AudioLines className="w-4 h-4 text-white" />
           </div>
@@ -55,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <main className="flex-1 overflow-auto">
           {children}
         </main>
+      </div>
       </div>
     </div>
   );

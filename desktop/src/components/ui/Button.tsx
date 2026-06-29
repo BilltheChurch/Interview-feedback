@@ -1,10 +1,12 @@
 import { type ButtonHTMLAttributes, forwardRef } from 'react';
 
 const variantStyles = {
-  primary: 'bg-accent text-white hover:bg-accent-hover',
+  primary:
+    'btn-gradient font-semibold hover:brightness-110 shadow-[0_12px_26px_-8px_rgba(124,107,255,0.55)]',
   secondary: 'bg-surface border border-border text-ink hover:bg-surface-hover',
   ghost: 'bg-transparent text-ink-secondary hover:bg-surface-hover',
-  danger: 'bg-error text-white hover:bg-red-700',
+  glass: 'glass text-ink hover:bg-white/[0.06]',
+  danger: 'bg-error text-white hover:brightness-110',
 } as const;
 
 const sizeStyles = {

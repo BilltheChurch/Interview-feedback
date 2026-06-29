@@ -12,8 +12,8 @@ describe('Button', () => {
   it('applies primary variant styles by default', () => {
     render(<Button>Primary</Button>);
     const btn = screen.getByRole('button');
-    expect(btn.className).toContain('bg-accent');
-    expect(btn.className).toContain('text-white');
+    // Primary is the accent-gradient fill (Midnight vibrancy redesign).
+    expect(btn.className).toContain('btn-gradient');
   });
 
   it('applies secondary variant styles', () => {
