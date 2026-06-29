@@ -202,7 +202,7 @@ export interface ResolveResponse {
 export interface SpeakerEvent {
   ts: string;
   stream_role: StreamRole;
-  source: "inference_resolve" | "teacher_direct" | "manual_map";
+  source: "inference_resolve" | "teacher_direct" | "manual_map" | "diarization";
   identity_source?:
     | "teams_participants"
     | "preconfig"

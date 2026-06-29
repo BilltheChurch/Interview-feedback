@@ -1005,6 +1005,11 @@ async function callDashScope(
     temperature: LLM_TEMPERATURE,
     max_tokens: DEFAULT_MAX_TOKENS,
     response_format: { type: "json_object" },
+    // qwen3.7-plus is a reasoning model: with thinking on, hidden reasoning_content burns
+    // ~5k extra tokens and ~3x latency (133s vs 40s in testing), blowing the timeout. For
+    // structured JSON synthesis the reasoning adds little, so disable it. (Ignored by
+    // non-reasoning models like qwen-plus, so this stays safe across LLM_MODEL choices.)
+    enable_thinking: false,
     messages,
   });
 

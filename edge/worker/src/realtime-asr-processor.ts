@@ -660,6 +660,29 @@ export async function emitRealtimeUtterance(
   });
 
   if (streamRole === "students") {
+    // All-cloud (Speechmatics): the diarization S-label IS the speaker identity. Persist it
+    // as the speaker-event cluster_id so finalize reconcile can bind it to a candidate name
+    // (B3 self-introduction extraction). The legacy inference speaker-verify / enrollment
+    // path is disabled in all-cloud mode, so short-circuit it when an S-label is present.
+    if (speakerOverride) {
+      await ctx.appendSpeakerEvent({
+        ts: new Date().toISOString(),
+        stream_role: "students",
+        source: "diarization",
+        identity_source: null,
+        utterance_id: utterance.utterance_id,
+        cluster_id: speakerOverride,
+        speaker_name: null,
+        decision: "confirm",
+        evidence: null,
+        note: `speechmatics diarization label ${speakerOverride}`,
+        backend: "primary",
+        fallback_reason: null,
+        confidence_bucket: "medium",
+        metadata: null,
+      });
+      return;
+    }
     let resolvedInfo: {
       cluster_id: string;
       speaker_name: string | null;
