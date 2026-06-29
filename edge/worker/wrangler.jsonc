@@ -13,8 +13,8 @@
   ],
 
   "vars": {
-    "INFERENCE_BASE_URL_PRIMARY": "https://if.frontierace.ai",
-    "INFERENCE_BASE_URL_SECONDARY": "http://127.0.0.1:8000",
+    "INFERENCE_BASE_URL_PRIMARY": "",
+    "INFERENCE_BASE_URL_SECONDARY": "",
     "INFERENCE_TIMEOUT_MS": "120000",
     "INFERENCE_FAILOVER_ENABLED": "true",
     "INFERENCE_RETRY_MAX": "2",
@@ -29,7 +29,7 @@
     "INFERENCE_ENABLED": "false",
     "LLM_MODEL": "qwen3.7-plus",
     "ASR_PROVIDER": "speechmatics",
-    "ASR_ENDPOINT": "http://127.0.0.1:8000",
+    "ASR_ENDPOINT": "",
     "ASR_LANGUAGE": "auto",
     "ASR_ENABLED": "true",
     "ASR_MODEL": "large-v3",
@@ -49,7 +49,7 @@
     "AUDIO_RETENTION_HOURS": "72",
     "TIER2_ENABLED": "true",
     "TIER2_AUTO_TRIGGER": "false",
-    "TIER2_BATCH_ENDPOINT": "http://127.0.0.1:8000/batch/process",
+    "TIER2_BATCH_ENDPOINT": "",
     "DEFAULT_LOCALE": "zh-CN",
     "CAPTION_PROVIDER": "acs-teams",
     "CAPTION_FALLBACK_TO_ASR": "true",
@@ -100,7 +100,7 @@
       "workers_dev": true,
       "routes": [],
       "vars": {
-        "INFERENCE_BASE_URL_PRIMARY": "http://127.0.0.1:8000",
+        "INFERENCE_BASE_URL_PRIMARY": "",
         "INFERENCE_BASE_URL_SECONDARY": "",
         "INFERENCE_FAILOVER_ENABLED": "false",
         "TIER2_ENABLED": "false",

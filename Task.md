@@ -143,7 +143,8 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - ✅ 删 SettingsView "Batch Processor Endpoint" 字段(localhost:8000/batch/process 死端点)+ batchEndpoint state + 更新测试。desktop tsc + 234 测试绿
   - ⏳ `lib/diarizationSidecar.js`(pyannote-rs)移除留作专门 pass:它在 main.js 启动期创建且被多处 IPC 用,需 Electron 主进程手术 + 启动验证(此环境无法 E2E)
 - [ ] C2 长会议分块清洗兜底
-- [ ] C3 归档 `inference/` + 退役 `if.frontierace.ai` tunnel
+- [x] C3 归档 `inference/` + 退役 `if.frontierace.ai` tunnel（2026-06-29，真人 pilot 验证通过后）：`git rm` 删 `inference/` FastAPI 服务（133 文件，保留在 git 历史）+ 清空 wrangler.jsonc 死配置（`INFERENCE_BASE_URL_*`/`ASR_ENDPOINT`/`TIER2_BATCH_ENDPOINT` 的 tunnel+localhost → ""）+ CLAUDE.md 顶部立架构重定向横幅。worker 不依赖 inference/ 目录(tsc 仍过)。DashScope key 保留在 `edge/worker/.dev.vars`。**用户侧**:停掉 `if.frontierace.ai` GPU tunnel、可选删 prod secret `INFERENCE_BASE_URL`。
+  - ⏳ 残留(可选,低优先):worker 内 `inference_client.ts`/`inference-helpers.ts` 等客户端代码仍在但被 `INFERENCE_ENABLED=false` 关掉(死代码,后续可删);Tier2 batch 路径(`/batch/process`)已无端点,如需 Tier2 须改云端实现。
 
 ### Phase A 前置验证门（删 inference 前必须通过 pilot，需 Speechmatics key）
 > **2026-06-27 实测**（`scripts/speechmatics_rt_validate.mjs`，真实 Speechmatics key + 真实样本）

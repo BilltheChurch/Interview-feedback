@@ -4,19 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Interview Feedback (Chorus)** is a monorepo implementing a realtime interview recording and AI-powered feedback system with three main components:
+**Interview Feedback (Chorus)** is a monorepo implementing a realtime interview recording and AI-powered feedback system.
 
-1. **Inference Service** (`inference/`) — FastAPI backend for audio + AI processing
-   - Audio normalization (16kHz/mono/PCM16) with ffmpeg timeout protection
-   - Voice Activity Detection (VAD) segmentation
-   - Speaker Verification (SV) embedding via ModelScope CAM++
-   - Online clustering for speaker identification
-   - Name extraction from transcripts (EN + ZH)
-   - LLM-based report synthesis via DashScope (qwen-plus)
-   - Event analysis (support cues, interruptions, decisions, summaries)
-   - Diarization endpoint (reserved for Phase 2)
+> **⚠️ 架构重定向 (2026-06)** — 项目已转为**全云端 Companion**:Speechmatics 实时 STT + 实时 diarization,LLM 报告合成(`qwen3.7-plus`)直接在 Worker 内调 DashScope。**自建 `inference/` FastAPI 服务已归档删除**(C3,2026-06-29;真人 pilot 验证通过后),`if.frontierace.ai` GPU tunnel 退役。下文凡涉及 `inference/`(本地 SV/ASR/diarization、CAM++、pyannote、`uvicorn`、`pytest tests/`)均为**历史参考**,不再是目标架构。设计基线见 `docs/plans/2026-06-27-cloud-companion-speechmatics-architecture.md`。现在系统是两个组件(Edge Gateway + Desktop):
 
-2. **Edge Gateway** (`edge/worker/`) — Cloudflare Worker + Durable Objects + R2
+1. **Edge Gateway** (`edge/worker/`) — Cloudflare Worker + Durable Objects + R2 + D1
    - Realtime WebSocket audio ingest and chunking (dual-stream: teacher/students)
    - Automatic Speech Recognition (ASR) via Aliyun DashScope FunASR
    - Speaker resolution and enrollment with voice profile matching
@@ -26,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - Auth middleware with timing-safe API key validation
    - Modular architecture: `auth.ts`, `audio-utils.ts`, `reconcile.ts`
 
-3. **Desktop App** (`desktop/`) — Electron + React + Vite + TypeScript + Tailwind v4
+2. **Desktop App** (`desktop/`) — Electron + React + Vite + TypeScript + Tailwind v4
    - Dual-stream audio capture (microphone + system audio via Web Audio API)
    - Zustand session store + service singletons (AudioService, WebSocketService, TimerService)
    - PiP overlay for background session monitoring
