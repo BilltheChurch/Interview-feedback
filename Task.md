@@ -129,6 +129,14 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [x] B5 通用实时字幕面板（`CaptionPanel` 由 `transcriptSegments` 驱动，覆盖非 Teams 会议）
   - ✅ CaptionPanel 统一字幕源:ACS captions 优先,否则把 `transcriptSegments`(A2 下行)映射成 caption 显示;渲染条件改为"ACS off 且无转写才隐藏";speaker 用 S 标签/回退 Interviewer/Candidate。SidecarView 传入 `transcriptSegments`。desktop tsc + 241 测试绿（UI glue,无新增单测）
 
+### 🚀 生产部署（2026-06-29）— 云端管线上线
+- ✅ D1 建库 + 迁移：`chorus-meta`(bee0bd7c…) + `chorus-meta-staging`(4785fe8c…),各 6 表；id 填入 wrangler.jsonc
+- ✅ `wrangler deploy` 成功 → `api.frontierace.ai`（version 1b8cb3f7）；`ASR_PROVIDER=speechmatics` + `REPORT_SYNTHESIS_MODE=worker`(默认)
+- ✅ `WORKER_API_KEY` secret 设入(=dev c078…)→ **生产鉴权开启**；prod secrets: DASHSCOPE/INFERENCE_BASE_URL/SPEECHMATICS/WORKER_API_KEY
+- ✅ 健康检查 `/health` → 200 `{"status":"ok"}`
+- ⏳ 待真实音频验证(§9.6 剩余两项现可测)：群面重叠 diarization DER + CF DO 持久双出站 WS/保活/重连;以及端到端(实时字幕→报告由 Worker+DashScope 出)
+- 回退:ASR 问题→ASR_PROVIDER=dashscope;报告问题→REPORT_SYNTHESIS_MODE=inference;鉴权问题→删 WORKER_API_KEY secret
+
 ### Phase C — P2：清理与通用性
 - [~] C1 删本地 pyannote-rs sidecar / 重复 `useWebSocket` hook / Settings localhost 文案
   - ✅ 删死代码 `useWebSocket.ts` + 测试 + hooks barrel re-export(确认无任何 `../hooks` 消费者;WebSocketService 是唯一实现）
