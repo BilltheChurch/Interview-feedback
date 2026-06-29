@@ -328,6 +328,45 @@ export function buildCloudTurnsFromEvents(
 }
 
 /**
+ * B3: the Speechmatics realtime path emits word-level utterances, so a self-introduction
+ * ("Hi, I'm Tina") is split across several utterance records. Merge each S-label's student
+ * utterances into one concatenated synthetic utterance (keeping a real utterance_id from
+ * the group so its speaker event — hence S-label — still resolves) before name extraction,
+ * so multi-word patterns can match.
+ */
+export function mergeStudentUtterancesBySLabel(
+  utterances: ReconcileUtterance[],
+  eventByUtterance: Map<string, ReconcileSpeakerEvent>
+): ReconcileUtterance[] {
+  const groups = new Map<string, { repId: string; texts: string[]; start: number; end: number }>();
+  for (const item of utterances) {
+    if (item.stream_role !== "students") continue;
+    const sLabel = valueAsStr(eventByUtterance.get(item.utterance_id)?.cluster_id ?? null);
+    if (!sLabel) continue;
+    const g = groups.get(sLabel);
+    if (!g) {
+      groups.set(sLabel, { repId: item.utterance_id, texts: [item.text], start: item.start_ms, end: item.end_ms });
+    } else {
+      g.texts.push(item.text);
+      g.start = Math.min(g.start, item.start_ms);
+      g.end = Math.max(g.end, item.end_ms);
+    }
+  }
+  const merged: ReconcileUtterance[] = [];
+  for (const [, g] of groups) {
+    merged.push({
+      utterance_id: g.repId,
+      stream_role: "students",
+      text: g.texts.join(" ").replace(/\s+/g, " ").trim(),
+      start_ms: g.start,
+      end_ms: g.end,
+      duration_ms: Math.max(0, g.end - g.start),
+    });
+  }
+  return merged;
+}
+
+/**
  * Build a speaker-resolved transcript from raw utterances, speaker events,
  * and diarization data. This is the shared reconciliation logic used across
  * the feedback cache, finalization pipeline, and state endpoint.
@@ -417,7 +456,14 @@ export function buildReconciledTranscript(options: {
       edgeClusterId: string | null;
     }
 
-    for (const item of utterances) {
+    // Cloud emits word-level utterances, so a self-intro ("I'm Tina") spans several
+    // records. Merge each S-label's utterances before matching so the phrase reunites.
+    // Edge keeps per-utterance granularity (its turns drive the time-search).
+    const introUtterances = diarizationBackend === "cloud"
+      ? mergeStudentUtterancesBySLabel(utterances, eventByUtterance)
+      : utterances;
+
+    for (const item of introUtterances) {
       if (item.stream_role !== "students") continue;
       const text = item.text;
       const anchors: NameAnchor[] = [];

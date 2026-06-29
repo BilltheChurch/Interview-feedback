@@ -307,30 +307,23 @@ describe("buildReconciledTranscript", () => {
     expect(result[0].cluster_id).toBe("teacher");
   });
 
-  it("B3: binds cloud S-labels to roster names via self-introductions", () => {
+  it("B3: binds cloud S-labels to roster names from word-level self-introductions", () => {
     const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    // Speechmatics emits word-level utterances, so a self-intro spans several records;
+    // the S-label lives on each utterance's speaker event.
     const utterances: ReconcileUtterance[] = [
-      {
-        utterance_id: "u_s1",
-        stream_role: "students",
-        text: "Hi everyone, I'm Tina.",
-        start_ms: 0,
-        end_ms: 3000,
-        duration_ms: 3000,
-      },
-      {
-        utterance_id: "u_s2",
-        stream_role: "students",
-        text: "My name is Daisy.",
-        start_ms: 3000,
-        end_ms: 6000,
-        duration_ms: 3000,
-      },
+      { utterance_id: "u1", stream_role: "students", text: "Hi everyone,", start_ms: 0, end_ms: 1000, duration_ms: 1000 },
+      { utterance_id: "u2", stream_role: "students", text: "I'm", start_ms: 1000, end_ms: 2000, duration_ms: 1000 },
+      { utterance_id: "u3", stream_role: "students", text: "Tina.", start_ms: 2000, end_ms: 3000, duration_ms: 1000 },
+      { utterance_id: "u4", stream_role: "students", text: "My name", start_ms: 3000, end_ms: 4000, duration_ms: 1000 },
+      { utterance_id: "u5", stream_role: "students", text: "is Daisy.", start_ms: 4000, end_ms: 5000, duration_ms: 1000 },
     ];
-    // Cloud diarization labels (S1/S2) live on the speaker events, not the utterances.
     const events: ReconcileSpeakerEvent[] = [
-      { stream_role: "students", utterance_id: "u_s1", cluster_id: "S1" },
-      { stream_role: "students", utterance_id: "u_s2", cluster_id: "S2" },
+      { stream_role: "students", utterance_id: "u1", cluster_id: "S1" },
+      { stream_role: "students", utterance_id: "u2", cluster_id: "S1" },
+      { stream_role: "students", utterance_id: "u3", cluster_id: "S1" },
+      { stream_role: "students", utterance_id: "u4", cluster_id: "S2" },
+      { stream_role: "students", utterance_id: "u5", cluster_id: "S2" },
     ];
     const result = buildReconciledTranscript({
       utterances,
@@ -340,10 +333,12 @@ describe("buildReconciledTranscript", () => {
       diarizationBackend: "cloud",
       roster: ["Tina", "Daisy"],
     });
-    const u1 = result.find((r) => r.utterance_id === "u_s1");
-    const u2 = result.find((r) => r.utterance_id === "u_s2");
-    expect(u1?.speaker_name).toBe("Tina");
-    expect(u2?.speaker_name).toBe("Daisy");
+    // After merge-by-S-label, "I'm Tina" / "My name is Daisy" reunite → every S1 utterance
+    // resolves to Tina, every S2 to Daisy.
+    const s1Names = new Set(result.filter((r) => ["u1", "u2", "u3"].includes(r.utterance_id)).map((r) => r.speaker_name));
+    const s2Names = new Set(result.filter((r) => ["u4", "u5"].includes(r.utterance_id)).map((r) => r.speaker_name));
+    expect([...s1Names]).toEqual(["Tina"]);
+    expect([...s2Names]).toEqual(["Daisy"]);
   });
 
   it("resolves student utterance via event cluster binding", () => {
