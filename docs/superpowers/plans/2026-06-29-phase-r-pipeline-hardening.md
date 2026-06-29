@@ -44,7 +44,7 @@
 
 - [ ] **Step 2: Run → FAIL** (`maxSpeakers` not on type). `cd edge/worker && npx vitest run tests/speechmatics-config.test.ts`
 
-- [ ] **Step 3: Implement** — add `maxSpeakers?: number` to `SpeechmaticsConfig`; in `buildStartRecognition`, when `cfg.diarization && cfg.maxSpeakers`, set `transcription_config.speaker_diarization_config = { max_speakers: cfg.maxSpeakers }`. Add `Env.ASR_MAX_SPEAKERS?: string` + `resolveMaxSpeakers(env)` (parse int, undefined if unset/invalid — let Speechmatics auto-detect). Wire the resolver where the students Speechmatics config is built (find the `DEFAULT_SPEECHMATICS_CONFIG` consumer in `realtime-asr-processor.ts`).
+- [ ] **Step 3: Implement** — add `maxSpeakers?: number` to `SpeechmaticsConfig`; in `buildStartRecognition`, when `cfg.diarization && cfg.maxSpeakers`, set `transcription_config.speaker_diarization_config = { max_speakers: cfg.maxSpeakers }`. Add `Env.ASR_MAX_SPEAKERS?: string` + `resolveMaxSpeakers(env)` (parse int; return `undefined` if unset/invalid **or < 2** — Speechmatics enforces a minimum of 2, and undefined lets it auto-detect). Add a test case asserting `"1"` and `"0"` → undefined. Wire the resolver where the students Speechmatics config is built (find the `DEFAULT_SPEECHMATICS_CONFIG` consumer in `realtime-asr-processor.ts`).
   > Verify the exact Speechmatics param against docs (Context7 `speechmatics` or https://docs.speechmatics.com). `speaker_diarization_config.max_speakers` is the realtime field as of writing; confirm before shipping.
 
 - [ ] **Step 4: Run → PASS**. Also `npm run typecheck`.
@@ -89,11 +89,13 @@
 - Modify: `edge/worker/src/asr-helpers.ts` (`AsrRealtimeRuntime.lastAckedSeq`)
 - Test: `edge/worker/tests/asr-backpressure.test.ts`
 
-- [ ] **Step 1: Write failing test** — pure helper `backpressureLag(sentSeq, ackedSeq)` + `shouldThrottle(lag, windowSize)`; AudioAdded parsing returns `{ type: "AudioAdded", seq_no }`.
+> NOTE (verified): `parseSpeechmaticsMessage` ALREADY returns `{ type: "AudioAdded", seq_no }` (snake_case, `speechmatics-asr.ts:117`). The gap is **consumption** — `handleSpeechmaticsMessage` early-returns on non-Transcript messages (~line 970) and never tracks acks. Keep the `seq_no` field name; do NOT rename to `seqNo`.
+
+- [ ] **Step 1: Write failing test** — pure helpers `backpressureLag(sentSeq, ackedSeq)` (returns `sentSeq - ackedSeq`, floored at 0) + `shouldThrottle(lag, windowSize)` (true when `lag > windowSize`). (Parsing of `AudioAdded` already passes; do not re-test it beyond a 1-line sanity assert.)
 
 - [ ] **Step 2: Run → FAIL**.
 
-- [ ] **Step 3: Implement** — surface `AudioAdded` in `parseSpeechmaticsMessage` (return `{type:"AudioAdded", seqNo}`); in `handleSpeechmaticsMessage`, update `runtime.lastAckedSeq`; expose lag in ASR metrics; throttle the send loop when over window.
+- [ ] **Step 3: Implement** — add an `AudioAdded` branch in `handleSpeechmaticsMessage` BEFORE the non-Transcript early-return: `runtime.lastAckedSeq = msg.seq_no`. Add `lastAckedSeq` to `AsrRealtimeRuntime` (init 0). Expose `backpressureLag(sentSeq, lastAckedSeq)` in ASR metrics; throttle/pause the send loop in `drainRealtimeQueue` when `shouldThrottle`.
 
 - [ ] **Step 4: Run → PASS** + typecheck.
 
@@ -129,7 +131,7 @@
 - Read first: `desktop/src/services/WebSocketService.ts`, `AudioService.ts` — confirm the real app already connects both streams; note gaps.
 
 - [ ] **Step 1:** Read WebSocketService/AudioService; document whether both streams connect+auth+stream concurrently in the real app. If a gap exists, add a follow-up task here.
-- [ ] **Step 2:** Build the dual-stream harness (two WS, two PCM inputs).
+- [ ] **Step 2:** Build the dual-stream harness (two WS, two PCM inputs). **Auth handshake:** pick ONE style explicitly and comment it — the reference harness waits for `{type:"auth_ok"}` then sends `hello` (e2e:154), whereas the prod `WebSocketService` fires `auth`+`hello` back-to-back without waiting (both work; the server sends `auth_ok` at `websocket-handler.ts:293`). Reuse the reference harness's wait-for-`auth_ok` style for clarity. teacher stream sends `hello` with `stream_role:"teacher"`, students with `stream_role:"students"`.
 - [ ] **Step 3:** Smoke it against a LOCAL `wrangler dev` first (cheap), confirming both streams reach finalize and the report has students-only per-person + interviewer context.
 - [ ] **Step 4: Commit** — `test(e2e): dual-stream (teacher+students) live harness`
 
