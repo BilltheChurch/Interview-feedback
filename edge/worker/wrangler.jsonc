@@ -86,7 +86,7 @@
     {
       "binding": "DB",
       "database_name": "chorus-meta",
-      "database_id": "REPLACE_AFTER_CREATE"   // run ./scripts/deploy-d1.sh to get this value
+      "database_id": "bee0bd7c-9291-457a-bb29-67f714631912"
     }
   ],
 
@@ -119,7 +119,7 @@
         {
           "binding": "DB",
           "database_name": "chorus-meta-staging",
-          "database_id": "REPLACE_AFTER_CREATE"   // run ./scripts/deploy-d1.sh to get this value
+          "database_id": "4785fe8c-95a1-4354-a2cb-23cf0e02731a"
         }
       ]
     }
