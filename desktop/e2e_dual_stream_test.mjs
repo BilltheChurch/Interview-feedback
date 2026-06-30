@@ -125,6 +125,10 @@ async function configureSession() {
       participants: PARTICIPANTS,
       stages: STAGES,
       free_form_notes: FREE_FORM_NOTES,
+      // All-cloud mode: students diarization comes from Speechmatics S-labels.
+      // Must be "cloud" (NOT the retired edge/local pyannote path) or students
+      // collapse to "unknown" in reconcile (cloud-only name-binding gate).
+      diarization_backend: 'cloud',
     }),
   });
   console.log(`  Status: ${res.status}`);
