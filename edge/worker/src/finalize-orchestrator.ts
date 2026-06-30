@@ -354,12 +354,15 @@ export async function runFinalizeV2Job(
         await ctx.updateFinalizeV2Status(jobId, { stage: "events", progress: 55 });
         await ctx.ensureFinalizeJobActive(jobId);
 
-        const knownSpeakers = stats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
+        // Exclude teacher from per-person scoring (same contract as full pipeline).
+        const studentStats = stats.filter((s) => s.speaker_key !== "teacher");
+
+        const knownSpeakers = studentStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
         const memoBindings = extractMemoNames(memos, knownSpeakers);
         const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
         const enrichedMemos = addStageMetadata(memos, configStages);
         let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
-        const enrichedEvidence = enrichEvidencePack(transcript, stats);
+        const enrichedEvidence = enrichEvidencePack(transcript, studentStats);
         evidence = [...evidence, ...enrichedEvidence];
 
         const legacyEvidence = buildEvidence({ memos, transcript });
@@ -369,7 +372,7 @@ export async function runFinalizeV2Job(
           session_id: sessionId,
           transcript,
           memos: memosWithEvidence,
-          stats,
+          stats: studentStats,
           locale
         };
         const eventsResult = await ctx.invokeInferenceAnalysisEvents(eventsPayload);
@@ -383,8 +386,8 @@ export async function runFinalizeV2Job(
         await ctx.ensureFinalizeJobActive(jobId);
 
         const audioDurationMs = calcTranscriptDurationMs(transcript);
-        const statsObservations = generateStatsObservations(stats, audioDurationMs);
-        const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats });
+        const statsObservations = generateStatsObservations(studentStats, audioDurationMs);
+        const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats: studentStats });
         let finalOverall = memoFirstReport.overall;
         let finalPerPerson = memoFirstReport.per_person;
         let finalSummary: string | undefined;
@@ -425,7 +428,7 @@ export async function runFinalizeV2Job(
             transcript,
             memos: enrichedMemos,
             evidence,
-            stats,
+            stats: studentStats,
             events: analysisEvents.map((evt: Record<string, unknown>) => ({
               event_id: String(evt.event_id ?? ""),
               event_type: String(evt.event_type ?? ""),
@@ -1031,20 +1034,28 @@ export async function runFinalizeV2Job(
     await ctx.updateFinalizeV2Status(jobId, { stage: "stats", progress: 56 });
     const stats = ctx.mergeStatsWithRoster(computeSpeakerStats(transcript), state);
 
+    // Exclude the teacher / interviewer from per-person scoring. The teacher stream
+    // carries the interviewer's own audio — it must appear in synthesis context (so
+    // the LLM knows what questions were asked) but must NOT receive a student card.
+    // Raw computeSpeakerStats includes a "teacher" key for every teacher utterance;
+    // filter it out here so buildMemoFirstReport and buildSynthesizePayload.stats
+    // never produce an "Interviewer" / "teacher" PersonFeedbackItem.
+    const studentStats = stats.filter((s) => s.speaker_key !== "teacher");
+
     // ── NEW PIPELINE: Extract names, build multi-evidence, stage metadata ──
-    const knownSpeakers = stats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
+    const knownSpeakers = studentStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
     const memoBindings = extractMemoNames(memos, knownSpeakers);
     const configStages: string[] = (state.config as Record<string, unknown>)?.stages as string[] ?? [];
     const enrichedMemos = addStageMetadata(memos, configStages);
     let evidence = buildMultiEvidence({ memos: enrichedMemos, transcript, bindings: memoBindings });
 
     // ── Enrich evidence pack with transcript quotes, stats summaries, interaction patterns ──
-    const enrichedEvidence = enrichEvidencePack(transcript, stats);
+    const enrichedEvidence = enrichEvidencePack(transcript, studentStats);
     evidence = [...evidence, ...enrichedEvidence];
 
     // ── Generate stats observations for LLM context ──
     const audioDurationMs = calcTranscriptDurationMs(transcript);
-    const statsObservations = generateStatsObservations(stats, audioDurationMs);
+    const statsObservations = generateStatsObservations(studentStats, audioDurationMs);
 
     // Keep legacy evidence + memo-first as fallback baseline
     const legacyEvidence = buildEvidence({ memos, transcript });
@@ -1054,7 +1065,7 @@ export async function runFinalizeV2Job(
       transcript,
       memos: memosWithEvidence,
       evidence: legacyEvidence,
-      stats
+      stats: studentStats
     });
     const memoFirstBuildMs = Date.now() - memoFirstStart;
     const validationStart = Date.now();
@@ -1204,7 +1215,7 @@ export async function runFinalizeV2Job(
           transcript,
           memos: enrichedMemos,
           evidence,
-          stats,
+          stats: studentStats,
           events: analysisEvents.map((evt: Record<string, unknown>) => ({
             event_id: String(evt.event_id ?? ""),
             event_type: String(evt.event_type ?? ""),

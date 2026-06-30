@@ -77,9 +77,17 @@ const DEFAULT_DIMENSION_TEXT: Record<
 };
 
 function speakerKey(item: TranscriptItem): string {
+  // The teacher stream is the interviewer — a single entity that is excluded
+  // from per-person student scoring but kept as LLM question context. Collapse
+  // ALL teacher-stream utterances to the "teacher" key BEFORE consulting
+  // speaker_name/cluster_id. This makes the downstream `s.speaker_key !==
+  // "teacher"` exclusion structurally sound regardless of ASR backend: a
+  // backend that attaches a speaker_name to a teacher utterance (e.g. ACS
+  // captions / multi-channel diarization) must NOT cause the interviewer to
+  // leak into per_person under that inherited name.
+  if (item.stream_role === "teacher") return "teacher";
   if (item.speaker_name) return item.speaker_name;
   if (item.cluster_id) return item.cluster_id;
-  if (item.stream_role === "teacher") return "teacher";
   return "unknown";
 }
 

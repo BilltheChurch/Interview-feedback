@@ -42,9 +42,17 @@ export interface LocalAnalysisEvent {
 }
 
 function speakerKey(item: TranscriptUtterance): string {
+  // The teacher stream is the interviewer — a single entity that is kept as LLM
+  // context but excluded from per-person student scoring. Collapse ALL
+  // teacher-stream utterances to the "teacher" key BEFORE consulting
+  // speaker_name/cluster_id. Without this, a backend that attaches a
+  // speaker_name to a teacher utterance (e.g. ACS captions / multi-channel
+  // diarization) would attribute event actors/targets to that inherited name,
+  // leaking the interviewer into the synthesis events payload under a name
+  // instead of collapsing to "teacher". Mirrors finalize_v2.ts speakerKey().
+  if (item.stream_role === "teacher") return "teacher";
   if (item.speaker_name) return item.speaker_name;
   if (item.cluster_id) return item.cluster_id;
-  if (item.stream_role === "teacher") return "teacher";
   return "unknown";
 }
 
