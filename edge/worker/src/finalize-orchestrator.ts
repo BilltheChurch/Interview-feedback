@@ -117,6 +117,48 @@ import {
 import { buildFinalizePayloadV1 } from "./incremental_v1";
 import type { RecomputeSegment } from "./incremental_v1";
 
+// ── Finalize metadata merge helpers ──────────────────────────────────────────
+
+/**
+ * Pure helper — merge finalize metadata fields into a session config object.
+ *
+ * Handles: interview_type (string guard), dimension_presets (Array.isArray +
+ * per-item validation). Mirrors the existing free_form_notes / memos merge
+ * pattern: only copy when the incoming value passes its type guard; ignore/skip
+ * otherwise so back-compat is preserved (config unchanged when fields are absent
+ * or malformed).
+ *
+ * `metadata` is client-supplied over the finalize request and the worker is the
+ * trust boundary before the LLM scoring prompt, so dimension_presets items are
+ * filtered to those with a non-empty string `key`. If ZERO valid items remain,
+ * dimension_presets is treated as ABSENT (left untouched) so downstream falls
+ * back to the default dimensions rather than scoring on an empty rubric.
+ *
+ * Mutates `config` in-place and returns it for convenience.
+ */
+export function mergeFinalizeMetadataIntoConfig(
+  config: Record<string, unknown>,
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  if (typeof metadata.interview_type === "string") {
+    config.interview_type = metadata.interview_type;
+  }
+  if (Array.isArray(metadata.dimension_presets)) {
+    const valid = (metadata.dimension_presets as unknown[]).filter(
+      (d): d is DimensionPresetItem =>
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { key?: unknown }).key === "string" &&
+        (d as { key: string }).key.length > 0,
+    );
+    // Zero valid items → leave config.dimension_presets untouched (fall back to defaults).
+    if (valid.length > 0) {
+      config.dimension_presets = valid;
+    }
+  }
+  return config;
+}
+
 // ── Context sub-interfaces ────────────────────────────────────────────────
 
 /** Core DO state and environment. */
@@ -754,8 +796,8 @@ export async function runFinalizeV2Job(
       }
     }
 
-    // ── Merge finalize metadata into storage (memos, free_form_notes) ──
-    // Desktop may send memos/notes in finalize metadata as a convenience.
+    // ── Merge finalize metadata into storage (memos, free_form_notes, interview_type, dimension_presets) ──
+    // Desktop may send memos/notes/rubric fields in finalize metadata as a convenience.
     // Merge them into DO storage so the pipeline can read them uniformly.
     if (Array.isArray((metadata as Record<string, unknown>)?.memos)) {
       const incomingMemos = (metadata as Record<string, unknown>).memos as Array<Record<string, unknown>>;
@@ -778,12 +820,22 @@ export async function runFinalizeV2Job(
       }
       await ctx.storeMemos(existingMemos);
     }
-    if (typeof (metadata as Record<string, unknown>)?.free_form_notes === "string") {
-      const preState = normalizeSessionState(await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE));
-      const cfg = { ...(preState.config ?? {}) } as Record<string, unknown>;
-      cfg.free_form_notes = (metadata as Record<string, unknown>).free_form_notes;
-      preState.config = cfg;
-      await ctx.doCtx.storage.put(STORAGE_KEY_STATE, preState);
+    {
+      // Merge free_form_notes, interview_type, and dimension_presets from metadata
+      // into state.config. Only perform a storage round-trip when at least one field
+      // is present and passes its type guard (mirrors the memos pattern above).
+      const meta = metadata as Record<string, unknown>;
+      const hasFreeFormNotes = typeof meta.free_form_notes === "string";
+      const hasInterviewType = typeof meta.interview_type === "string";
+      const hasDimensionPresets = Array.isArray(meta.dimension_presets);
+      if (hasFreeFormNotes || hasInterviewType || hasDimensionPresets) {
+        const preState = normalizeSessionState(await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE));
+        const cfg = { ...(preState.config ?? {}) } as Record<string, unknown>;
+        if (hasFreeFormNotes) cfg.free_form_notes = meta.free_form_notes;
+        mergeFinalizeMetadataIntoConfig(cfg, meta);
+        preState.config = cfg;
+        await ctx.doCtx.storage.put(STORAGE_KEY_STATE, preState);
+      }
     }
 
     // ── Global clustering stage ──
