@@ -69,6 +69,20 @@ export function incrementalV1Enabled(env: Env): boolean {
   return env.INCREMENTAL_V1_ENABLED === "true";
 }
 
+/**
+ * Resolve the max_speakers value for Speechmatics diarization from the environment.
+ * Returns undefined when ASR_MAX_SPEAKERS is unset, non-numeric, or below the
+ * Speechmatics minimum of 2 — in those cases the caller should omit the field and
+ * let Speechmatics auto-detect the speaker count.
+ */
+export function resolveMaxSpeakers(env: Pick<Env, "ASR_MAX_SPEAKERS">): number | undefined {
+  const raw = (env.ASR_MAX_SPEAKERS ?? "").trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 2) return undefined;
+  return value;
+}
+
 // ── Stream roles ────────────────────────────────────────────────────
 export type StreamRole = "mixed" | "teacher" | "students";
 export const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
@@ -527,6 +541,10 @@ export interface Env {
   SPEECHMATICS_API_KEY?: string;
   SPEECHMATICS_WS_URL?: string;
   SPEECHMATICS_LANGUAGE?: string;
+  /** Maximum number of speakers for Speechmatics diarization (students stream only).
+   *  Parsed by resolveMaxSpeakers(); values < 2 or non-integer are treated as unset
+   *  (Speechmatics enforces a minimum of 2; undefined lets it auto-detect). Default: "6". */
+  ASR_MAX_SPEAKERS?: string;
   /** A5: "worker" (default) runs LLM report synthesis in the Worker; "inference" rolls
    *  back to the legacy inference /analysis/synthesize path. */
   REPORT_SYNTHESIS_MODE?: string;

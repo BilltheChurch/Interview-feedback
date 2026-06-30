@@ -34,6 +34,9 @@ export interface SpeechmaticsConfig {
   maxDelaySeconds: number;
   /** Audio sample rate (16000 for our pipeline). */
   sampleRate: number;
+  /** Maximum number of speakers for diarization. Speechmatics enforces a minimum of 2;
+   *  undefined lets Speechmatics auto-detect. Only applied when diarization is true. */
+  maxSpeakers?: number;
 }
 
 export const DEFAULT_SPEECHMATICS_CONFIG: Omit<SpeechmaticsConfig, "language" | "diarization"> = {
@@ -51,7 +54,15 @@ export function buildStartRecognition(cfg: SpeechmaticsConfig): Record<string, u
   };
   // Only request diarization when wanted — the teacher channel is single-speaker and
   // enabling it there would split the interviewer into phantom S1/S2 (§9.3.4).
-  if (cfg.diarization) transcription_config.diarization = "speaker";
+  if (cfg.diarization) {
+    transcription_config.diarization = "speaker";
+    // speaker_diarization_config.max_speakers caps the number of distinct speakers
+    // Speechmatics will separate. Speechmatics enforces a minimum of 2; omit when
+    // undefined to let it auto-detect (see resolveMaxSpeakers in config.ts).
+    if (cfg.maxSpeakers !== undefined) {
+      transcription_config.speaker_diarization_config = { max_speakers: cfg.maxSpeakers };
+    }
+  }
   return {
     message: "StartRecognition",
     audio_format: { type: "raw", encoding: "pcm_s16le", sample_rate: cfg.sampleRate },

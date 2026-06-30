@@ -53,6 +53,7 @@ import {
   identitySourceFromBindingSource,
   mergeUtterances,
   buildDefaultEnrollmentState,
+  resolveMaxSpeakers,
 } from "./config";
 import type {
   Env,
@@ -911,12 +912,15 @@ async function connectSpeechmaticsRealtime(
   });
 
   // teacher = single speaker → diarization off (§9.3.4); students → diarization on.
+  // maxSpeakers is only applied for the students stream (diarization must be true).
   const language = (ctx.env.SPEECHMATICS_LANGUAGE ?? "cmn_en").trim() || "cmn_en";
+  const isDiarization = streamRole === "students";
   ws.send(JSON.stringify(buildStartRecognition({
     ...DEFAULT_SPEECHMATICS_CONFIG,
     language,
-    diarization: streamRole === "students",
+    diarization: isDiarization,
     sampleRate: TARGET_SAMPLE_RATE,
+    maxSpeakers: isDiarization ? resolveMaxSpeakers(ctx.env) : undefined,
   })));
 
   const timeoutMs = parseTimeoutMs(ctx.env.ASR_TIMEOUT_MS ?? "45000");

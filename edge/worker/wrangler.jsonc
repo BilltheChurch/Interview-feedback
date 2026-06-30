@@ -29,6 +29,7 @@
     "INFERENCE_ENABLED": "false",
     "LLM_MODEL": "qwen3.7-plus",
     "ASR_PROVIDER": "speechmatics",
+    "ASR_MAX_SPEAKERS": "6",
     "ASR_ENDPOINT": "",
     "ASR_LANGUAGE": "auto",
     "ASR_ENABLED": "true",
