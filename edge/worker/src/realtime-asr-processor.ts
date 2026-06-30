@@ -73,6 +73,7 @@ import type {
 } from "./config";
 import { resolveTeacherIdentity as resolveTeacherIdentityFn } from "./speaker-helpers";
 import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
+import { shouldSendKeepalive, makeSilencePcm16, resolveKeepaliveMs } from "./asr-helpers";
 
 // ── sleep helper ───────────────────────────────────────────────────────────
 
@@ -1216,6 +1217,8 @@ export async function drainRealtimeQueue(
           runtime.lastSentSeq = Math.max(runtime.lastSentSeq, head.seq);
           lastSentSeq = Math.max(lastSentSeq, head.seq);
           runtime.sentChunkTsBySeq.set(head.seq, head.receivedAtMs);
+          // Update idle timestamp so a recent real frame suppresses keepalive.
+          runtime.lastAudioSentAt = Date.now();
           runtime.sendQueue.shift();
         }
 
@@ -1239,6 +1242,50 @@ export async function drainRealtimeQueue(
   });
 
   return runtime.flushPromise;
+}
+
+// ── maybeSendKeepalive ─────────────────────────────────────────────────────
+
+/**
+ * Send a PCM-silence keepalive frame to the outbound ASR WebSocket if the stream
+ * has been idle longer than ASR_KEEPALIVE_MS (default 5 s).
+ *
+ * Design: the pure decision logic lives in shouldSendKeepalive() (asr-helpers.ts),
+ * which is fully unit-tested without any timer or WS dependency. This function is
+ * the thin integration wrapper — call it from a periodic DO alarm or a tick handler.
+ *
+ * Silence is safe for diarization: Speechmatics produces no speech/speaker output
+ * for a zero-valued PCM frame, so no phantom speaker label is ever injected.
+ *
+ * NOTE: DO alarm wiring is deferred to gate R3 (idle-drop risk unconfirmed;
+ * desktop captures audio continuously). See phase-r-pipeline-hardening.md Task 2.
+ *
+ * @returns true if a keepalive frame was actually sent, false if skipped.
+ */
+export function maybeSendKeepalive(
+  streamRole: StreamRole,
+  ctx: RealtimeAsrContext
+): boolean {
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+  if (!runtime.ws || !runtime.connected || !runtime.running) return false;
+  // WebSocket.OPEN === 1 per the WS spec; Workers runtime exposes it as a numeric constant.
+  if (runtime.ws.readyState !== WebSocket.OPEN) return false;
+
+  const intervalMs = resolveKeepaliveMs(ctx.env);
+  const now = Date.now();
+  if (!shouldSendKeepalive(runtime.lastAudioSentAt, now, intervalMs)) return false;
+
+  // 100 ms of PCM16 silence (3200 bytes at 16 kHz mono). Short enough to be negligible
+  // bandwidth-wise, long enough to reset any server-side idle watchdog.
+  const silence = makeSilencePcm16(100);
+  try {
+    runtime.ws.send(silence);
+    // Do NOT update lastAudioSentAt here — a keepalive must not suppress the next
+    // keepalive tick. Only real audio chunks reset the idle clock (see drainRealtimeQueue).
+  } catch {
+    // Ignore send errors; the next tick will retry or reconnect via drainRealtimeQueue.
+  }
+  return true;
 }
 
 // ── maybeRunAsrWindows ─────────────────────────────────────────────────────

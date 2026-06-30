@@ -498,6 +498,9 @@ export interface AsrRealtimeRuntime {
   /** Endpointing: accumulate Speechmatics word-level finals into one sentence-level
    *  utterance, flushed on a silence gap, speaker change, EndOfTranscript, or close. */
   sttBuffer: { texts: string[]; speaker: string | null; startMs: number; endMs: number } | null;
+  /** Timestamp (Date.now()) of the last real audio chunk sent to the outbound ASR WS.
+   *  Used by shouldSendKeepalive to decide when silence padding is needed. */
+  lastAudioSentAt: number;
 }
 
 export interface AudioChunkFrame {
@@ -561,6 +564,9 @@ export interface Env {
   ASR_STREAM_CHUNK_BYTES?: string;
   ASR_REALTIME_ENABLED?: string;
   ASR_DEBUG_LOG_EVENTS?: string;
+  /** Idle interval (ms) after which a silence PCM frame is sent to keep the outbound
+   *  ASR WebSocket alive. Parsed by resolveKeepaliveMs(); default 5000. */
+  ASR_KEEPALIVE_MS?: string;
   MEMOS_ENABLED?: string;
   FINALIZE_V2_ENABLED?: string;
   FINALIZE_TIMEOUT_MS?: string;

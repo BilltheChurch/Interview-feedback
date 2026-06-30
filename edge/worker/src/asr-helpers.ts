@@ -9,13 +9,15 @@ import type {
   StreamRole,
   AsrState,
   AsrRealtimeRuntime,
-  AsrReplayCursor
+  AsrReplayCursor,
+  Env
 } from "./config";
 import {
   DASHSCOPE_DEFAULT_MODEL,
   parsePositiveInt,
   parseBool
 } from "./config";
+import { TARGET_SAMPLE_RATE } from "./audio-utils";
 
 // ── A2: realtime transcript downlink frame ──────────────────────────
 
@@ -87,6 +89,53 @@ export function isAsrEnabled(env: AsrEnvConfig): boolean {
   // Speechmatics realtime requires its own key, not the DashScope one.
   if (provider === "speechmatics") return Boolean((env.SPEECHMATICS_API_KEY ?? "").trim());
   return Boolean((env.ALIYUN_DASHSCOPE_API_KEY ?? "").trim());
+}
+
+// ── Keepalive helpers ───────────────────────────────────────────────
+
+/** Resolve the keepalive interval from the environment. Default: 5000 ms. */
+export function resolveKeepaliveMs(env: Pick<Env, "ASR_KEEPALIVE_MS">): number {
+  return parsePositiveInt(env.ASR_KEEPALIVE_MS, 5000);
+}
+
+/**
+ * Pure decision function: should a silence keepalive frame be sent right now?
+ *
+ * Returns true when the outbound ASR WebSocket has been idle for at least
+ * `intervalMs` milliseconds, meaning no real audio chunk has been forwarded
+ * in that window. Sending a PCM-silence frame (all zeros) keeps the connection
+ * alive without introducing phantom speech — Speechmatics will not emit a
+ * speaker label or transcript for a silent frame, so diarization is unaffected.
+ *
+ * Call this on a periodic tick (e.g. a DO alarm) for each active stream runtime.
+ * Update `runtime.lastAudioSentAt = Date.now()` whenever a real frame is sent
+ * so a recent real chunk suppresses the keepalive correctly.
+ *
+ * @param lastAudioMs - Date.now() timestamp of the last real audio send (ms)
+ * @param nowMs       - Current timestamp (ms); pass Date.now() in production
+ * @param intervalMs  - Idle threshold in ms before a keepalive is required
+ */
+export function shouldSendKeepalive(
+  lastAudioMs: number,
+  nowMs: number,
+  intervalMs: number
+): boolean {
+  return nowMs - lastAudioMs >= intervalMs;
+}
+
+/**
+ * Generate a zero-filled PCM16 buffer representing `durationMs` milliseconds of
+ * silence at 16 kHz mono. This is safe to send to Speechmatics as a keepalive:
+ * silent audio produces no speech detection, no speaker label, and no transcript
+ * output — it only resets the server-side idle timer.
+ *
+ * @param durationMs - Length of silence to generate in milliseconds (default 100 ms)
+ * @returns Uint8Array of zero bytes (PCM16 silence, no WAV header)
+ */
+export function makeSilencePcm16(durationMs = 100): Uint8Array {
+  // PCM16 mono: 2 bytes per sample × sample_rate samples/s × duration_s
+  const byteLength = Math.ceil((durationMs / 1000) * TARGET_SAMPLE_RATE * 2);
+  return new Uint8Array(byteLength); // Uint8Array is zero-initialized by spec
 }
 
 // ── ASR state builders ──────────────────────────────────────────────
@@ -191,7 +240,8 @@ export function buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime
     lastEmitAt: null,
     lastFinalTextNorm: "",
     drainGeneration: 0,
-    sttBuffer: null
+    sttBuffer: null,
+    lastAudioSentAt: 0 // epoch sentinel: never sent → keepalive eligible immediately
   };
 }
 
