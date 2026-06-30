@@ -130,7 +130,7 @@ Assert the regex shape, the 20-char slug cap, empty→`dim`, and that `ensureDim
 
 - [ ] **Step 2: Run → FAIL**.
 
-- [ ] **Step 3: Implement** — in `sessionStore.startSession`, write `interviewType` + `dimensionPresets` into the store (+ `PersistedSession` for crash recovery). In `useSessionFlow.ts`, add `interview_type: sessionData.interviewType` and `dimension_presets: sessionData.dimensionPresets` to the finalizeV2 metadata. In `main.js`, ensure the metadata body passes them through (it forwards the metadata object — confirm no allowlist drops unknown keys). Update IPC type if needed.
+- [ ] **Step 3: Implement** — in `sessionStore.startSession`, write `interviewType` + `dimensionPresets` into the store; ALSO add `interviewType?: string` + `dimensionPresets?: DimensionPresetItem[]` to BOTH the `SessionStore` interface AND `PersistedSession` type + its auto-save snapshot serializer (so crash-recovery + resume carry them — Step 1 test should assert the persisted snapshot includes them). In `useSessionFlow.ts`, add `interview_type: sessionData.interviewType` and `dimension_presets: sessionData.dimensionPresets` to the finalizeV2 metadata. In `main.js`: VERIFIED no change needed — the `session:finalizeV2` IPC handler passes `payload.metadata` through intact (the SSRF allowlist is on the separate `api:request` handler, not metadata). Update IPC metadata type if needed.
 
 - [ ] **Step 4: Run → PASS** + `npx tsc --noEmit` + full desktop suite.
 
@@ -174,7 +174,7 @@ Assert the regex shape, the 20-char slug cap, empty→`dim`, and that `ensureDim
 
 - [ ] **Step 2: Run → FAIL** (weight currently stripped).
 
-- [ ] **Step 3: Implement** — `getDimensionPresets` maps include `weight: d.weight ?? 1`. Update system prompt rule 4 to instruct: dimensions still scored 0-10 each, but per-person overall assessment AND cross-person ranking must WEIGHT dimensions by their `weight` (higher weight = more influence on the overall conclusion). Ensure `evaluation_dimensions` in the user prompt JSON now carries weight.
+- [ ] **Step 3: Implement** — `getDimensionPresets` maps include `weight: d.weight ?? 1`. **ALSO ensure `DEFAULT_DIMENSION_PRESETS` items each carry `weight: 1.0`** (so the no-rubric/default-5-dims fallback path also has a defined weight, not undefined). Update system prompt rule 4 to instruct: dimensions still scored 0-10 each, but per-person overall assessment AND cross-person ranking must WEIGHT dimensions by their `weight` (higher weight = more influence on the overall conclusion). Ensure `evaluation_dimensions` in the user prompt JSON now carries weight.
 
 - [ ] **Step 4: Run → PASS** + `npm run typecheck` + full worker suite (confirm no regression — existing synthesis tests with default presets still pass; default weights are 1 so behavior for unweighted rubrics is unchanged).
 
