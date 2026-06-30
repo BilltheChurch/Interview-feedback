@@ -159,7 +159,11 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - **🔥 R1 验证中发现并修复的 2 个生产级 latent bug（非 Phase R 回归，pre-existing；单测/评审均未触及，仅真实会话+真实音频暴露）**：
   - [x] hotfix-1（commit 6994e45）：`MeetingSessionDO` 构造器无条件要求 `INFERENCE_BASE_URL` → C3 清空 URL 后**自 06cdc9c5 起生产开不了任何会话**（走 DO 的路由全 1101/500，仅 /health 幸免）。修：提取纯函数 `resolveInferencePrimaryBaseUrl(env)`，仅 inference 启用时才 throw，否则返回占位符（永不调用）。+7 测试。
   - [x] hotfix-2（commit 4674735）：`DIARIZATION_BACKEND_DEFAULT="local"` 映射成 `"edge"` → 任何不显式传 `diarization_backend=cloud` 的会话（含真实桌面 app——它不 POST /config、hello 也不带该字段）走退役的 edge 路径 → **学生全 unknown**。修：默认改 `"cloud"`；harness 也显式传 cloud。
-- [ ] R-跟进（**Phase Q 一并修**）：① tier2 + feedback-cache-refresh 报告路径**也**有同类 teacher 泄漏（pre-existing；tier2 本属 Phase Q「不要碰」范围）——按 R-T4 同法补 `studentStats` 过滤。② **B3 preferred-name 绑定**（R1 实证缺口）：学生说"please call me Rice"未绑定，回退到 roster 名；需支持"call me X"/"我喜欢叫 X"绑到该 S 标签。③（低优）真实桌面 app 不 POST /config、hello 不带 roster/diarization_backend——靠服务端默认，需复核真实 app 的会话配置流是否完整。
+- R-跟进（**Phase Q**）：
+  - [x] ① tier2 + feedback-cache-refresh 报告路径同类 teacher 泄漏 → 已修（commit 5c10270，prod ef150fd3）：两路径加 `studentStats` 过滤，mirror R-T4。F1-F4 测试锁定。
+  - [x] ② **B3 preferred-name 绑定** → 已修（commit 5d64466，prod ef150fd3）：根因=Phase 2 roster 传播覆盖 preferred anchor + Phase 3 last-wins；修=`isPreferred` 标签 + Phase 2 跳过 + Phase 3 `committedPreferred` 保护；补中文模式（请叫我/可以叫我/叫我X就好/我喜欢叫我）。"my name is Hong, please call me Rice"→显示 Rice。roster 匹配/多人切分逐字未变。
+  - [x] ③ 真实 app 会话配置流 → 已由 app-readiness P1/P3 + 审计覆盖（mode/interviewer_name 经 hello 送达；roster 经 teams_participants）；残留低优=SettingsView 的 useAudioCapture 平行实现待对齐。
+  - [ ] ④ **Tier2 云端化（大功能，待 brainstorm 后建）**：原走已删 inference batch，需云端实现深度复盘/培优（每人深挖、跨人对比、可执行培优建议），DO alarm 调度，硬约束 ≤5min。**开放问题**：R1 实测 Tier1 已很深(每人 S/R/A+理由+证据+overall narrative+key findings)且快(8min 音频 91s)——需先决「是否真需要独立 Tier2、Tier2 该加什么 Tier1 没有的深度」。
 
 ### Phase A 前置验证门（删 inference 前必须通过 pilot，需 Speechmatics key）
 > **2026-06-27 实测**（`scripts/speechmatics_rt_validate.mjs`，真实 Speechmatics key + 真实样本）
