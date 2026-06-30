@@ -63,6 +63,24 @@ export function getPresetByType(interviewType: string): DimensionPresetTemplate 
   return DIMENSION_PRESETS.find((p) => p.interview_type === interviewType);
 }
 
+/**
+ * English display labels for the four interview types, keyed by `interview_type`.
+ * Single source of truth (D6 English-only): the rubric type pills and the Review
+ * summary both read from here. `DimensionPresetTemplate` only carries `label_zh`,
+ * so the English names live here.
+ */
+export const INTERVIEW_TYPE_LABELS_EN: Record<string, string> = {
+  academic: "Academic",
+  technical: "Technical",
+  behavioral: "Behavioral",
+  group: "Group",
+};
+
+/** Resolve the English label for an interview type, falling back to the raw type. */
+export function getInterviewTypeLabelEn(type: string): string {
+  return INTERVIEW_TYPE_LABELS_EN[type] ?? type;
+}
+
 // Base36 alphabet for building a guaranteed 6-char random suffix.
 const BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 

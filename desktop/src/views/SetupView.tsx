@@ -7,20 +7,15 @@ import {
   Users,
   Plus,
   Trash2,
-  Link as LinkIcon,
   ArrowLeft,
   ClipboardPaste,
   Layout,
   ChevronUp,
   ChevronDown,
-  ClipboardList,
-  Pencil,
   Check,
   Loader2,
   Calendar,
   ExternalLink,
-  CheckSquare,
-  X,
 } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -28,9 +23,9 @@ import { TextField } from '../components/ui/TextField';
 import { TextArea } from '../components/ui/TextArea';
 import { Chip } from '../components/ui/Chip';
 import { ShimmerButton } from '../components/magicui/shimmer-button';
-import { RubricTemplateModal, type CustomTemplate } from '../components/RubricTemplateModal';
+import { EvaluationRubricEditor } from '../components/EvaluationRubricEditor';
 
-import { DIMENSION_PRESETS, type DimensionPresetItem } from '../lib/dimensionPresets';
+import { getPresetByType, getInterviewTypeLabelEn, type DimensionPresetItem } from '../lib/dimensionPresets';
 import { ConsentDialog, hasValidConsent } from '../components/ConsentDialog';
 
 /* ─── Motion Variants ────────────────────────── */
@@ -52,57 +47,6 @@ type Participant = {
   id: string;
   name: string;
 };
-
-/* ─── Built-in templates ─────────────────────── */
-
-type BuiltInTemplate = {
-  value: string;
-  label: string;
-  dimensions: { name: string; weight: number; description: string }[];
-};
-
-const BUILTIN_TEMPLATES: BuiltInTemplate[] = [
-  {
-    value: 'general',
-    label: 'General Interview',
-    dimensions: [
-      { name: 'Communication', weight: 3, description: 'Clarity and articulation' },
-      { name: 'Problem Solving', weight: 3, description: 'Analytical thinking' },
-      { name: 'Cultural Fit', weight: 2, description: 'Alignment with team values' },
-    ],
-  },
-  {
-    value: 'technical',
-    label: 'Technical Assessment',
-    dimensions: [
-      { name: 'Technical Skills', weight: 5, description: 'Core competency' },
-      { name: 'Problem Solving', weight: 4, description: 'Algorithmic thinking' },
-      { name: 'System Design', weight: 3, description: 'Architecture awareness' },
-      { name: 'Communication', weight: 2, description: 'Explaining thought process' },
-    ],
-  },
-  {
-    value: 'behavioral',
-    label: 'Behavioral Interview',
-    dimensions: [
-      { name: 'Communication', weight: 4, description: 'STAR method usage' },
-      { name: 'Leadership', weight: 3, description: 'Initiative and ownership' },
-      { name: 'Teamwork', weight: 3, description: 'Collaboration examples' },
-      { name: 'Adaptability', weight: 2, description: 'Handling change' },
-    ],
-  },
-  {
-    value: 'panel',
-    label: 'Panel Discussion',
-    dimensions: [
-      { name: 'Presentation', weight: 4, description: 'Poise and confidence' },
-      { name: 'Technical Depth', weight: 3, description: 'Subject matter expertise' },
-      { name: 'Q&A Handling', weight: 3, description: 'Responding to diverse questions' },
-    ],
-  },
-];
-
-const STORAGE_KEY = 'ifb_rubric_templates';
 
 let participantIdCounter = 0;
 
@@ -611,14 +555,16 @@ function MeetingConnector({
 function SetupSummary({
   mode,
   sessionName,
-  templateLabel,
+  rubricLabel,
+  dimensionCount,
   participants,
   teamsUrl,
   stages,
 }: {
   mode: SessionMode;
   sessionName: string;
-  templateLabel: string;
+  rubricLabel: string;
+  dimensionCount: number;
   participants: Participant[];
   teamsUrl: string;
   stages: string[];
@@ -660,8 +606,8 @@ function SetupSummary({
           <p className="text-ink mt-0.5">{sessionName || '(untitled)'}</p>
         </div>
         <div>
-          <span className="text-ink-tertiary text-xs">Template</span>
-          <p className="text-ink mt-0.5">{templateLabel}</p>
+          <span className="text-ink-tertiary text-xs">Rubric</span>
+          <p className="text-ink mt-0.5">{rubricLabel} · {dimensionCount} dimensions</p>
         </div>
         <div>
           <span className="text-ink-tertiary text-xs">Participants</span>
@@ -701,10 +647,14 @@ export function SetupView() {
   const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
   const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
   const [interviewerName, setInterviewerName] = useState('');
-  const [template, setTemplate] = useState('general');
-  const [interviewType, setInterviewType] = useState<string>('academic');
+  // Evaluation rubric state — the interview type drives which preset dimensions
+  // seed the editor. Preserve the prior default interview type ("academic").
+  const DEFAULT_INTERVIEW_TYPE = 'academic';
+  const [interviewType, setInterviewType] = useState<string>(DEFAULT_INTERVIEW_TYPE);
+  // Seed the editor with a populated default rubric (deep-copied so edits never
+  // mutate the shared preset) so Step 2 never shows an empty editor.
   const [dimensionPresets, setDimensionPresets] = useState<DimensionPresetItem[]>(
-    DIMENSION_PRESETS[0].dimensions
+    () => (getPresetByType(DEFAULT_INTERVIEW_TYPE)?.dimensions ?? []).map((d) => ({ ...d }))
   );
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [teamsUrl, setTeamsUrl] = useState(locationState?.teamsJoinUrl || '');
@@ -712,85 +662,8 @@ export function SetupView() {
     locationState?.stages || ['Intro', 'Q1', 'Q2', 'Wrap-up']
   );
 
-  // Custom template state
-  const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([]);
-  const [templateModalOpen, setTemplateModalOpen] = useState(false);
-  const [editingTemplate, setEditingTemplate] = useState<CustomTemplate | null>(null);
-
-  // Load custom templates from localStorage on mount
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        setCustomTemplates(JSON.parse(stored));
-      }
-    } catch {
-      // ignore corrupt data
-    }
-  }, []);
-
-  // Persist custom templates to localStorage
-  const saveCustomTemplates = (templates: CustomTemplate[]) => {
-    setCustomTemplates(templates);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(templates));
-  };
-
-  const handleSaveTemplate = (tpl: CustomTemplate) => {
-    const existing = customTemplates.findIndex((t) => t.id === tpl.id);
-    let updated: CustomTemplate[];
-    if (existing >= 0) {
-      updated = customTemplates.map((t) => (t.id === tpl.id ? tpl : t));
-    } else {
-      updated = [...customTemplates, tpl];
-    }
-    saveCustomTemplates(updated);
-    setTemplate(tpl.id);
-    setTemplateModalOpen(false);
-    setEditingTemplate(null);
-  };
-
-  const handleEditTemplate = (templateId: string) => {
-    // Check if it's a custom template
-    const custom = customTemplates.find((t) => t.id === templateId);
-    if (custom) {
-      setEditingTemplate(custom);
-    } else {
-      // Built-in template: pre-fill modal but save as new custom
-      const builtin = BUILTIN_TEMPLATES.find((t) => t.value === templateId);
-      if (builtin) {
-        setEditingTemplate({
-          id: `custom_${Date.now()}`,
-          name: `${builtin.label} (Custom)`,
-          description: '',
-          dimensions: builtin.dimensions.map((d) => ({ ...d })),
-        });
-      }
-    }
-    setTemplateModalOpen(true);
-  };
-
-  const handleCreateTemplate = () => {
-    setEditingTemplate(null);
-    setTemplateModalOpen(true);
-  };
-
-  // Helper to resolve template display name
-  const getTemplateLabel = (): string => {
-    const builtin = BUILTIN_TEMPLATES.find((t) => t.value === template);
-    if (builtin) return builtin.label;
-    const custom = customTemplates.find((t) => t.id === template);
-    if (custom) return custom.name;
-    return template;
-  };
-
-  // Helper to get dimension count for a template
-  const getDimensionCount = (templateId: string): number => {
-    const builtin = BUILTIN_TEMPLATES.find((t) => t.value === templateId);
-    if (builtin) return builtin.dimensions.length;
-    const custom = customTemplates.find((t) => t.id === templateId);
-    if (custom) return custom.dimensions.length;
-    return 0;
-  };
+  // English label for the chosen interview type (Review step summary, D6).
+  const getRubricLabel = (): string => getInterviewTypeLabelEn(interviewType);
 
   const addParticipant = (name: string) => {
     setParticipants((prev) => [...prev, { id: String(++participantIdCounter), name }]);
@@ -826,7 +699,7 @@ export function SetupView() {
       mode,
       participantCount: participants.length,
       participants: participants.map(p => p.name),
-      template,
+      interviewType,
       status: 'in_progress',
     };
     const existing = JSON.parse(localStorage.getItem('ifb_sessions') || '[]') as { id: string }[];
@@ -852,7 +725,7 @@ export function SetupView() {
         sessionName: displayName,
         mode,
         participants: participants.map(p => p.name),
-        template,
+        interviewType,
         teamsUrl,
         stages,
       },
@@ -880,11 +753,10 @@ export function SetupView() {
       baseApiUrl,
       interviewerName: interviewerName.trim() || undefined,
       teamsJoinUrl: teamsUrl,
-      templateId: template,
       interviewType,
       dimensionPresets,
     });
-  }, [sessionName, mode, interviewerName, participants, template, stages, teamsUrl, startSession, navigate]);
+  }, [sessionName, mode, interviewerName, participants, interviewType, dimensionPresets, stages, teamsUrl, startSession, navigate]);
 
   const handleStartWithConsent = useCallback(() => {
     if (!hasConsented.current) {
@@ -906,7 +778,7 @@ export function SetupView() {
 
   // Wizard step state
   const [step, setStep] = useState(0);
-  const stepLabels = ['Basics', 'Template & Flow', 'Review'];
+  const stepLabels = ['Basics', 'Rubric & Flow', 'Review'];
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Scroll content area to top when step changes
@@ -1058,182 +930,15 @@ export function SetupView() {
                 transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
                 className="space-y-3"
               >
+                {/* ── Evaluation Rubric (interview type + dimensions) ── */}
                 <Card className="p-4">
-                  <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider mb-2">
-                    Rubric Template
-                  </h3>
-                  <div className="grid grid-cols-2 gap-2.5">
-                    {BUILTIN_TEMPLATES.map((t) => (
-                      <motion.div
-                        key={t.value}
-                        layout
-                        whileHover={{ y: -2 }}
-                        whileTap={{ scale: 0.98 }}
-                        transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                      >
-                        <Card
-                          hoverable
-                          className={`
-                            p-2.5 relative cursor-pointer transition-all
-                            ${template === t.value ? 'border-accent border-2' : ''}
-                          `}
-                          onClick={() => setTemplate(t.value)}
-                        >
-                          <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-ink-tertiary" />
-                          <div className="pr-6">
-                            <p className={`text-sm font-medium ${template === t.value ? 'text-accent-ink' : 'text-ink'}`}>
-                              {t.label}
-                            </p>
-                            <p className="text-xs text-ink-tertiary mt-0.5">
-                              {t.dimensions.length} dimensions
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleEditTemplate(t.value);
-                            }}
-                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent-ink transition-colors cursor-pointer"
-                            aria-label={`Edit ${t.label}`}
-                          >
-                            <Pencil className="w-3 h-3" />
-                            Edit
-                          </button>
-                        </Card>
-                      </motion.div>
-                    ))}
-
-                    {customTemplates.map((t) => (
-                      <motion.div
-                        key={t.id}
-                        layout
-                        whileHover={{ y: -2 }}
-                        whileTap={{ scale: 0.98 }}
-                        transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                      >
-                        <Card
-                          hoverable
-                          className={`
-                            p-2.5 relative cursor-pointer transition-all
-                            ${template === t.id ? 'border-accent border-2' : ''}
-                          `}
-                          onClick={() => setTemplate(t.id)}
-                        >
-                          <ClipboardList className="absolute top-2.5 right-2.5 w-4 h-4 text-accent-ink" />
-                          <div className="pr-6">
-                            <p className={`text-sm font-medium ${template === t.id ? 'text-accent-ink' : 'text-ink'}`}>
-                              {t.name}
-                            </p>
-                            <p className="text-xs text-ink-tertiary mt-0.5">
-                              {t.dimensions.length} dimensions
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleEditTemplate(t.id);
-                            }}
-                            className="mt-1.5 inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-accent-ink transition-colors cursor-pointer"
-                            aria-label={`Edit ${t.name}`}
-                          >
-                            <Pencil className="w-3 h-3" />
-                            Edit
-                          </button>
-                        </Card>
-                      </motion.div>
-                    ))}
-
-                    <motion.div
-                      whileHover={{ y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                    >
-                      <button
-                        type="button"
-                        onClick={handleCreateTemplate}
-                        className="
-                          w-full flex flex-col items-center justify-center gap-2 p-2.5
-                          border-dashed border-2 border-border rounded-[--radius-card]
-                          text-ink-secondary hover:border-accent hover:text-accent-ink
-                          transition-all cursor-pointer min-h-[76px]
-                        "
-                      >
-                        <Plus className="w-5 h-5" />
-                        <span className="text-xs font-medium">Create Custom Template</span>
-                      </button>
-                    </motion.div>
-                  </div>
-                </Card>
-
-                {/* ── Interview Type & Dimension Presets ── */}
-                <Card className="p-4">
-                  <div className="space-y-3">
-                    <h3 className="text-xs font-medium text-ink-secondary uppercase tracking-wider">
-                      面试类型
-                    </h3>
-                    <div className="flex gap-2 flex-wrap">
-                      {DIMENSION_PRESETS.map((preset) => (
-                        <button
-                          key={preset.interview_type}
-                          type="button"
-                          className={`px-3 py-1.5 rounded-lg text-sm border transition-colors cursor-pointer ${
-                            interviewType === preset.interview_type
-                              ? 'border-accent bg-accent-soft text-accent-ink'
-                              : 'border-border text-secondary hover:border-accent/50'
-                          }`}
-                          onClick={() => {
-                            setInterviewType(preset.interview_type);
-                            setDimensionPresets(preset.dimensions);
-                          }}
-                        >
-                          {preset.label_zh}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 mt-4">
-                    <label className="text-sm font-medium text-ink">
-                      评估维度 <span className="text-secondary text-xs">(3-6 个)</span>
-                    </label>
-                    {dimensionPresets.map((dim, i) => (
-                      <div key={dim.key} className="flex items-center gap-2 p-2 rounded-lg bg-surface border border-border">
-                        <CheckSquare className="w-4 h-4 text-accent-ink shrink-0" />
-                        <span className="text-sm font-medium">{dim.label_zh}</span>
-                        <span className="text-xs text-secondary flex-1 truncate">{dim.description}</span>
-                        {dimensionPresets.length > 3 && (
-                          <button
-                            type="button"
-                            className="cursor-pointer"
-                            onClick={() => {
-                              setDimensionPresets(prev => prev.filter((_, idx) => idx !== i));
-                            }}
-                          >
-                            <X className="w-3.5 h-3.5 text-secondary hover:text-red-500" />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                    {dimensionPresets.length < 6 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const allDims = DIMENSION_PRESETS.flatMap(p => p.dimensions);
-                          const usedKeys = new Set(dimensionPresets.map(d => d.key));
-                          const available = allDims.find(d => !usedKeys.has(d.key));
-                          if (available) {
-                            setDimensionPresets(prev => [...prev, available]);
-                          }
-                        }}
-                        className="text-xs text-accent-ink hover:underline flex items-center gap-1 cursor-pointer"
-                      >
-                        <Plus className="w-3 h-3" />
-                        添加维度
-                      </button>
-                    )}
-                  </div>
+                  <EvaluationRubricEditor
+                    value={{ interviewType, dimensions: dimensionPresets }}
+                    onChange={(v) => {
+                      setInterviewType(v.interviewType);
+                      setDimensionPresets(v.dimensions);
+                    }}
+                  />
                 </Card>
 
                 <Card className="p-4">
@@ -1254,7 +959,8 @@ export function SetupView() {
                 <SetupSummary
                   mode={mode}
                   sessionName={sessionName}
-                  templateLabel={getTemplateLabel()}
+                  rubricLabel={getRubricLabel()}
+                  dimensionCount={dimensionPresets.length}
                   participants={participants}
                   teamsUrl={teamsUrl}
                   stages={stages}
@@ -1290,17 +996,6 @@ export function SetupView() {
           )}
         </div>
       </div>
-
-      {/* Rubric Template Modal */}
-      <RubricTemplateModal
-        open={templateModalOpen}
-        onClose={() => {
-          setTemplateModalOpen(false);
-          setEditingTemplate(null);
-        }}
-        onSave={handleSaveTemplate}
-        editTemplate={editingTemplate}
-      />
 
       {/* Recording Consent Dialog (GDPR/E1) */}
       <ConsentDialog

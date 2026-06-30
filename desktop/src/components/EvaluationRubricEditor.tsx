@@ -4,6 +4,7 @@ import { Button } from './ui/Button';
 import {
   DIMENSION_PRESETS,
   getPresetByType,
+  getInterviewTypeLabelEn,
   generateDimensionKey,
   ensureDimensionKeys,
   type DimensionPresetItem,
@@ -36,15 +37,6 @@ type StoredTemplate = {
 const STORAGE_KEY = 'ifb_rubric_templates';
 const MIN_DIMENSIONS = 3;
 const MAX_DIMENSIONS = 6;
-
-// English pill labels keyed by `interview_type` (DimensionPresetTemplate has no
-// English label, so the four names are hardcoded here per the design D6).
-const TYPE_PILL_LABELS: Record<string, string> = {
-  academic: 'Academic',
-  technical: 'Technical',
-  behavioral: 'Behavioral',
-  group: 'Group',
-};
 
 const WEIGHT_OPTIONS = [1, 2, 3, 4, 5];
 
@@ -299,7 +291,7 @@ export function EvaluationRubricEditor({ value, onChange }: EvaluationRubricEdit
                     : 'border-border text-ink-secondary hover:border-accent/50'
                 }`}
               >
-                {TYPE_PILL_LABELS[preset.interview_type] ?? preset.interview_type}
+                {getInterviewTypeLabelEn(preset.interview_type)}
               </button>
             );
           })}
