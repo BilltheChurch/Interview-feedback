@@ -82,17 +82,22 @@ const DEFAULT_DIMENSION_KEYS = [
   "initiative",
 ] as const;
 
-/** Default dimension presets (Python DEFAULT_DIMENSION_PRESETS). */
+/**
+ * Default dimension presets (Python DEFAULT_DIMENSION_PRESETS). Each carries an
+ * explicit `weight: 1.0` so the no-rubric fallback path also has a defined
+ * weight (never undefined). Equal weights = unchanged, unweighted behavior.
+ */
 const DEFAULT_DIMENSION_PRESETS: Array<{
   key: string;
   label_zh: string;
   description: string;
+  weight: number;
 }> = [
-  { key: "leadership", label_zh: "领导力", description: "展现领导力、主动推进讨论、统筹全局的能力" },
-  { key: "collaboration", label_zh: "协作能力", description: "团队合作、倾听他人、建设性互动的能力" },
-  { key: "logic", label_zh: "逻辑思维", description: "分析问题、推理论证、逻辑清晰度" },
-  { key: "structure", label_zh: "结构化表达", description: "表达条理性、信息组织能力、框架化思维" },
-  { key: "initiative", label_zh: "主动性", description: "主动提出方案、积极参与、展现进取心" },
+  { key: "leadership", label_zh: "领导力", description: "展现领导力、主动推进讨论、统筹全局的能力", weight: 1.0 },
+  { key: "collaboration", label_zh: "协作能力", description: "团队合作、倾听他人、建设性互动的能力", weight: 1.0 },
+  { key: "logic", label_zh: "逻辑思维", description: "分析问题、推理论证、逻辑清晰度", weight: 1.0 },
+  { key: "structure", label_zh: "结构化表达", description: "表达条理性、信息组织能力、框架化思维", weight: 1.0 },
+  { key: "initiative", label_zh: "主动性", description: "主动提出方案、积极参与、展现进取心", weight: 1.0 },
 ];
 
 // ── Local error type (mirrors Python ValidationError semantics) ─────────────
@@ -227,15 +232,23 @@ function getDimensionKeys(payload: SynthesizeRequestPayload): string[] {
   return [...DEFAULT_DIMENSION_KEYS];
 }
 
-function getDimensionPresets(
+/**
+ * Resolve the evaluation dimensions for synthesis, preserving each dimension's
+ * `weight` (default 1) so the LLM can weight the per-person overall assessment
+ * and cross-person ranking. Weight is NOT applied to the per-dimension 0-10
+ * scores — only to how the overall conclusion/ranking is formed (see rule 4).
+ * Exported for unit testing.
+ */
+export function getDimensionPresets(
   payload: SynthesizeRequestPayload
-): Array<{ key: string; label_zh: string; description: string }> {
+): Array<{ key: string; label_zh: string; description: string; weight: number }> {
   const presets = payload.session_context?.dimension_presets;
   if (presets && presets.length > 0) {
     return presets.map((d) => ({
       key: d.key,
       label_zh: d.label_zh,
       description: d.description,
+      weight: d.weight ?? 1,
     }));
   }
   return [...DEFAULT_DIMENSION_PRESETS];
@@ -418,8 +431,12 @@ function buildSystemPrompt(payload: SynthesizeRequestPayload): string {
     '3. SCOPE: Only evaluate INTERVIEWEES (stream_role: "students"), never the interviewer. ' +
     "Zero-turn speakers are pre-filtered — do NOT generate entries for speakers not in interviewee_stats. " +
     "For each person in interviewee_stats (all have turns > 0), generate ≥1 strength + ≥1 risk claim.\n" +
-    "4. DIMENSIONS: 使用 dimension_presets 评估框架，每维度 0-10 分。" +
+    "4. DIMENSIONS: 使用 dimension_presets 评估框架，每维度独立按表现打 0-10 分。" +
     "证据不足设 not_applicable: true + score: 5。如需额外维度，输出 suggested_dimensions。\n" +
+    "   WEIGHTING: 每个维度带一个 `weight`（默认 1，越大越重要）。0-10 的单维度分数本身绝不按 weight 缩放——" +
+    "weight 只用于形成 per_person 的整体结论（overall assessment）和候选人之间的横向排名（ranking）：" +
+    "高 weight 维度应对整体结论和排名产生更大影响，低 weight 维度影响更小。" +
+    "当所有 weight 相等（如默认全为 1）时，按等权处理，行为与未加权一致。\n" +
     "5. ALIASES: name_aliases 中的别名是同一人，合并到 primary name 的 per_person entry（person_key = primary name）。\n" +
     "6. CLAIMS: Each claim includes supporting_utterances (1-3 utterance_ids). " +
     "Group observations by stage when available. Incorporate stats_observations naturally.\n" +
