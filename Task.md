@@ -163,7 +163,7 @@ Workspace: `/Users/billthechurch/Interview-feedback`
   - [x] ① tier2 + feedback-cache-refresh 报告路径同类 teacher 泄漏 → 已修（commit 5c10270，prod ef150fd3）：两路径加 `studentStats` 过滤，mirror R-T4。F1-F4 测试锁定。
   - [x] ② **B3 preferred-name 绑定** → 已修（commit 5d64466，prod ef150fd3）：根因=Phase 2 roster 传播覆盖 preferred anchor + Phase 3 last-wins；修=`isPreferred` 标签 + Phase 2 跳过 + Phase 3 `committedPreferred` 保护；补中文模式（请叫我/可以叫我/叫我X就好/我喜欢叫我）。"my name is Hong, please call me Rice"→显示 Rice。roster 匹配/多人切分逐字未变。
   - [x] ③ 真实 app 会话配置流 → 已由 app-readiness P1/P3 + 审计覆盖（mode/interviewer_name 经 hello 送达；roster 经 teams_participants）；残留低优=SettingsView 的 useAudioCapture 平行实现待对齐。
-  - [ ] ④ **Tier2 云端化（大功能，待 brainstorm 后建）**：原走已删 inference batch，需云端实现深度复盘/培优（每人深挖、跨人对比、可执行培优建议），DO alarm 调度，硬约束 ≤5min。**开放问题**：R1 实测 Tier1 已很深(每人 S/R/A+理由+证据+overall narrative+key findings)且快(8min 音频 91s)——需先决「是否真需要独立 Tier2、Tier2 该加什么 Tier1 没有的深度」。
+  - [~] ④ **Tier2 云端化**：设计+计划已评审通过，待实现。brainstorm 决策：两层(Tier1 即时 + Tier2 异步 ≤5min)、深度层加全部 4 类(跨人对比/培优/深挖/面试官视角)、触发=自动+手动、**增量叠加不重算 per_person、失败不回归 Tier1**、跳过已死的音频 batch（用 Tier1 转写）。设计 `docs/superpowers/specs/2026-06-30-tier2-deep-layer-design.md`（spec 评审✅）；计划 `docs/superpowers/plans/2026-06-30-tier2-deep-layer.md`（6 chunks，plan 评审✅）。**下一步：subagent-driven-development 实现**（建议先 compact 再开实现窗口）。
 
 ### Phase A 前置验证门（删 inference 前必须通过 pilot，需 Speechmatics key）
 > **2026-06-27 实测**（`scripts/speechmatics_rt_validate.mjs`，真实 Speechmatics key + 真实样本）
