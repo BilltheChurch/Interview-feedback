@@ -252,11 +252,15 @@ export async function runTier2Job(sessionId: string, ctx: Tier2Context): Promise
     // ── Stage 4: Re-generate stats and LLM report ─────────────────────
     const tier2Stats = computeSpeakerStats(finalTranscript as TranscriptItem[]);
     const mergedStats = ctx.mergeStatsWithRoster(tier2Stats, state);
+    // Exclude the teacher / interviewer from per-person scoring. The teacher stream
+    // carries the interviewer's own audio — it must appear in synthesis context (so
+    // the LLM knows what questions were asked) but must NOT receive a student card.
+    const studentStats = mergedStats.filter((s) => s.speaker_key !== "teacher");
 
     const tier2Warnings: string[] = [];
     const memos = await ctx.loadMemos();
     const enrichedMemos = addStageMetadata(memos, (state.config as Record<string, unknown>)?.stages as string[] ?? []);
-    const knownSpeakers = mergedStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
+    const knownSpeakers = studentStats.map((s) => s.speaker_name ?? s.speaker_key).filter(Boolean);
     const memoBindings = extractMemoNames(enrichedMemos, knownSpeakers);
     let evidence = buildMultiEvidence({
       memos: enrichedMemos,
@@ -264,11 +268,11 @@ export async function runTier2Job(sessionId: string, ctx: Tier2Context): Promise
       bindings: memoBindings
     });
 
-    const tier2EnrichedEvidence = enrichEvidencePack(finalTranscript as TranscriptItem[], mergedStats);
+    const tier2EnrichedEvidence = enrichEvidencePack(finalTranscript as TranscriptItem[], studentStats);
     evidence = [...evidence, ...tier2EnrichedEvidence];
 
     const tier2AudioDurationMs = calcTranscriptDurationMs(finalTranscript);
-    const tier2StatsObservations = generateStatsObservations(mergedStats, tier2AudioDurationMs);
+    const tier2StatsObservations = generateStatsObservations(studentStats, tier2AudioDurationMs);
 
     const locale = getSessionLocale(state, env);
     const fullConfig = (state.config ?? {}) as Record<string, unknown>;
@@ -298,7 +302,7 @@ export async function runTier2Job(sessionId: string, ctx: Tier2Context): Promise
       transcript: finalTranscript as TranscriptItem[],
       memos: enrichedMemos,
       evidence,
-      stats: mergedStats,
+      stats: studentStats,
       events: [],
       bindings: memoBindings,
       rubric,

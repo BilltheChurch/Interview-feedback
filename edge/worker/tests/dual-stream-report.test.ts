@@ -292,6 +292,112 @@ describe("dual-stream report: interviewer-as-context, not-scored contract", () =
     expect(statKeys).not.toContain("teacher");
   });
 
+  // ── Part F: feedback-cache-refresh and tier2 report paths ───────────────────
+  // Both paths follow the same contract as finalize-orchestrator (R-T4):
+  // derive studentStats = stats.filter(s => s.speaker_key !== "teacher") and
+  // feed only studentStats to buildMemoFirstReport / buildSynthesizePayload.
+  // These tests assert that contract at the unit level for the shared helpers.
+
+  it("F1: cache-refresh memo-first path: teacher excluded from per_person after studentStats filter", () => {
+    // Simulates the buildMemoFirstReport call in feedback-cache-refresh.ts
+    // (lines 146-151 after fix): stats filtered to studentStats before the call.
+    const rawStats = computeSpeakerStats(TRANSCRIPT);
+    const studentStats = rawStats.filter((s) => s.speaker_key !== "teacher");
+
+    const evidence = buildEvidence({ memos: MEMOS, transcript: TRANSCRIPT });
+    const memosWithEvidence = attachEvidenceToMemos(MEMOS, evidence);
+    const memoFirst = buildMemoFirstReport({
+      transcript: TRANSCRIPT,
+      memos: memosWithEvidence,
+      evidence,
+      stats: studentStats,
+    });
+
+    const personKeys = memoFirst.per_person.map((p) => p.person_key);
+    // Teacher must not appear as a person card in the cache-refresh memo-first baseline.
+    expect(personKeys).not.toContain("teacher");
+    expect(personKeys).not.toContain("Interviewer");
+    expect(personKeys.some((k) => k.toLowerCase().includes("teacher"))).toBe(false);
+    // Both student cards present.
+    expect(personKeys).toContain("Alice");
+    expect(personKeys).toContain("Bob");
+  });
+
+  it("F2: cache-refresh report path: teacher NOT leaked to events/report stats payload after filter", () => {
+    // Simulates the eventsPayload and invokeInferenceAnalysisReport stats arg
+    // in feedback-cache-refresh.ts (lines 156-184 after fix).
+    const rawStats = computeSpeakerStats(TRANSCRIPT);
+    const studentStats = rawStats.filter((s) => s.speaker_key !== "teacher");
+
+    // The stats field sent to events and report endpoints must exclude teacher.
+    const statKeys = studentStats.map((s) => s.speaker_key);
+    expect(statKeys).not.toContain("teacher");
+    expect(statKeys).toContain("Alice");
+    expect(statKeys).toContain("Bob");
+  });
+
+  it("F3: tier2 synthesize path: teacher excluded from buildSynthesizePayload stats after studentStats filter", () => {
+    // Simulates the buildSynthesizePayload call in tier2-processor.ts
+    // (line 296-312 after fix): stats: studentStats, not mergedStats.
+    const rawStats = computeSpeakerStats(TRANSCRIPT);
+    const studentStats = rawStats.filter((s) => s.speaker_key !== "teacher");
+    const evidence = buildEvidence({ memos: MEMOS, transcript: TRANSCRIPT });
+
+    const payload = buildSynthesizePayload({
+      sessionId: "sess_tier2",
+      transcript: TRANSCRIPT,
+      memos: MEMOS,
+      evidence,
+      stats: studentStats,
+      events: [],
+      bindings: [],
+      rubric: null,
+      sessionContext: null,
+      freeFormNotes: null,
+      historical: [],
+      stages: [],
+      locale: "en-US",
+    });
+
+    // Teacher must not appear in the synthesize stats roster.
+    const statKeys = payload.stats.map((s) => s.speaker_key);
+    expect(statKeys).not.toContain("teacher");
+    expect(statKeys).toContain("Alice");
+    expect(statKeys).toContain("Bob");
+
+    // Teacher lines must still appear in the synthesis transcript (LLM context).
+    const teacherLines = payload.transcript.filter((u) => u.stream_role === "teacher");
+    expect(teacherLines.length).toBe(2);
+  });
+
+  it("F4: tier2 without filter would leak teacher into synthesize stats (characterizes the bug)", () => {
+    // Documents the pre-fix behavior: WITHOUT the studentStats filter,
+    // mergedStats flows into buildSynthesizePayload and teacher appears.
+    const rawStats = computeSpeakerStats(TRANSCRIPT);
+    // intentionally NOT filtering — simulates the pre-fix tier2 path
+    const evidence = buildEvidence({ memos: MEMOS, transcript: TRANSCRIPT });
+
+    const payload = buildSynthesizePayload({
+      sessionId: "sess_tier2_nofilt",
+      transcript: TRANSCRIPT,
+      memos: MEMOS,
+      evidence,
+      stats: rawStats,
+      events: [],
+      bindings: [],
+      rubric: null,
+      sessionContext: null,
+      freeFormNotes: null,
+      historical: [],
+      stages: [],
+      locale: "en-US",
+    });
+
+    // Leak: teacher appears in synthesis stats when filter is absent.
+    const statKeys = payload.stats.map((s) => s.speaker_key);
+    expect(statKeys).toContain("teacher");
+  });
+
   // ── Part E: events path also collapses named teacher to "teacher" ─────────
   // analyzeEventsLocally has its OWN speakerKey() and feeds the synthesis events
   // payload (actor/target). A teacher utterance carrying speaker_name "Tim" must

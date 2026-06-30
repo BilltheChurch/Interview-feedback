@@ -141,13 +141,17 @@ export async function maybeRefreshFeedbackCache(
     roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
   });
   const stats = mergeStatsWithRoster(computeSpeakerStats(transcript), state);
+  // Exclude the teacher / interviewer from per-person scoring. The teacher stream
+  // carries the interviewer's own audio — it must appear in synthesis context (so
+  // the LLM knows what questions were asked) but must NOT receive a student card.
+  const studentStats = stats.filter((s) => s.speaker_key !== "teacher");
   const evidence = buildEvidence({ memos, transcript });
   const memosWithEvidence = attachEvidenceToMemos(memos, evidence);
   const memoFirst = buildMemoFirstReport({
     transcript,
     memos: memosWithEvidence,
     evidence,
-    stats,
+    stats: studentStats,
   });
   const assembleMs = Date.now() - assembleStart;
 
@@ -157,7 +161,7 @@ export async function maybeRefreshFeedbackCache(
     session_id: sessionId,
     transcript,
     memos: memosWithEvidence,
-    stats,
+    stats: studentStats,
     locale,
   };
   const eventsResult = await ctx.invokeInferenceAnalysisEvents(eventsPayload);
@@ -177,7 +181,7 @@ export async function maybeRefreshFeedbackCache(
       session_id: sessionId,
       transcript,
       memos: memosWithEvidence,
-      stats,
+      stats: studentStats,
       evidence,
       events: analysisEvents,
       locale,
