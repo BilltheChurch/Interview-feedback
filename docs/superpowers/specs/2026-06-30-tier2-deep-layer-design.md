@@ -42,14 +42,25 @@ Tier1 finalize 成功
    ▼
 DO alarm() → runTier2Job(sessionId)            [≤5min 预算]
    │  1. 载入 Tier1 ResultV2 (R2)               ← 跳过死音频 batch (D5)
-   │  2. 深度 LLM 调用 (qwen3.7-plus, Tier2 专用更长 timeout)
+   │  2. 深度 LLM 调用 synthesizeDeepLayerInWorker (qwen3.7-plus, Tier2 专用 timeout)
    │       输入: Tier1 transcript + evidence + stats + per_person + roster + rubric
-   │       输出: 4 类深度 (D1)
-   │  3. 把深度字段【叠加】到 Tier1 ResultV2 (D4，不改 per_person 分数)
+   │       输出: 4 类深度 (D1)  —— NO per_person
+   │  3. 把深度字段【叠加】到 Tier1 ResultV2 (D4，per_person/overall/stats 逐字保留)
    │  4. 覆写 R2 + D1 + DO 缓存; Tier2Status=succeeded
    ▼
 Desktop 轮询 tier2-status=succeeded → 重取 → 渲染深度区块 ("Enhanced Report")
 ```
+
+### `runTier2Job` 改写（具体指令）
+现有 `runTier2Job`（`tier2-processor.ts`）的 Stage 1–2（列 R2 PCM → 拼 WAV → POST `/batch/process`）**整段删除**（D5，端点已死）。新流程：
+1. **载入 Tier1 result**：复用现有 Stage 3 的载入（`tier2-processor.ts:225-229` 已从 R2 读 `result_v2.json`）。若读不到 Tier1 result → Tier2Status=failed，**Tier1 报告原样不动**。
+2. **深度调用**：`synthesizeDeepLayerInWorker(deepPayload, { timeoutMs: resolveTier2LlmTimeoutMs(env) })`。
+3. **叠加**：`const tier2Result = { ...tier1Result, cross_person_comparison, coaching_plans, interviewer_perspective, tier2_meta }`。**不重建 per_person/overall/stats/evidence**（删除现有 Stage 4 的 stats 重算/buildSynthesizePayload/per_person 覆盖逻辑）。
+4. 覆写 R2 + D1 + DO 缓存（复用现有末段）；Tier2Status=succeeded。
+
+### 失败处理（不回归 Tier1，硬要求）
+- 深度 LLM 调用失败/超时/输出不合 contract → **Tier2Status=failed，R2 里的 Tier1 ResultV2 保持原样不被覆写**（绝不能让 Tier2 失败损坏已有的 Tier1 报告）。Desktop 继续显示 Tier1 报告（轮询见到 failed 即停，不替换）。
+- 部分字段缺失（如 LLM 只产出了 cross_person 没产出 coaching）→ 能叠加的叠加、缺的留空，记 warning，不算整体失败（深度字段都是 optional）。
 
 ### 输出 schema（`ResultV2` 新增可选字段，向后兼容）
 
@@ -88,16 +99,43 @@ interface InterviewerPerspective {       // 深化已有 interview_quality + que
 
 ### LLM 调用
 - 模型 `qwen3.7-plus`，`enable_thinking:false`（沿用）。
-- **Tier2 专用更长 timeout**（异步 ≤5min，不受 Tier1 的 45s 约束）——新增 `TIER2_LLM_TIMEOUT_MS`（默认如 240000）。
-- **先一次调用**产出 4 类深度（输入含 Tier1 全部 per_person + evidence + stats + transcript）。**若 R3 大会议(5-6人/30-60min)实测单调超 token/时间预算，再拆两调用**（cross-person+coaching / interviewer+deep）。复用 `TRANSCRIPT_MAX_TOKENS` 截断；deep 层 `max_tokens` 可调高。
-- 证据引用沿用 Tier1 的 `sanitizeClaimEvidenceRefs`/`validateClaimEvidenceRefs` 门禁（深度 claim 也要锚定真实 evidence）。
+- **这是一个 NEW、独立于 Tier1 的深度合成调用**（不复用 Tier1 的 `buildSynthesizePayload`/output_contract）。新增 `synthesizeDeepLayerInWorker(payload, { timeoutMs })`（在 `llm-synthesizer.ts`，与 `synthesizeReportInWorker` 并列），有**自己的 system prompt + output_contract**（见下），只产出 4 类深度字段。
+- **per_person 绝不被这个调用触碰**：深度调用的 output_contract **不含 `per_person`**；Tier2 把 Tier1 的 `per_person`/`overall`/`stats` **逐字复制**到结果，只把 4 个深度字段叠加上去（D4）。
+- **≤5min 的具体机制**：新增 `Env.TIER2_LLM_TIMEOUT_MS`（`config.ts` + `wrangler.jsonc`，默认 240000）；`synthesizeDeepLayerInWorker` 的 `timeoutMs` 参数从 `resolveTier2LlmTimeoutMs(env)` 取（不复用 Tier1 的 `INFERENCE_TIMEOUT_MS=120000`）。Tier1 路径的 timeout 不变。
+- **先一次调用**产出 4 类深度（输入含 Tier1 全部 per_person + evidence + stats + transcript）。**若 R3 大会议(5-6人/30-60min)实测单调超 token/时间预算，再拆两调用**（cross-person+coaching / interviewer+deep）。深度调用用**独立的转写截断预算** `TIER2_TRANSCRIPT_MAX_TOKENS`（默认高于 Tier1 的 4000，如 12000；30-60min≈18k-36k transcript tokens，需更大窗口或分段）；deep 层 `max_tokens` 可调高。
+- 证据引用沿用 Tier1 的 `sanitizeClaimEvidenceRefs`/`validateClaimEvidenceRefs` 门禁——深度字段里凡带 `evidence_refs` 的（ranking.rationale / action_items / key_moments）都要锚定真实 evidence id，无效 ref 剔除。
+
+### 深度调用 output_contract（骨架，实现者据此细化 prompt）
+
+```jsonc
+// synthesizeDeepLayerInWorker 返回的 JSON envelope（NO per_person — 仅 4 类深度）
+{
+  "cross_person_comparison": {
+    "ranking": [{ "person_key": "...", "display_name": "...", "rank": 1, "rationale": "...", "evidence_refs": ["e_..."] }],
+    "by_dimension": [{ "dimension": "logic", "label_zh": "逻辑思维", "ordered": ["personA","personB"], "note": "..." }],
+    "summary": "横向总结：谁更适合/谁该淘汰 + 理由"
+  },
+  "coaching_plans": [{
+    "person_key": "...", "display_name": "...",
+    "deep_analysis": "更深行为模式/证据挖掘(每维度 3-5 句)",
+    "action_items": [{ "area": "<对齐 rubric dimension key>", "suggestion": "...", "why": "...", "evidence_refs": ["e_..."] }]
+  }],
+  "interviewer_perspective": {
+    "decision_support": "录用建议+理由+风险",
+    "key_moments": [{ "time_ms": 0, "what": "...", "why_it_matters": "...", "evidence_refs": ["e_..."] }],
+    "follow_ups_missed": ["该追问没追问的点"],
+    "interview_quality_note": "深化 overall.interview_quality"
+  }
+}
+```
+- prompt 输入打包：Tier1 的 `per_person`（含每维度 score/rationale/strengths/risks）+ `stats`（talk time/打断等）+ `evidence`（带 id+quote，供 refs 锚定）+ 截断后的 transcript + rubric dimension keys + roster/nameAliases + sessionContext。System prompt 要求：严格输出上述 JSON、`action_items.area` 必须取自给定 rubric dimension keys、所有 `evidence_refs` 必须是输入 evidence 的真实 id。
 
 ### 触发（D3）
 - **自动**：`wrangler.jsonc TIER2_AUTO_TRIGGER=true`；走现有 finalize 成功→排 alarm 路径（已存在，仅开开关）。
 - **手动**：新增 `POST /v1/sessions/{id}/tier2-trigger`（鉴权同其他写端点）→ 写 Tier2Status=pending + setAlarm；幂等（若已在跑则返回当前状态）。Desktop FeedbackView 加「重新生成深度复盘」按钮（仅在 Tier1 ready 后可见）。
 
 ### Desktop 渲染
-- 启用/实现 `CandidateComparison.tsx`（勘察发现文件已存在，先确认是否 stub）渲染 `cross_person_comparison`。
+- `CandidateComparison.tsx` **已是可用组件但渲染的是 Tier1 per-person 分数表**（prop `persons: {person_name, dimensions}`），与新 `cross_person_comparison`（`ranking{rank,rationale,evidence_refs}` + `by_dimension{ordered[],note}`）shape 不同。**需改造**该组件接受 `CrossPersonComparison` shape（新增 prop 或新组件），而非「启用 stub」。
 - FeedbackView 新增 coaching（每人 `coaching_plans`）+ interviewer-perspective 区块。
 - 轮询/替换逻辑已就绪（`tier2_ready`→"Enhanced Report"）；只需渲染新字段 + 手动重跑按钮接 `tier2-trigger`。
 - 渲染遵循现有 UI（liquid-glass）；不做 Phase X 级重设计。
@@ -106,7 +144,9 @@ interface InterviewerPerspective {       // 深化已有 interview_quality + que
 
 | 复用(已存在) | 新建/改 |
 |---|---|
-| DO alarm 调度、Tier2Status、tier2-status 端点、desktop 轮询、R2/D1/缓存持久化、synthesizeReportInWorker、证据门禁 | `runTier2Job` 改：跳过 Stage1-2、加深度 LLM 调用、叠加输出；新增深度 prompt + output_contract；`ResultV2` 4 个可选字段；`POST /tier2-trigger` 端点 + UI 按钮；desktop 渲染区块；`TIER2_AUTO_TRIGGER=true` + `TIER2_LLM_TIMEOUT_MS` |
+| DO alarm 调度、Tier2Status、tier2-status 端点、desktop 轮询、R2/D1/缓存持久化、synthesizeReportInWorker（作并列参考）、证据门禁 | `runTier2Job` 改（删 Stage1-2 / 加深度调用 / 叠加输出）；`synthesizeDeepLayerInWorker` + 深度 system prompt + output_contract；`ResultV2` 4 个可选字段（+ desktop `types.ts` 镜像）；`POST /tier2-trigger` 端点 + UI 按钮；改造 `CandidateComparison.tsx`；FeedbackView coaching/interviewer 区块；`config.ts` 加 `TIER2_LLM_TIMEOUT_MS`/`TIER2_TRANSCRIPT_MAX_TOKENS` 及 resolver |
+
+**部署步骤（wrangler.jsonc）**：`TIER2_AUTO_TRIGGER` 由 `"false"`→`"true"`；新增 `TIER2_LLM_TIMEOUT_MS`（默认 `"240000"`）、`TIER2_TRANSCRIPT_MAX_TOKENS`（默认 `"12000"`）。
 
 ## 不做（YAGNI）
 - 不重转音频（Whisper/Pyannote 已退役；Speechmatics 转写够用）。删/绕 `runTier2Job` 的 PCM batch 段，不再维护 `TIER2_BATCH_ENDPOINT`。
