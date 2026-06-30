@@ -30,7 +30,7 @@
 
 **Desktop (`desktop/`):**
 - `src/types.ts` — Modify: mirror the 4 optional `ResultV2` fields + interfaces.
-- `src/components/feedback/CandidateComparison.tsx` — Modify: accept the new `CrossPersonComparison` shape (currently renders Tier1 per-person score table).
+- `src/components/CandidateComparison.tsx` — Modify: accept the new `CrossPersonComparison` shape (currently renders Tier1 per-person score table; imported by FeedbackView from `'../components/CandidateComparison'` — keep `persons` prop, ADD optional `comparison` prop branch).
 - `src/views/FeedbackView.tsx` — Modify: render `coaching_plans` + `interviewer_perspective` sections; add "Regenerate deep review" button.
 - `main.js` + `preload.js` — Modify: add `tier2Trigger` IPC → `POST /tier2-trigger`.
 
@@ -114,7 +114,8 @@ describe("Tier2 config resolvers", () => {
 - Modify: `edge/worker/src/services/llm-synthesizer.ts`
 - Test: `edge/worker/tests/deep-layer-synth.test.ts`
 
-> Read `llm-synthesizer.ts` first: study `synthesizeReportInWorker` — how it builds the system prompt, calls `callDashScope` (endpoint, model from `env.LLM_MODEL`, `enable_thinking:false`, temperature, max_tokens, timeout), parses/repairs the JSON envelope, and applies `sanitizeClaimEvidenceRefs`/`validateClaimEvidenceRefs`. Look at how the existing tests mock `fetch`/DashScope. The new function mirrors these patterns but with a NEW prompt + a NEW output contract (the 4 deep fields, NO per_person).
+> Read `llm-synthesizer.ts` first: study `synthesizeReportInWorker` — how it builds the system prompt, calls `callDashScope` (endpoint, model from `env.LLM_MODEL`, `enable_thinking:false`, temperature, max_tokens, timeout), parses/repairs the JSON envelope. Look at how the existing tests mock `fetch`/DashScope. The new function mirrors these patterns but with a NEW prompt + a NEW output contract (the 4 deep fields, NO per_person).
+> **Visibility constraints (from plan review):** `callDashScope` is MODULE-PRIVATE to `llm-synthesizer.ts` — you MUST add `synthesizeDeepLayerInWorker` to that SAME file (do not put it elsewhere and try to import `callDashScope`). `truncateTranscript` IS exported from `llm-synthesizer.ts` (reuse it). `sanitizeClaimEvidenceRefs`/`validateClaimEvidenceRefs` are CONTEXT-INJECTED methods on `Tier2Context` (not importable into `llm-synthesizer.ts`) — so `synthesizeDeepLayerInWorker` must do evidence-ref grounding INLINE: accept the set of allowed evidence ids as a parameter and strip any `evidence_refs` id not in that set itself.
 
 - [ ] **Step 1: Write the failing test** — mock the DashScope HTTP call (same pattern as existing llm-synthesizer tests) to return a deep-layer JSON envelope, and assert `synthesizeDeepLayerInWorker` returns the parsed `{ cross_person_comparison, coaching_plans, interviewer_perspective }` and that invalid `evidence_refs` (ids not in the supplied evidence) are stripped. Include a case where the LLM returns malformed/partial JSON → function throws or returns null (so the caller can treat it as failure). Assert the request body uses the passed `timeoutMs` is honored (or at least that the function accepts `{ timeoutMs }` and uses `env.LLM_MODEL` + `enable_thinking:false`). Keep assertions on the real parsed output, not the mock.
 
@@ -154,7 +155,7 @@ Assert: deep fields present; `per_person`/`overall`/`stats` are the SAME referen
 - [ ] **Step 2: Run → FAIL** (helper doesn't exist).
 
 - [ ] **Step 3: Implement** the helper + rewrite `runTier2Job`:
-  - DELETE Stage 1 (R2 PCM list) + Stage 2 (WAV + `/batch/process` fetch) entirely. Remove the now-unused `tier2BatchEndpoint`/PCM/WAV imports if they become dead.
+  - DELETE Stage 1 (R2 PCM list, ~line 131) + Stage 2 (WAV + `/batch/process` fetch, through ~line 205) entirely, AND the old Stage-4 recompute (stats recompute + `buildSynthesizePayload` + per_person/overall overwrite, ~line 252-358). Then run `npm run typecheck` and remove ALL imports that go dead as a result (likely `tier2BatchEndpoint`, `concatUint8Arrays`/`pcm16ToWavBytes`/`bytesToBase64`/`TARGET_SAMPLE_RATE`/`TARGET_CHANNELS` from audio-utils, and several `finalize_v2` helpers like `buildSynthesizePayload`/`buildEvidence`/`attachEvidenceToMemos` if no longer used) — strict typecheck flags unused imports.
   - New flow: load Tier1 `ResultV2` from R2 (reuse the existing load at the old Stage 3). If absent → `Tier2Status=failed`, return WITHOUT overwriting anything (Tier1 stays).
   - Build the deep payload from the Tier1 result (perPerson, stats, evidence, transcript, rubric dimension keys, roster/nameAliases, sessionContext, locale). Call `synthesizeDeepLayerInWorker(payload, { timeoutMs: resolveTier2LlmTimeoutMs(ctx.env) })` with the transcript truncated to `resolveTier2TranscriptMaxTokens(ctx.env)`.
   - On success: `const tier2Result = augmentTier1WithDeepLayer(tier1Result, deepFields, { generated_at: ctx.currentIsoTs(), model: <llm model>, build_ms })`. Persist via the existing R2 overwrite + D1 + DO cache update. `Tier2Status=succeeded`.
@@ -226,8 +227,8 @@ Assert: deep fields present; `per_person`/`overall`/`stats` are the SAME referen
 ### Task 5.2: Adapt `CandidateComparison` to `CrossPersonComparison`
 
 **Files:**
-- Modify: `desktop/src/components/feedback/CandidateComparison.tsx`
-- Test: `desktop/src/components/feedback/CandidateComparison.test.tsx`
+- Modify: `desktop/src/components/CandidateComparison.tsx`
+- Test: `desktop/src/components/CandidateComparison.test.tsx`
 
 > Read the current component — it renders a Tier1 per-person score table from `persons: {person_name, dimensions}`. Adapt it to ALSO (or instead) render a `CrossPersonComparison` (`ranking` + `by_dimension` + `summary`). Prefer adding a new prop/branch over breaking the existing usage; if the existing usage is unused, replace it. Follow existing UI (liquid-glass) components.
 
