@@ -109,16 +109,31 @@ export function generateDimensionKey(name: string): string {
 }
 
 /**
- * Lazy-migration helper: ensure every item in `dims` has a `key`.
- * - Items with an existing non-empty `key` are left untouched.
+ * Loaded-from-JSON shape: a dimension item that may be missing its `key`
+ * (e.g. legacy `ifb_rubric_templates` entries) and may predate `weight`.
+ * Accepting this widened input lets callers feed untyped localStorage JSON
+ * into `ensureDimensionKeys` without `as` casts.
+ */
+export type LooseDimensionItem = Omit<DimensionPresetItem, "key" | "weight"> & {
+  key?: string;
+  weight?: number;
+};
+
+/**
+ * Lazy-migration helper: ensure every item in `dims` has a `key` (and a `weight`).
+ * - Items with an existing non-empty `key` are left untouched (idempotent: a key
+ *   generated on a previous pass is preserved on the next).
  * - Items missing a key (or with an empty string key) get a freshly generated one
  *   derived from `label_en` (the field used by DimensionPresetItem).
+ * - `weight` defaults to `1` when a loaded item lacks it (old templates may predate
+ *   weights).
  *
- * Returns a new array; does not mutate the input.
+ * Returns a new `DimensionPresetItem[]`; does not mutate the input.
  */
-export function ensureDimensionKeys(dims: DimensionPresetItem[]): DimensionPresetItem[] {
-  return dims.map((d) => {
-    if (d.key) return d;
-    return { ...d, key: generateDimensionKey(d.label_en ?? "") };
-  });
+export function ensureDimensionKeys(dims: LooseDimensionItem[]): DimensionPresetItem[] {
+  return dims.map((d) => ({
+    ...d,
+    key: d.key || generateDimensionKey(d.label_en ?? ""),
+    weight: d.weight ?? 1,
+  }));
 }

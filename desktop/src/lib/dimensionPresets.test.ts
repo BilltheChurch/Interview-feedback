@@ -109,4 +109,43 @@ describe("ensureDimensionKeys", () => {
     expect(result[0].key).toMatch(/^custom_test_[a-z0-9]{6}$/);
     expect(original).toBe("");
   });
+
+  it("defaults weight to 1 when a loaded item lacks it (old templates predate weights)", () => {
+    // Legacy localStorage entry: no `weight` field at all.
+    const items = [
+      { key: "legacy_key", label_en: "Legacy", label_zh: "", description: "d" },
+    ];
+    const result = ensureDimensionKeys(items);
+    expect(result[0].weight).toBe(1);
+    expect(result[0].key).toBe("legacy_key");
+  });
+
+  it("preserves an explicit weight (including non-default values)", () => {
+    const items = [
+      { key: "k", label_en: "L", label_zh: "", description: "d", weight: 4 },
+    ];
+    const result = ensureDimensionKeys(items);
+    expect(result[0].weight).toBe(4);
+  });
+
+  it("is idempotent: a generated key from the first pass is kept on the second", () => {
+    const items = [
+      { label_en: "Some Dim", label_zh: "", description: "d", weight: 2 },
+    ];
+    const firstPass = ensureDimensionKeys(items);
+    const generatedKey = firstPass[0].key;
+    expect(generatedKey).toMatch(/^custom_some_dim_[a-z0-9]{6}$/);
+    const secondPass = ensureDimensionKeys(firstPass);
+    expect(secondPass[0].key).toBe(generatedKey);
+  });
+
+  it("accepts loosely-typed items missing key and weight without casts", () => {
+    // This mirrors untyped JSON.parse output from localStorage — no `as` cast needed.
+    const loaded = [
+      { label_en: "From JSON", label_zh: "", description: "d" },
+    ];
+    const result = ensureDimensionKeys(loaded);
+    expect(result[0].key).toMatch(/^custom_from_json_[a-z0-9]{6}$/);
+    expect(result[0].weight).toBe(1);
+  });
 });
