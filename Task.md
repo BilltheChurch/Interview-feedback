@@ -310,6 +310,13 @@ Validation Date: 2026-06-30（Phase R 链路鲁棒性硬化 `claude/ecstatic-cha
 - 🔥 **过程揪出并修掉 2 个生产级 latent bug**（修复前同一音频：学生全 unknown / 4 claims → 修复后 4 命名学生 / 14 claims）：hotfix-1 `6994e45`(DO 构造器 inference URL，自 C3 起 prod 开不了会话)、hotfix-2 `4674735`(diarization 默认 edge→cloud，真实 app 同样中招)。详见 §2.5 Phase R。
 - ⚠️ 非阻塞瑕疵(Phase Q)：① "please call me Rice" 绑成 roster 名 Alice（B3 preferred-name 缺口；真实会议 roster 是真名故影响小）② harness "interviewer context: false" 是弱检查(teacher 实际在 transcript)，可优化 harness 判定。
 
+**🛠 真实 app 多人流程审计 + 修复（2026-06-30，为「真实使用软件、多人真实测试」准备；prod 版本 9f80f499）**：R1 验证的是 harness 路径，真实 Electron app 路径(不 POST /config、靠 hello 帧 + 服务端默认)此前未验。只读审计(`audit-app-flow`)发现并修了 3 个阻塞缺口：
+- [x] **P1 group 被当 1v1**（commit 2bd6cb6）：真实 app 从不发 `mode`，worker 默认 1v1 → 群面报告用错语义。修：`mode` 经 SetupView→`wsService.connect`→hello 帧→worker `updateSessionConfigFromHello` 解析(仅认 1v1/group，条件写)→`state.config.mode`→finalize。新 `tests/hello-mode.test.ts` 12 例。**已部署**(P1 worker 改动须部署才生效)。
+- [x] **P2 系统音频静默失败**（commit 9f1d448）：屏幕录制权限缺失/无音轨时 students 流静默无声、无提示 → 可能录完整场零学生音频。修：`AudioService.initSystem` 检测 3 种失败(permission/no-track 早退停轨/other)→`systemAudioFailureReason`；`SidecarView` 持久琥珀横幅(`isCapturing && !systemReady`)+ 一次性 toast(ref 守卫)，复用此前未接线的 ToastContainer。不硬阻断。
+- [x] **P3 面试官名恒空**（commit c74187e）：SetupView 硬编码 `interviewerName:''`、无输入框。修：加英文输入框「Your name (interviewer)」(选填，空→undefined)，经 hello 送达。
+- 审计同时确认 ✅：双流采集(mic→teacher / 系统 loopback→students)路由正确、PCM 16k/mono/s16le 对、finalize 自动触发+10min 轮询、prod base URL/key 经 IPC 就位、desktop tsc 过。
+- [ ] **跟进(低优)**：`useAudioCapture.initSystem`(SettingsView 音频测试面板用)是未升级的平行实现(no-track 仍 throw、cancel 检测弱)——录音期走 SidecarView 路径不受影响，但建议后续对齐或让 SettingsView 走 AudioService。
+
 ## 7. 当前阻塞与处理
 - **[架构] 旧架构依赖自建推理**：`if.frontierace.ai` 是开发机 tunnel（现 1033 不健康），不满足"用户零部署"。→ Phase 6 用 Speechmatics + Worker 直调 LLM 取代，删除 `inference/`。
 - **[P0 bug] Desktop 生产版连不上云端**：`VITE_EDGE_BASE_URL` 未定义 → `baseApiUrl=''`。→ Phase 6 A3 修。
