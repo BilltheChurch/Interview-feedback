@@ -246,7 +246,10 @@ export function getDimensionPresets(
   if (presets && presets.length > 0) {
     return presets.map((d) => ({
       key: d.key,
-      label_zh: d.label_zh,
+      // Custom dimensions only set label_en in the editor, so label_zh is "".
+      // Fall back to the English name (then key) so the report's Chinese
+      // dimension label is never blank. Preset dims keep their non-empty label_zh.
+      label_zh: d.label_zh || d.label_en || d.key,
       description: d.description,
       weight: d.weight ?? 1,
     }));

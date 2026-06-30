@@ -88,6 +88,48 @@ describe("getDimensionPresets weight handling", () => {
     expect(presets.map((d) => d.weight)).toEqual([5, 1]);
   });
 
+  it("falls back label_zh to label_en for a custom dim with empty label_zh", () => {
+    // A user-added custom dimension only sets label_en in the editor, leaving
+    // label_zh "". The report's Chinese dimension label would otherwise be blank,
+    // so getDimensionPresets must fall back to the English name (then key).
+    const p = payload({
+      session_context: {
+        dimension_presets: [
+          { key: "adaptability", label_zh: "", label_en: "Adaptability", description: "d", weight: 2 },
+        ],
+      } as SynthesizeRequestPayload["session_context"],
+    });
+
+    const presets = getDimensionPresets(p);
+    expect(presets[0].label_zh).toBe("Adaptability");
+  });
+
+  it("falls back label_zh to key when both label_zh and label_en are empty", () => {
+    const p = payload({
+      session_context: {
+        dimension_presets: [
+          { key: "custom_xyz_abc123", label_zh: "", label_en: "", description: "d", weight: 1 },
+        ],
+      } as SynthesizeRequestPayload["session_context"],
+    });
+
+    const presets = getDimensionPresets(p);
+    expect(presets[0].label_zh).toBe("custom_xyz_abc123");
+  });
+
+  it("keeps a non-empty preset label_zh unchanged (no fallback)", () => {
+    const p = payload({
+      session_context: {
+        dimension_presets: [
+          { key: "leadership", label_zh: "领导力", label_en: "Leadership", description: "d", weight: 1 },
+        ],
+      } as SynthesizeRequestPayload["session_context"],
+    });
+
+    const presets = getDimensionPresets(p);
+    expect(presets[0].label_zh).toBe("领导力");
+  });
+
   it("defaults weight to 1 when a preset omits it", () => {
     const p = payload({
       session_context: {
