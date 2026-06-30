@@ -876,6 +876,41 @@ export function isInferenceEnabled(env: Env): boolean {
   return base.length > 0;
 }
 
+/**
+ * Placeholder URL used when inference is disabled (all-cloud mode: INFERENCE_ENABLED=false).
+ * The InferenceFailoverClient is still constructed so its type stays non-null, but every
+ * call site is gated by isInferenceEnabled(), so this URL is never actually fetched.
+ */
+const INFERENCE_DISABLED_PLACEHOLDER_URL = "https://inference.disabled.invalid";
+
+/**
+ * Returns the primary inference base URL to use in the DO constructor.
+ *
+ * When inference is enabled (INFERENCE_ENABLED is true or a base URL is configured),
+ * the URL must be present — throws if missing to catch misconfiguration early.
+ *
+ * When inference is disabled (INFERENCE_ENABLED=false / all-cloud mode), a harmless
+ * placeholder URL is returned so InferenceFailoverClient can still be constructed
+ * without a real URL. The placeholder is never fetched because every inference call
+ * site is guarded by isInferenceEnabled().
+ */
+export function resolveInferencePrimaryBaseUrl(env: Env): string {
+  const normalizedUrl = ((env.INFERENCE_BASE_URL_PRIMARY ?? env.INFERENCE_BASE_URL ?? "").trim());
+  // Strip trailing slash to match normalizeBaseUrl behaviour in the client
+  const primaryBaseUrl = normalizedUrl.endsWith("/") ? normalizedUrl.slice(0, -1) : normalizedUrl;
+
+  if (!isInferenceEnabled(env)) {
+    // Inference retired in all-cloud mode — return placeholder; it is never used.
+    return INFERENCE_DISABLED_PLACEHOLDER_URL;
+  }
+
+  if (!primaryBaseUrl) {
+    throw new Error("INFERENCE_BASE_URL or INFERENCE_BASE_URL_PRIMARY must be configured");
+  }
+
+  return primaryBaseUrl;
+}
+
 export function getSessionLocale(state: SessionState | undefined, env?: Env): string {
   const fromConfig = (state?.config as Record<string, unknown>)?.locale as string | undefined;
   return fromConfig || env?.DEFAULT_LOCALE || 'zh-CN';

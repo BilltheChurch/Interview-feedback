@@ -348,7 +348,9 @@ import {
   log,
   DEFAULT_DATA_RETENTION_DAYS,
   STORAGE_KEY_SESSION_PHASE,
-  transitionSessionPhase
+  transitionSessionPhase,
+  isInferenceEnabled,
+  resolveInferencePrimaryBaseUrl
 } from "./config";
 
 
@@ -439,10 +441,11 @@ export class MeetingSessionDO extends DurableObject<Env> {
       teacher: this.buildRealtimeRuntime("teacher"),
       students: this.buildRealtimeRuntime("students")
     };
-    const primaryBaseUrl = normalizeBaseUrl((env.INFERENCE_BASE_URL_PRIMARY ?? env.INFERENCE_BASE_URL ?? "").trim());
-    if (!primaryBaseUrl) {
-      throw new Error("INFERENCE_BASE_URL or INFERENCE_BASE_URL_PRIMARY must be configured");
-    }
+    // resolveInferencePrimaryBaseUrl throws only when inference is enabled but no URL is
+    // configured.  When INFERENCE_ENABLED=false (all-cloud mode) it returns a harmless
+    // placeholder — the placeholder is never fetched because every call site that uses
+    // inferenceClient is gated by isInferenceEnabled().
+    const primaryBaseUrl = resolveInferencePrimaryBaseUrl(env);
     const secondaryRaw = normalizeBaseUrl((env.INFERENCE_BASE_URL_SECONDARY ?? "").trim());
     this.inferenceClient = new InferenceFailoverClient({
       primaryBaseUrl,
