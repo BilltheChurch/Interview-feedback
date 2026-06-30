@@ -9,6 +9,7 @@ export type WsConnectOptions = {
   sampleRate?: number;
   channels?: number;
   format?: string;
+  mode?: '1v1' | 'group';
   interviewerName?: string;
   teamsInterviewerName?: string;
   participants?: Array<{ name: string }>;
@@ -78,6 +79,7 @@ class WebSocketService {
       sampleRate = 16000,
       channels = 1,
       format = 'pcm_s16le',
+      mode,
       interviewerName,
       teamsInterviewerName,
       participants,
@@ -117,6 +119,7 @@ class WebSocketService {
             channels,
             format,
             capture_mode: 'dual_stream',
+            mode,
             interviewer_name: interviewerName,
             teams_interviewer_name: teamsInterviewerName,
             teams_participants: participants,

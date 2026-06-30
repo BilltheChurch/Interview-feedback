@@ -1858,6 +1858,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
       config.diarization_backend = this.diarizationBackendDefault();
     }
 
+    // Parse interview mode from hello frame. Only accept known values; ignore
+    // everything else to avoid clobbering a mode already set by other means.
+    const helloMode = valueAsString(message.mode);
+    if (helloMode === "1v1" || helloMode === "group") {
+      config.mode = helloMode;
+    }
+
     const roster = parseRosterEntries(message.teams_participants);
     if (roster.length > 0) {
       currentState.roster = roster;

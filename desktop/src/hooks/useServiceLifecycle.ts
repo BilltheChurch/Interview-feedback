@@ -114,6 +114,7 @@ export function useServiceLifecycle() {
       await wsService.connect({
         baseWsUrl: config.baseApiUrl.replace(/^http/, 'ws'),
         sessionId: config.sessionId,
+        mode: config.mode,
         interviewerName: config.interviewerName,
         teamsInterviewerName: config.teamsInterviewerName,
         participants: config.participants,
@@ -143,6 +144,7 @@ export function useServiceLifecycle() {
       await wsService.connect({
         baseWsUrl: persisted.baseApiUrl.replace(/^http/, 'ws'),
         sessionId: persisted.sessionId,
+        mode: persisted.mode,
         interviewerName: persisted.interviewerName,
         teamsInterviewerName: persisted.teamsInterviewerName,
         participants: persisted.participants,
