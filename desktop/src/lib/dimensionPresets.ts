@@ -62,3 +62,63 @@ export const DIMENSION_PRESETS: DimensionPresetTemplate[] = [
 export function getPresetByType(interviewType: string): DimensionPresetTemplate | undefined {
   return DIMENSION_PRESETS.find((p) => p.interview_type === interviewType);
 }
+
+// Base36 alphabet for building a guaranteed 6-char random suffix.
+const BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+/**
+ * Generate a stable-looking but random 6-character lowercase base36 string.
+ * `Math.random().toString(36).slice(2,8)` can occasionally produce fewer than
+ * 6 characters when the fractional part has trailing zeros.  This loop-based
+ * approach always returns exactly 6 chars.
+ */
+function randomBase36(length: number): string {
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += BASE36_ALPHABET[Math.floor(Math.random() * 36)];
+  }
+  return result;
+}
+
+/**
+ * Generate a unique key for a custom evaluation dimension.
+ *
+ * Key format (D3, locked):
+ *   "custom_" + slug + "_" + <6-char lowercase base36 random>
+ *
+ * Where slug = name.toLowerCase()
+ *                 .replace(/[^a-z0-9]+/g, "_")
+ *                 .replace(/^_+|_+$/g, "")   // strip leading/trailing underscores
+ *                 .slice(0, 20)
+ *
+ * If the resulting slug is empty, "dim" is used instead.
+ */
+export function generateDimensionKey(name: string): string {
+  // LOCKED slug rule (design doc D3) — must match a future worker validator
+  // byte-for-byte. Do NOT add any extra normalization (e.g. a post-slice
+  // trailing-underscore strip): the leading/trailing strip happens BEFORE the
+  // 20-char cap, and nothing happens after it.
+  const slug =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 20) || "dim";
+
+  return `custom_${slug}_${randomBase36(6)}`;
+}
+
+/**
+ * Lazy-migration helper: ensure every item in `dims` has a `key`.
+ * - Items with an existing non-empty `key` are left untouched.
+ * - Items missing a key (or with an empty string key) get a freshly generated one
+ *   derived from `label_en` (the field used by DimensionPresetItem).
+ *
+ * Returns a new array; does not mutate the input.
+ */
+export function ensureDimensionKeys(dims: DimensionPresetItem[]): DimensionPresetItem[] {
+  return dims.map((d) => {
+    if (d.key) return d;
+    return { ...d, key: generateDimensionKey(d.label_en ?? "") };
+  });
+}
