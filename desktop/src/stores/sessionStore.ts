@@ -41,6 +41,9 @@ export type WebSocketStatus =
 
 export type StreamRole = 'teacher' | 'students';
 
+/** Classification of a system-audio capture failure (null = ok / not attempted). */
+export type SystemAudioFailureReason = 'permission' | 'no-track' | 'other' | null;
+
 export type AcsStatus = 'off' | 'connecting' | 'connected' | 'receiving' | 'error';
 
 export type CaptionEntry = {
@@ -184,6 +187,8 @@ interface SessionStore {
   systemReady: boolean;
   isCapturing: boolean;
   audioError: string | null;
+  /** Set when system audio capture fails; null when it succeeds or hasn't been attempted. */
+  systemAudioFailureReason: SystemAudioFailureReason;
 
   // WebSocket
   wsStatus: Record<StreamRole, WebSocketStatus>;
@@ -224,6 +229,7 @@ interface SessionStore {
   setAudioLevels: (levels: AudioLevels) => void;
   setAudioReady: (device: 'mic' | 'system', ready: boolean) => void;
   setAudioError: (error: string | null) => void;
+  setSystemAudioFailureReason: (reason: SystemAudioFailureReason) => void;
   setIsCapturing: (capturing: boolean) => void;
   setWsStatus: (role: StreamRole, status: WebSocketStatus) => void;
   setWsError: (error: string | null) => void;
@@ -259,6 +265,7 @@ const INITIAL_STATE = {
   systemReady: false,
   isCapturing: false,
   audioError: null as string | null,
+  systemAudioFailureReason: null as SystemAudioFailureReason,
 
   wsStatus: { teacher: 'disconnected', students: 'disconnected' } as Record<StreamRole, WebSocketStatus>,
   wsError: null as string | null,
@@ -374,6 +381,8 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
     set(device === 'mic' ? { micReady: ready } : { systemReady: ready }),
 
   setAudioError: (error) => set({ audioError: error }),
+
+  setSystemAudioFailureReason: (reason) => set({ systemAudioFailureReason: reason }),
 
   setIsCapturing: (capturing) => set({ isCapturing: capturing }),
 

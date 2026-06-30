@@ -2,11 +2,14 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AnimatePresence } from 'motion/react';
 import { motion } from 'motion/react';
+import { AlertTriangle } from 'lucide-react';
 import { RichNoteEditor, type RichNoteEditorRef } from '../components/RichNoteEditor';
 import { useSessionStore } from '../stores/sessionStore';
 import type { MemoType } from '../stores/sessionStore';
 import { useSessionOrchestrator } from '../hooks/useSessionOrchestrator';
 import { CaptionPanel } from '../components/CaptionPanel';
+import { ToastContainer } from '../components/Toast';
+import { useToast } from '../hooks/useToast';
 
 import { SidecarHeader } from '../components/sidecar/SidecarHeader';
 import { StageProgressBar } from '../components/sidecar/StageProgressBar';
@@ -26,6 +29,35 @@ import {
   type ParticipantStatus,
   type IncrementalBadgeStatus,
 } from '../components/sidecar/types';
+import type { SystemAudioFailureReason } from '../stores/sessionStore';
+
+/* ─── System audio warning copy ──────────────── */
+
+/**
+ * Single source of truth for the system-audio failure warning text, shared by
+ * both the persistent banner and the one-shot toast so they never diverge.
+ */
+function getSystemAudioHint(reason: SystemAudioFailureReason): {
+  title: string;
+  message: string;
+} {
+  const title = 'System audio not captured';
+  switch (reason) {
+    case 'permission':
+      return {
+        title,
+        message:
+          'Grant Screen Recording permission in System Settings → Privacy & Security → Screen Recording, then retry.',
+      };
+    case 'no-track':
+      return {
+        title,
+        message: 'Enable "Share audio" in the screen picker, then retry.',
+      };
+    default:
+      return { title, message: 'Student speech will not be recorded.' };
+  }
+}
 
 /* ─── SidecarView (main export) ──────────────── */
 
@@ -56,8 +88,12 @@ export function SidecarView() {
   const acsCaptionCount = useSessionStore((s) => s.acsCaptionCount);
   const captions = useSessionStore((s) => s.captions);
   const transcriptSegments = useSessionStore((s) => s.transcriptSegments);
+  const systemReady = useSessionStore((s) => s.systemReady);
+  const systemAudioFailureReason = useSessionStore((s) => s.systemAudioFailureReason);
+  const isCapturing = useSessionStore((s) => s.isCapturing);
 
   const { end } = useSessionOrchestrator();
+  const { toasts, toast, dismiss } = useToast();
 
   // Derive display values
   const sessionId = storeSessionId || locationState?.sessionId || `sess_${Date.now()}`;
@@ -80,6 +116,21 @@ export function SidecarView() {
   ];
 
   const baseApiUrl = useSessionStore((s) => s.baseApiUrl);
+
+  // ── System audio failure toast — fire once when capture starts without system audio ──
+  const systemWarningFiredRef = useRef(false);
+  useEffect(() => {
+    if (!isCapturing) {
+      // Reset so the warning can re-fire if the user stops/restarts
+      systemWarningFiredRef.current = false;
+      return;
+    }
+    if (systemReady || systemWarningFiredRef.current) return;
+    systemWarningFiredRef.current = true;
+
+    const { title, message } = getSystemAudioHint(systemAudioFailureReason);
+    toast(`${title} — ${message}`, 'warning');
+  }, [isCapturing, systemReady, systemAudioFailureReason, toast]);
 
   // ── Incremental processing status polling ──
   const [incrementalStatus, setIncrementalStatus] = useState<{
@@ -390,6 +441,30 @@ export function SidecarView() {
         onEndSession={handleEndSession}
       />
 
+      {/* System audio warning banner — shown persistently while capturing without system audio */}
+      <AnimatePresence>
+        {isCapturing && !systemReady && (() => {
+          const { title, message } = getSystemAudioHint(systemAudioFailureReason);
+          return (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.2 }}
+              className="flex items-center gap-2 px-3 py-1.5 bg-warning/10 border-b border-warning/30 text-warning shrink-0"
+              role="alert"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-warning" />
+              <span className="text-xs">
+                <span className="font-semibold">{title}</span>
+                {' — '}
+                {message}
+              </span>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
+
       {/* Thin stage progress bar */}
       <StageProgressBar currentStage={currentStage} stages={stages} />
 
@@ -506,6 +581,9 @@ export function SidecarView() {
           })()}
         </AnimatePresence>
       </div>
+
+      {/* Toast notifications (system audio warning, etc.) */}
+      <ToastContainer toasts={toasts} onDismiss={dismiss} />
     </div>
   );
 }

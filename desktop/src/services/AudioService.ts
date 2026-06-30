@@ -387,8 +387,13 @@ class AudioService {
 
       const audioTrack = displayStream.getAudioTracks()[0];
       if (!audioTrack) {
+        // getDisplayMedia resolved but returned no audio track (video-only loopback).
+        // Treat this as a distinct failure mode — not a user cancellation.
+        // The UI (banner + toast) carries all user-facing messaging.
         displayStream.getTracks().forEach((t) => t.stop());
-        throw new Error('Selected source has no system audio track');
+        store.setSystemAudioFailureReason('no-track');
+        store.setAudioReady('system', false);
+        return;
       }
 
       // Disconnect previous
@@ -430,16 +435,23 @@ class AudioService {
         useSessionStore.getState().setAudioReady('system', false);
       });
 
+      store.setSystemAudioFailureReason(null);
       store.setAudioReady('system', true);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (
+      const isPermissionOrCancel =
         msg.includes('Permission denied') ||
         msg.includes('cancelled') ||
-        msg.includes('AbortError')
-      ) {
+        (err instanceof Error && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'NotAllowedError');
+
+      if (isPermissionOrCancel) {
+        // User cancelled the picker or Screen Recording permission is missing.
+        // Mark this explicitly so the UI can show a targeted warning.
+        store.setSystemAudioFailureReason('permission');
         store.setAudioError(null);
       } else {
+        store.setSystemAudioFailureReason('other');
         store.setAudioError(`System audio init failed: ${msg}`);
       }
       store.setAudioReady('system', false);
