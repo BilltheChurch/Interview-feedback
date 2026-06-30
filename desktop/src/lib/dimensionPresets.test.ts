@@ -88,14 +88,48 @@ describe("ensureDimensionKeys", () => {
     expect(result[1].key).toMatch(/^custom_custom_dim_[a-z0-9]{6}$/);
   });
 
-  it("handles item with name field instead of label_en", () => {
-    // The task says: key: d.key || generateDimensionKey(d.name ?? d.label_en ?? "")
-    // DimensionPresetItem uses label_en, but test ensures label_en is picked up
-    const items: DimensionPresetItem[] = [
-      { key: "", label_en: "X Dimension", label_zh: "", description: "d", weight: 1 },
-    ];
-    const result = ensureDimensionKeys(items);
-    expect(result[0].key).toMatch(/^custom_x_dimension_[a-z0-9]{6}$/);
+  it("migrates a genuine legacy item that uses `name` (no key, no label_en)", () => {
+    // REAL legacy `ifb_rubric_templates` shape written by the now-deleted
+    // RubricTemplateModal: { name, weight, description } — no key, no label_en/zh.
+    // The English name must be carried into label_en and drive the key.
+    const result = ensureDimensionKeys([
+      { name: "Communication", weight: 3, description: "Clarity" },
+    ]);
+    expect(result[0].label_en).toBe("Communication");
+    expect(result[0].label_zh).toBe("");
+    expect(result[0].description).toBe("Clarity");
+    expect(result[0].weight).toBe(3);
+    expect(result[0].key).toMatch(/^custom_communication_[a-z0-9]{6}$/);
+  });
+
+  it("backfills label_en from legacy name only when label_en is absent", () => {
+    // When label_en is present it wins for the displayed name. The key derivation
+    // follows the spec rule `generateDimensionKey(d.name ?? d.label_en ?? "")`,
+    // so when a legacy `name` is also present it drives the key.
+    const result = ensureDimensionKeys([
+      { name: "Old Name", label_en: "X Dimension", label_zh: "", description: "d", weight: 1 },
+    ]);
+    expect(result[0].label_en).toBe("X Dimension");
+    expect(result[0].key).toMatch(/^custom_old_name_[a-z0-9]{6}$/);
+  });
+
+  it("does not throw on corrupt array elements (null / string) and skips them", () => {
+    // A hand-edited/corrupt local template could contain non-object elements.
+    // ensureDimensionKeys must not crash the editor when one is selected.
+    const corrupt = [
+      null,
+      "not an object",
+      { name: "Good", weight: 2, description: "ok" },
+    ] as unknown as Parameters<typeof ensureDimensionKeys>[0];
+    let result: ReturnType<typeof ensureDimensionKeys> = [];
+    expect(() => {
+      result = ensureDimensionKeys(corrupt);
+    }).not.toThrow();
+    // The single valid element survives migration.
+    expect(result).toHaveLength(1);
+    expect(result[0].label_en).toBe("Good");
+    expect(result[0].weight).toBe(2);
+    expect(result[0].key).toMatch(/^custom_good_[a-z0-9]{6}$/);
   });
 
   it("returns a new array without mutating the original", () => {

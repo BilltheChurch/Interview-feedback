@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -169,14 +170,17 @@ describe('EvaluationRubricEditor', () => {
   });
 
   it('a saved template can be re-selected, applying its dimensions via onChange', async () => {
-    // Pre-seed a stored template whose dims include a legacy item missing `key`.
+    // Pre-seed a stored template whose first dim is a GENUINE legacy entry
+    // written by the now-deleted RubricTemplateModal: { name, weight, description }
+    // — no key, no label_en/label_zh. Lazy migration must carry `name` into
+    // label_en and derive the key from it, NOT leave the name blank.
     const stored = [
       {
         id: 'tpl_1',
         name: 'Saved Tech',
         interview_type: 'technical',
         dimensions: [
-          { label_en: 'Legacy Dim', label_zh: '', description: 'd', weight: 4 }, // no key
+          { name: 'Legacy Dim', weight: 4, description: 'd' }, // real legacy shape
           { key: 'coding_ability', label_en: 'Coding Ability', label_zh: '', description: 'd', weight: 2 },
           { key: 'system_design', label_en: 'System Design', label_zh: '', description: 'd', weight: 1 },
         ],
@@ -195,9 +199,46 @@ describe('EvaluationRubricEditor', () => {
     const lastArg = onChange.mock.calls[onChange.mock.calls.length - 1][0];
     expect(lastArg.interviewType).toBe('technical');
     expect(lastArg.dimensions).toHaveLength(3);
-    // Lazy migration: legacy dim missing a key gets a generated custom_ key.
-    expect(lastArg.dimensions[0].key).toMatch(/^custom_/);
+    // Lazy migration: legacy dim's `name` survives into label_en (NOT blank).
+    expect(lastArg.dimensions[0].label_en).toBe('Legacy Dim');
+    expect(lastArg.dimensions[0].key).toMatch(/^custom_legacy_dim_[a-z0-9]{6}$/);
+    expect(lastArg.dimensions[0].weight).toBe(4);
     expect(lastArg.dimensions[1].key).toBe('coding_ability');
+  });
+
+  it('renders the migrated legacy name (not a blank input) after selecting a legacy template', async () => {
+    // Drive the migrated rubric back into the editor and assert the name input
+    // shows the legacy `name`, proving the migrated label_en reaches the UI.
+    const stored = [
+      {
+        id: 'tpl_legacy',
+        name: 'Legacy Tpl',
+        interview_type: 'behavioral',
+        dimensions: [
+          { name: 'Communication', weight: 3, description: 'Clarity' }, // real legacy shape
+          { name: 'Teamwork', weight: 2, description: 'Cooperation' },
+          { name: 'Drive', weight: 1, description: 'Ambition' },
+        ],
+      },
+    ];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+
+    const user = userEvent.setup();
+    // Controlled wrapper so the editor re-renders with the migrated dimensions.
+    function Harness() {
+      const [val, setVal] = useState(academicValue());
+      return <EvaluationRubricEditor value={val} onChange={setVal} />;
+    }
+    render(<Harness />);
+
+    await user.selectOptions(screen.getByLabelText(/saved template/i), 'tpl_legacy');
+
+    const nameInputs = screen.getAllByPlaceholderText('Dimension name') as HTMLInputElement[];
+    const values = nameInputs.map((i) => i.value);
+    expect(values).toContain('Communication');
+    expect(values).toContain('Teamwork');
+    // No migrated dimension renders with a blank name.
+    expect(values.every((v) => v.trim().length > 0)).toBe(true);
   });
 
   it('ignores corrupt stored templates (dimensions null/missing) without crashing', async () => {
@@ -240,6 +281,17 @@ describe('EvaluationRubricEditor', () => {
   });
 
   /* ── Rendering the English labels ── */
+
+  it('renders only English (no CJK) in the description inputs for the default academic preset (D6)', () => {
+    // The description fields are rendered UI copy bound into visible inputs, so
+    // they must be English-only — not just the type label on the Review step.
+    render(<EvaluationRubricEditor value={academicValue()} onChange={() => {}} />);
+    const descInputs = screen.getAllByPlaceholderText('Description') as HTMLInputElement[];
+    expect(descInputs.length).toBeGreaterThan(0);
+    for (const input of descInputs) {
+      expect(input.value).not.toMatch(/[一-鿿]/);
+    }
+  });
 
   it('renders dimension label_en values in the name inputs', () => {
     render(<EvaluationRubricEditor value={academicValue()} onChange={() => {}} />);
