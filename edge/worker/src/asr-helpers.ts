@@ -138,6 +138,40 @@ export function makeSilencePcm16(durationMs = 100): Uint8Array {
   return new Uint8Array(byteLength); // Uint8Array is zero-initialized by spec
 }
 
+// ── Backpressure helpers ────────────────────────────────────────────
+
+/**
+ * Maximum number of audio frames that may be in-flight (sent but not yet
+ * acknowledged by Speechmatics via AudioAdded{seq_no}) before the drain loop
+ * skips a pass to let acks catch up. 50 frames ≈ 50 seconds of 1-s chunks,
+ * providing a generous buffer while still bounding unbounded queue growth on
+ * slow links. A named constant (not an env var) is intentional — YAGNI; the
+ * value can be promoted to config if production telemetry demands tuning.
+ */
+export const BACKPRESSURE_WINDOW = 50;
+
+/**
+ * Compute the number of frames sent ahead of Speechmatics acknowledgments.
+ *
+ * Returns Math.max(0, sentSeq - ackedSeq) so the result is always >= 0.
+ * A negative difference can occur at startup when acks arrive before the
+ * runtime sent-counter has been set (safe to treat as zero lag).
+ */
+export function backpressureLag(sentSeq: number, ackedSeq: number): number {
+  return Math.max(0, sentSeq - ackedSeq);
+}
+
+/**
+ * Decide whether the drain loop should skip this pass.
+ *
+ * Returns true only when lag EXCEEDS the window (strict >, not >=).
+ * At lag === window the loop continues — one more frame may still be sent.
+ * This is the pure decision function; callers supply concrete lag + window values.
+ */
+export function shouldThrottle(lag: number, windowSize: number): boolean {
+  return lag > windowSize;
+}
+
 // ── ASR state builders ──────────────────────────────────────────────
 
 export function buildDefaultAsrState(env: AsrEnvConfig): AsrState {
@@ -241,7 +275,9 @@ export function buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime
     lastFinalTextNorm: "",
     drainGeneration: 0,
     sttBuffer: null,
-    lastAudioSentAt: 0 // epoch sentinel: never sent → keepalive eligible immediately
+    lastAudioSentAt: 0,            // epoch sentinel: never sent → keepalive eligible immediately
+    lastSentToSpeechmaticsSeq: 0,  // per-connection send counter (resets on each WS connect)
+    lastAckedSeq: 0                // per-connection ack counter (resets on each WS connect)
   };
 }
 

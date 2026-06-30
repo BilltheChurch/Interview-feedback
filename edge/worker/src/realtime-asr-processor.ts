@@ -73,7 +73,14 @@ import type {
 } from "./config";
 import { resolveTeacherIdentity as resolveTeacherIdentityFn } from "./speaker-helpers";
 import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
-import { shouldSendKeepalive, makeSilencePcm16, resolveKeepaliveMs } from "./asr-helpers";
+import {
+  shouldSendKeepalive,
+  makeSilencePcm16,
+  resolveKeepaliveMs,
+  backpressureLag,
+  shouldThrottle,
+  BACKPRESSURE_WINDOW,
+} from "./asr-helpers";
 
 // ── sleep helper ───────────────────────────────────────────────────────────
 
@@ -183,6 +190,10 @@ export async function closeRealtimeAsrSession(
     runtime.lastEmitAt = null;
     runtime.lastFinalTextNorm = "";
     runtime.sttBuffer = null;
+    // Backpressure counters are per-connection (mirror Speechmatics seq_no which
+    // restarts at 1 each StartRecognition); reset on full teardown too.
+    runtime.lastSentToSpeechmaticsSeq = 0;
+    runtime.lastAckedSeq = 0;
   }
 
   if (ws) {
@@ -877,6 +888,14 @@ async function connectSpeechmaticsRealtime(
   runtime.running = false;
   runtime.startedAt = Date.now();
   runtime.taskId = null; // Speechmatics has no task id; null marks the non-DashScope path.
+  // Backpressure: Speechmatics assigns AudioAdded{seq_no} starting at 1 PER WS
+  // connection (each StartRecognition numbers independently). Reset both the send
+  // counter and the ack counter on every new connection so they realign. Without
+  // this, after a reconnect the new connection's small acks (1,2,3…) would never
+  // exceed the old high lastAckedSeq under Math.max → lag would grow unbounded →
+  // permanent false throttle (deadlock).
+  runtime.lastSentToSpeechmaticsSeq = 0;
+  runtime.lastAckedSeq = 0;
   runtime.readyPromise = new Promise<void>((resolve, reject) => {
     runtime.readyResolve = resolve;
     runtime.readyReject = reject;
@@ -972,7 +991,18 @@ async function handleSpeechmaticsMessage(
     await flushSttBuffer(sessionId, streamRole, ctx);
     return;
   }
-  if (msg.type !== "Transcript") return;       // AudioAdded / Warning / Unknown
+  // Track Speechmatics acks for backpressure. AudioAdded{seq_no} is emitted
+  // once per ingested audio frame. Updating lastAckedSeq here (on the inbound
+  // WS message path) is intentionally independent of drainRealtimeQueue (the
+  // outbound send path) — acks keep flowing even when the drain loop throttles,
+  // so there is no deadlock: lag falls as acks arrive, allowing the next drain
+  // pass to proceed.
+  if (msg.type === "AudioAdded") {
+    runtime.lastAckedSeq = Math.max(runtime.lastAckedSeq, msg.seq_no);
+    return;
+  }
+
+  if (msg.type !== "Transcript") return;       // Warning / Unknown
   const t = msg.transcript;
   if (t.is_partial) return;                     // MVP: emit on finals only
   const text = t.text.trim();
@@ -1193,6 +1223,11 @@ export async function drainRealtimeQueue(
   const runtime = ctx.asrRealtimeByStream[streamRole];
   if (runtime.flushPromise) return runtime.flushPromise;
 
+  // Backpressure is driven by Speechmatics AudioAdded acks, which only the
+  // Speechmatics provider emits. On the DashScope path lastAckedSeq never advances,
+  // so gating here prevents a false permanent throttle for that provider.
+  const backpressureEnabled = realtimeProvider(ctx) === "speechmatics";
+
   const startGen = runtime.drainGeneration;
   runtime.flushPromise = (async () => {
     while (runtime.sendQueue.length > 0 && runtime.drainGeneration === startGen) {
@@ -1204,7 +1239,23 @@ export async function drainRealtimeQueue(
           throw new Error("dashscope websocket is not open");
         }
 
+        // Backpressure: if Speechmatics is more than BACKPRESSURE_WINDOW frames
+        // behind our sent-seq, skip this drain pass and let AudioAdded acks reduce
+        // the lag. Acks arrive via handleSpeechmaticsMessage (inbound WS path),
+        // which is independent of this send path — no deadlock risk.
+        let throttled = false;
         while (runtime.sendQueue.length > 0 && runtime.drainGeneration === startGen) {
+          // Compare frames actually sent on THIS WS (lastSentToSpeechmaticsSeq)
+          // against Speechmatics acks (lastAckedSeq) — NOT lastSentSeq, which is the
+          // ingest/replay cursor mutated by transcript-timing inference.
+          if (backpressureEnabled) {
+            const lag = backpressureLag(runtime.lastSentToSpeechmaticsSeq, runtime.lastAckedSeq);
+            if (shouldThrottle(lag, BACKPRESSURE_WINDOW)) {
+              throttled = true;
+              break;
+            }
+          }
+
           const head = runtime.sendQueue[0];
           if (!runtime.ws || runtime.ws.readyState !== WebSocket.OPEN) {
             throw new Error("dashscope websocket closed while draining");
@@ -1216,6 +1267,9 @@ export async function drainRealtimeQueue(
           runtime.ws.send(head.bytes);
           runtime.lastSentSeq = Math.max(runtime.lastSentSeq, head.seq);
           lastSentSeq = Math.max(lastSentSeq, head.seq);
+          // Per-connection send counter for backpressure: one increment per real
+          // frame, mirroring the seq_no Speechmatics will assign in its AudioAdded ack.
+          runtime.lastSentToSpeechmaticsSeq++;
           runtime.sentChunkTsBySeq.set(head.seq, head.receivedAtMs);
           // Update idle timestamp so a recent real frame suppresses keepalive.
           runtime.lastAudioSentAt = Date.now();
@@ -1223,7 +1277,21 @@ export async function drainRealtimeQueue(
         }
 
         await ctx.patchAsrCursor(streamRole, { last_sent_seq: lastSentSeq });
-        await refreshAsrStreamMetrics(sessionId, streamRole, ctx);
+        // Include backpressure lag in the metrics snapshot so operators can observe it.
+        // Only meaningful on the Speechmatics path (it depends on AudioAdded acks);
+        // left undefined on DashScope so the metric is absent rather than a misleading
+        // monotonically-growing value.
+        await refreshAsrStreamMetrics(sessionId, streamRole, ctx, {
+          backpressure_lag: backpressureEnabled
+            ? backpressureLag(runtime.lastSentToSpeechmaticsSeq, runtime.lastAckedSeq)
+            : undefined,
+        });
+
+        // If we throttled this pass, stop draining now. The next incoming audio
+        // chunk or keepalive tick will re-trigger drainRealtimeQueue; by then acks
+        // should have reduced the lag below the window.
+        // throttle triggered in inner loop; stop this drain pass — re-entry via next enqueue or tick
+        if (throttled) break;
       } catch (error) {
         if (runtime.drainGeneration !== startGen) break;
         await refreshAsrStreamMetrics(sessionId, streamRole, ctx, {

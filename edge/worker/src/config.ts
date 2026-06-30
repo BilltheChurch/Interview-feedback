@@ -445,6 +445,9 @@ export interface AsrState {
   last_error?: string | null;
   last_success_at?: string | null;
   updated_at: string;
+  /** Number of audio frames sent to Speechmatics but not yet acknowledged via
+   *  AudioAdded{seq_no}. Updated on each drain pass. Exposed for observability. */
+  backpressure_lag?: number;
 }
 
 export interface AsrRunResult {
@@ -501,6 +504,17 @@ export interface AsrRealtimeRuntime {
   /** Timestamp (Date.now()) of the last real audio chunk sent to the outbound ASR WS.
    *  Used by shouldSendKeepalive to decide when silence padding is needed. */
   lastAudioSentAt: number;
+  /** Count of audio frames sent on the CURRENT Speechmatics WS connection.
+   *  Resets to 0 per connection to mirror Speechmatics seq_no, which restarts at 1
+   *  on each StartRecognition. This is DISTINCT from lastSentSeq (the ingest/replay
+   *  cursor, mutated by transcript-timing inference) — backpressure must compare
+   *  against a true "frames sent on this WS" counter, not the ingest cursor. */
+  lastSentToSpeechmaticsSeq: number;
+  /** Highest seq_no acknowledged by Speechmatics via AudioAdded on the CURRENT
+   *  WS connection. Resets to 0 per connection (see lastSentToSpeechmaticsSeq).
+   *  Backpressure lag = lastSentToSpeechmaticsSeq - lastAckedSeq; when lag exceeds
+   *  BACKPRESSURE_WINDOW the drain loop skips the current pass to let acks catch up. */
+  lastAckedSeq: number;
 }
 
 export interface AudioChunkFrame {
