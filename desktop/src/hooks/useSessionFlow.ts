@@ -41,6 +41,9 @@ export function useSessionFlow() {
         ? new Date(store.startedAt).toISOString().slice(0, 10)
         : new Date().toISOString().slice(0, 10),
       baseApiUrl: store.baseApiUrl,
+      // Evaluation rubric (forwarded to the worker as snake_case finalize metadata)
+      interviewType: store.interviewType,
+      dimensionPresets: store.dimensionPresets,
     };
 
     // Persist session data to localStorage so FeedbackView can load it
@@ -88,6 +91,8 @@ export function useSessionFlow() {
                 free_form_notes: sessionData.notes || null,
                 stages: sessionData.stages,
                 participants: sessionData.participants,
+                interview_type: sessionData.interviewType,
+                dimension_presets: sessionData.dimensionPresets,
               },
             });
           } catch {

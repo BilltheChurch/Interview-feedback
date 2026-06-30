@@ -23,6 +23,10 @@ const mockStoreState = {
   elapsedSeconds: 0,
   startedAt: null as number | null,
   baseApiUrl: '',
+  interviewType: undefined as string | undefined,
+  dimensionPresets: undefined as
+    | Array<{ key: string; label_zh: string; label_en: string; description: string; weight: number }>
+    | undefined,
   finalizeRequested: false,
   startSession: vi.fn(),
   endSession: vi.fn(),
@@ -76,6 +80,8 @@ describe('useSessionFlow', () => {
     mockStoreState.elapsedSeconds = 0;
     mockStoreState.startedAt = null;
     mockStoreState.baseApiUrl = '';
+    mockStoreState.interviewType = undefined;
+    mockStoreState.dimensionPresets = undefined;
     mockStoreState.finalizeRequested = false;
     mockStoreState.startSession.mockClear();
     mockStoreState.endSession.mockClear();
@@ -158,6 +164,34 @@ describe('useSessionFlow', () => {
     // Allow microtask queue to flush
     await Promise.resolve();
     expect(mockFinalizeV2).toHaveBeenCalled();
+  });
+
+  it('endSession forwards interview_type + dimension_presets in finalizeV2 metadata', async () => {
+    const presets = [
+      { key: 'leadership', label_zh: '领导力', label_en: 'Leadership', description: 'lead', weight: 1 },
+      { key: 'communication', label_zh: '沟通', label_en: 'Communication', description: 'comm', weight: 1.5 },
+    ];
+    mockStoreState.sessionId = 'sess_rubric_meta';
+    mockStoreState.sessionName = 'Rubric Meta';
+    mockStoreState.mode = '1v1';
+    mockStoreState.participants = [{ name: 'Charlie' }];
+    mockStoreState.stages = ['Intro'];
+    mockStoreState.baseApiUrl = 'http://localhost:8787';
+    mockStoreState.interviewType = 'behavioral';
+    mockStoreState.dimensionPresets = presets;
+    mockStoreState.finalizeRequested = false;
+
+    const { result } = renderHook(() => useSessionFlow(), { wrapper });
+    result.current.endSession(vi.fn());
+
+    // Allow microtask queue to flush so the finalizeV2 call fires
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockFinalizeV2).toHaveBeenCalled();
+    const payload = mockFinalizeV2.mock.calls[0][0];
+    expect(payload.metadata.interview_type).toBe('behavioral');
+    expect(payload.metadata.dimension_presets).toEqual(presets);
   });
 
   it('restoreSession calls store.restoreSession and navigates to /session', async () => {

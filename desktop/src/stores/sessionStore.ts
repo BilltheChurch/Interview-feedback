@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { DimensionPresetItem } from '../lib/dimensionPresets';
 
 /* ── Types ─────────────────────────────────── */
 
@@ -99,13 +100,7 @@ export type SessionConfig = {
   teamsJoinUrl?: string;
   templateId?: string;
   interviewType?: string;
-  dimensionPresets?: Array<{
-    key: string;
-    label_zh: string;
-    label_en: string;
-    description: string;
-    weight: number;
-  }>;
+  dimensionPresets?: DimensionPresetItem[];
 };
 
 /* ── Persistence key & helpers ─────────────── */
@@ -128,6 +123,8 @@ export type PersistedSession = {
   teamsInterviewerName: string;
   teamsJoinUrl: string;
   templateId: string;
+  interviewType?: string;
+  dimensionPresets?: DimensionPresetItem[];
   memos: Memo[];
   notes: string;
   stageArchives: StageArchive[];
@@ -177,6 +174,10 @@ interface SessionStore {
   teamsInterviewerName: string;
   teamsJoinUrl: string;
   templateId: string;
+  /** Evaluation rubric: interview type chosen in Setup (drives scoring dimensions). */
+  interviewType?: string;
+  /** Evaluation rubric: scoring dimensions forwarded to the worker at finalize. */
+  dimensionPresets?: DimensionPresetItem[];
 
   // Timer
   elapsedSeconds: number;
@@ -257,6 +258,8 @@ const INITIAL_STATE = {
   teamsInterviewerName: '',
   teamsJoinUrl: '',
   templateId: '',
+  interviewType: undefined as string | undefined,
+  dimensionPresets: undefined as DimensionPresetItem[] | undefined,
 
   elapsedSeconds: 0,
 
@@ -305,6 +308,8 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       teamsInterviewerName: config.teamsInterviewerName ?? '',
       teamsJoinUrl: config.teamsJoinUrl ?? '',
       templateId: config.templateId ?? '',
+      interviewType: config.interviewType,
+      dimensionPresets: config.dimensionPresets,
       elapsedSeconds: 0,
       memos: [],
       captions: [],
@@ -335,6 +340,8 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       teamsInterviewerName: persisted.teamsInterviewerName,
       teamsJoinUrl: persisted.teamsJoinUrl,
       templateId: persisted.templateId,
+      interviewType: persisted.interviewType,
+      dimensionPresets: persisted.dimensionPresets,
       elapsedSeconds: persisted.elapsedSeconds,
       memos: persisted.memos,
       notes: persisted.notes,
@@ -455,6 +462,8 @@ useSessionStore.subscribe((state) => {
     teamsInterviewerName: state.teamsInterviewerName,
     teamsJoinUrl: state.teamsJoinUrl,
     templateId: state.templateId,
+    interviewType: state.interviewType,
+    dimensionPresets: state.dimensionPresets,
     memos: state.memos,
     notes: state.notes,
     stageArchives: state.stageArchives,

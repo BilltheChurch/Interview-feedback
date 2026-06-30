@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useSessionStore } from './sessionStore';
+import { useSessionStore, getPersistedSession } from './sessionStore';
 
 function getStore() {
   return useSessionStore.getState();
@@ -7,9 +7,14 @@ function getStore() {
 
 describe('sessionStore', () => {
   beforeEach(() => {
+    // Clear any persisted snapshot from a prior test so getPersistedSession()
+    // reads only what the current test writes.
+    localStorage.clear();
     // Reset store to initial state before each test
     useSessionStore.setState({
       status: 'idle',
+      interviewType: undefined,
+      dimensionPresets: undefined,
       sessionId: null,
       sessionName: '',
       mode: '1v1',
@@ -145,6 +150,75 @@ describe('sessionStore', () => {
     expect(store.sessionName).toBe('Test Session');
     expect(store.mode).toBe('group');
     expect(store.participants).toHaveLength(2);
+  });
+
+  it('startSession persists interviewType and dimensionPresets into the store', () => {
+    const presets = [
+      { key: 'leadership', label_zh: '领导力', label_en: 'Leadership', description: 'lead', weight: 1 },
+      { key: 'communication', label_zh: '沟通', label_en: 'Communication', description: 'comm', weight: 1.5 },
+    ];
+    getStore().startSession({
+      sessionId: 'sess_rubric',
+      sessionName: 'Rubric Session',
+      mode: '1v1',
+      participants: [{ name: 'Alice' }],
+      stages: ['Intro'],
+      baseApiUrl: 'http://localhost:8787',
+      interviewType: 'behavioral',
+      dimensionPresets: presets,
+    });
+    const store = getStore();
+    expect(store.interviewType).toBe('behavioral');
+    expect(store.dimensionPresets).toEqual(presets);
+  });
+
+  it('startSession leaves interviewType/dimensionPresets undefined when not provided', () => {
+    getStore().startSession({
+      sessionId: 'sess_no_rubric',
+      sessionName: 'No Rubric',
+      mode: '1v1',
+      participants: [],
+      stages: [],
+      baseApiUrl: 'http://localhost:8787',
+    });
+    const store = getStore();
+    expect(store.interviewType).toBeUndefined();
+    expect(store.dimensionPresets).toBeUndefined();
+  });
+
+  it('auto-save snapshot includes interviewType and dimensionPresets', () => {
+    // The auto-save subscriber throttles writes to every 5s using Date.now()
+    // (module-level lastSaveAt shared across tests). Drive the system clock far
+    // forward so the throttle window is guaranteed to elapse, then mutate state
+    // while recording so the subscriber fires and persists a fresh snapshot.
+    // NOTE: test-setup.ts replaces localStorage with a plain-object mock, so we
+    // read the actual persisted value via getPersistedSession() rather than
+    // spying on Storage.prototype (which the mock never touches).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const presets = [
+      { key: 'leadership', label_zh: '领导力', label_en: 'Leadership', description: 'lead', weight: 1 },
+    ];
+    getStore().startSession({
+      sessionId: 'sess_snapshot',
+      sessionName: 'Snapshot Session',
+      mode: 'group',
+      participants: [{ name: 'Alice' }],
+      stages: ['Intro'],
+      baseApiUrl: 'http://localhost:8787',
+      interviewType: 'group',
+      dimensionPresets: presets,
+    });
+    // Advance the clock past the 5s throttle, then mutate state so a write fires.
+    vi.setSystemTime(new Date('2030-01-01T00:00:10Z'));
+    getStore().tick();
+
+    const snapshot = getPersistedSession();
+    vi.useRealTimers();
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.interviewType).toBe('group');
+    expect(snapshot!.dimensionPresets).toEqual(presets);
   });
 
   it('endSession sets status to feedback_draft', () => {
