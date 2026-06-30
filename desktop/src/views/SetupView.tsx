@@ -700,6 +700,7 @@ export function SetupView() {
   const locationState = location.state as { mode?: SessionMode; sessionName?: string; stages?: string[]; teamsJoinUrl?: string; startTime?: string; endTime?: string } | null;
   const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
   const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
+  const [interviewerName, setInterviewerName] = useState('');
   const [template, setTemplate] = useState('general');
   const [interviewType, setInterviewType] = useState<string>('academic');
   const [dimensionPresets, setDimensionPresets] = useState<DimensionPresetItem[]>(
@@ -877,13 +878,13 @@ export function SetupView() {
       participants: participants.map(p => ({ name: p.name })),
       stages,
       baseApiUrl,
-      interviewerName: '',
+      interviewerName: interviewerName.trim() || undefined,
       teamsJoinUrl: teamsUrl,
       templateId: template,
       interviewType,
       dimensionPresets,
     });
-  }, [sessionName, mode, participants, template, stages, teamsUrl, startSession, navigate]);
+  }, [sessionName, mode, interviewerName, participants, template, stages, teamsUrl, startSession, navigate]);
 
   const handleStartWithConsent = useCallback(() => {
     if (!hasConsented.current) {
@@ -996,6 +997,15 @@ export function SetupView() {
                     placeholder={mode === '1v1' ? 'e.g. John Doe Interview' : 'e.g. Panel Round 2'}
                     value={sessionName}
                     onChange={(e) => setSessionName(e.target.value)}
+                  />
+                </Card>
+
+                <Card className="p-4">
+                  <TextField
+                    label="Your name (interviewer)"
+                    placeholder="Optional — used for report attribution"
+                    value={interviewerName}
+                    onChange={(e) => setInterviewerName(e.target.value)}
                   />
                 </Card>
 
