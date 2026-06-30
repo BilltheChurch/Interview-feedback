@@ -147,6 +147,16 @@ Workspace: `/Users/billthechurch/Interview-feedback`
 - [x] C3 归档 `inference/` + 退役 `if.frontierace.ai` tunnel（2026-06-29，真人 pilot 验证通过后）：`git rm` 删 `inference/` FastAPI 服务（133 文件，保留在 git 历史）+ 清空 wrangler.jsonc 死配置（`INFERENCE_BASE_URL_*`/`ASR_ENDPOINT`/`TIER2_BATCH_ENDPOINT` 的 tunnel+localhost → ""）+ CLAUDE.md 顶部立架构重定向横幅。worker 不依赖 inference/ 目录(tsc 仍过)。DashScope key 保留在 `edge/worker/.dev.vars`。**用户侧**:停掉 `if.frontierace.ai` GPU tunnel、可选删 prod secret `INFERENCE_BASE_URL`。
   - ⏳ 残留(可选,低优先):worker 内 `inference_client.ts`/`inference-helpers.ts` 等客户端代码仍在但被 `INFERENCE_ENABLED=false` 关掉(死代码,后续可删);Tier2 batch 路径(`/batch/process`)已无端点,如需 Tier2 须改云端实现。
 
+### Phase R — 链路鲁棒性硬化（2026-06-30，subagent-driven-development 执行，分支 `claude/ecstatic-chaum-51c7eb`）
+> 设计：`docs/plans/2026-06-29-cloud-pipeline-hardening-roadmap-design.md` + 计划 `docs/superpowers/plans/2026-06-29-phase-r-pipeline-hardening.md`。基线 main 9fb7cee(534 测试) → e3afa8f(575 测试)。每任务 2 道独立对抗式评审（规格→质量）+ 全分支 opus 最终评审(Ready to merge)。零 Co-Authored-By。**未合 main / 未部署**。
+- [x] R-T1 Speechmatics `max_speakers` 可配置（commit f724228）：`SpeechmaticsConfig.maxSpeakers` → `buildStartRecognition` 仅 diarization 开时 emit `speaker_diarization_config.max_speakers`；纯 `resolveMaxSpeakers(env)`（unset/非法/<2 → undefined，用 `Number` 非 parseInt）；只接 students 路径；`wrangler.jsonc ASR_MAX_SPEAKERS="6"`。Speechmatics rt-api 文档已核字段。
+- [~] R-T2 静音 keepalive **原语**（commit a37fa80）：纯 `shouldSendKeepalive`/`makeSilencePcm16`(零 PCM,不产幽灵说话人)/`resolveKeepaliveMs`(默认 5000)；`lastAudioSentAt` 仅真实发送时更新；导出 `maybeSendKeepalive` 入口。⚠️ **递归 DO alarm 接线推迟到 R3**（用户决策：桌面连续采集下 idle-drop 威胁未证实，先验证再接线，避免对单一 alarm 槽做投机性结构改动）。R3 接线时需顺带让 keepalive 发送也自增 `lastSentToSpeechmaticsSeq`。
+- [x] R-T3 Speechmatics backpressure（commit 244ddcd）：纯 `backpressureLag`/`shouldThrottle` + `BACKPRESSURE_WINDOW=50`；消费 `AudioAdded{seq_no}`（非 Transcript early-return 前，`Math.max` 防乱序）；**专用 per-connection 计数器** `lastSentToSpeechmaticsSeq`（仅真实发帧自增，与 `lastAckedSeq` 在每次新建 WS 连接+teardown 时一起归零 → 对齐 Speechmatics seq_no 每连接从 1，消除重连 Math.max-冻结死锁）；节流门控 `realtimeProvider==="speechmatics"`（DashScope 无 ack 否则死锁）；`backpressure_lag` 指标在 DashScope 路径为 undefined；节流为「跳过本轮」非永久停。
+- [x] R-T4 面试官排除出学生评分、保留为上下文（commit 0ece17d）：两条 finalize 路径 `studentStats=stats.filter(speaker_key!=="teacher")` 喂 per-person/memo/evidence/observations/synthesize；完整 transcript（含 teacher）仍进 LLM 作上下文；`speakerKey()` 在 finalize_v2.ts **和** local_events_analyzer.ts 均短路 `stream_role==="teacher"`→"teacher"（防 ACS 名字继承泄漏）；新 `tests/dual-stream-report.test.ts` 10 例（含 ACS 风格 + 事件路径回归锁，实证：还原修复→测试失败）。
+- [x] R-T5 双流 live harness（commit e3afa8f）：`desktop/e2e_dual_stream_test.mjs`——双 WS（首帧 auth→auth_ok→hello，per-stream stream_role）、并发推 teacher+students PCM、finalize+poll+result、Gate-R1 摘要（students-only per-person + interviewer context + 用时 + transcript 里的 stream roles）。协议经核与生产 `WebSocketService` 一致；`ws` 入 devDependencies。Step1 确认真实 app 确并发连两路（WebSocketService:284）。本地冒烟因无 Speechmatics key 延迟到 R1。
+- [ ] R-Gates R1–R5（**用户手动跑真实 live 会议**，非自动可测）：R1 双流真实音频(interviewer mic + students 录音) / R2 5–6 人群面 / R3 30–60min 长会持续 track（顺带验 keepalive 是否需要，需要则接线）/ R4 时效预算（为 Tier2 ≤5min 留头寸）/ R5 Speechmatics 并发额度+单价(2 路/场)。runbook 见计划 §Chunk 5。结果回填本 §6。
+- [ ] R-跟进（**Phase Q 一并修**）：tier2 + feedback-cache-refresh 报告路径**也**有同类 teacher 泄漏（pre-existing，非 Phase R 回归；tier2 本属 Phase Q「不要碰」范围）——按 R-T4 同法补 `studentStats` 过滤。
+
 ### Phase A 前置验证门（删 inference 前必须通过 pilot，需 Speechmatics key）
 > **2026-06-27 实测**（`scripts/speechmatics_rt_validate.mjs`，真实 Speechmatics key + 真实样本）
 - [x] cmn_en + 实时 + diarization=speaker 三者同时可用且返回每词 speaker（官方无矩阵，必须实测）✅ language_pack="English and Mandarin"；alice+bob→S1/S2 切换点 6.11s≈拼接边界 6.0s；每词带 speaker+词级时间戳；三者同会话共存
@@ -282,12 +292,20 @@ Validation Date: 2026-06-29（UI 重设计 `feat/ui-liquid-glass`）
 - [x] `cd desktop && npx vite build` -> production build passed
 - UI: 浅色液态玻璃 + 橘橙单 accent + GSAP `back.out` SegmentedControl;全站对比度迁移(text-accent→accent-ink、白字→on-accent，26 文件)；其余 5 视图自动翻浅 + 残留清理(隐形 tint、登录按钮、bg-white→bg-surface)
 
+Validation Date: 2026-06-30（Phase R 链路鲁棒性硬化 `claude/ecstatic-chaum-51c7eb`，基于 main 9fb7cee）
+- [x] `cd edge/worker && npx vitest run` -> **575 tests passed**（基线 534 → +41 新覆盖：speechmatics-config 9 / asr-keepalive 9 / asr-backpressure 13 / dual-stream-report 10）
+- [x] `cd edge/worker && npm run typecheck` -> passed
+- [x] `node --check desktop/e2e_dual_stream_test.mjs` -> 通过（live 冒烟延迟到 R1，无 Speechmatics key）
+- [x] 全分支 opus 最终评审 -> **Ready to merge**（5 任务每任务 2 道独立评审 + 跨切面交互核验通过）
+- [ ] 部署（`cd edge/worker && npx wrangler deploy`，需 Cloudflare auth）+ R1–R5 真实 live 会议验证（用户手动）
+
 ## 7. 当前阻塞与处理
 - **[架构] 旧架构依赖自建推理**：`if.frontierace.ai` 是开发机 tunnel（现 1033 不健康），不满足"用户零部署"。→ Phase 6 用 Speechmatics + Worker 直调 LLM 取代，删除 `inference/`。
 - **[P0 bug] Desktop 生产版连不上云端**：`VITE_EDGE_BASE_URL` 未定义 → `baseApiUrl=''`。→ Phase 6 A3 修。
 - **[P0 bug] 录音时转写不回传 Desktop**：非 Teams 会议零实时字幕零持久化。→ Phase 6 A2 修。
 - **[待核实] Speechmatics `cmn_en` 实时可用性/单价 + CF 并发 outbound WS 限制**：commit 前实测。
 - **OAuth 配置未完成**（历史阻塞，架构落地后再处理）：需创建 Azure App Registration 和 Google Cloud OAuth Client ID。
+- **[Phase R 待办] 部署需 Cloudflare auth**：Phase R 代码已 Ready-to-merge（分支 `claude/ecstatic-chaum-51c7eb`，575 测试绿），但 `wrangler deploy` 需登录态；R1–R5 live gate 必须先合并+部署再由用户跑真实会议。合并到 main + 同步 `feat/phase6-cloud-companion` 待用户确认。
 
 ## 8. 设计文档索引
 - `docs/plans/2026-06-27-cloud-companion-speechmatics-architecture.md` — **【当前主线】云端化 + Companion + Speechmatics 架构重定向设计**
