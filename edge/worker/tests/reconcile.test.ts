@@ -341,6 +341,121 @@ describe("buildReconciledTranscript", () => {
     expect([...s2Names]).toEqual(["Daisy"]);
   });
 
+  it("B3 preferred-name: 'my name is Hong, please call me Rice' → display name is Rice", () => {
+    // Formal name "Hong" matches roster; preferred name "Rice" does not.
+    // The preferred name must win as the display name for this S-label.
+    const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_rice",
+        stream_role: "students",
+        text: "My name is Hong and please call me Rice.",
+        start_ms: 0,
+        end_ms: 4000,
+        duration_ms: 4000,
+      },
+      {
+        utterance_id: "u_rice2",
+        stream_role: "students",
+        text: "I think the problem is interesting.",
+        start_ms: 4000,
+        end_ms: 8000,
+        duration_ms: 4000,
+      },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      { stream_role: "students", utterance_id: "u_rice", cluster_id: "S1" },
+      { stream_role: "students", utterance_id: "u_rice2", cluster_id: "S1" },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      roster: ["Hong", "Tina", "Daisy"],
+    });
+    // Both utterances are from S1; S1 should resolve to preferred name "Rice", not roster name "Hong"
+    const s1Names = result.filter(r => r.utterance_id === "u_rice2").map(r => r.speaker_name);
+    expect(s1Names).toEqual(["Rice"]);
+  });
+
+  it("B3 preferred-name: 'you can call me Tim' alone → display name is Tim", () => {
+    const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_tim",
+        stream_role: "students",
+        text: "You can call me Tim.",
+        start_ms: 0,
+        end_ms: 2000,
+        duration_ms: 2000,
+      },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      { stream_role: "students", utterance_id: "u_tim", cluster_id: "S2" },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result[0].speaker_name).toBe("Tim");
+  });
+
+  it("B3 preferred-name: 'go by Tim' alone → display name is Tim", () => {
+    const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_goby",
+        stream_role: "students",
+        text: "I usually go by Tim.",
+        start_ms: 0,
+        end_ms: 2000,
+        duration_ms: 2000,
+      },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      { stream_role: "students", utterance_id: "u_goby", cluster_id: "S3" },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result[0].speaker_name).toBe("Tim");
+  });
+
+  it("B3 preferred-name Chinese: '我叫王伟，请叫我小王' → display name is 小王", () => {
+    const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    const utterances: ReconcileUtterance[] = [
+      {
+        utterance_id: "u_zh",
+        stream_role: "students",
+        text: "我叫王伟，请叫我小王。",
+        start_ms: 0,
+        end_ms: 3000,
+        duration_ms: 3000,
+      },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      { stream_role: "students", utterance_id: "u_zh", cluster_id: "S4" },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    // 请叫我小王 is an explicit preferred name; it should win over formal name 王伟
+    expect(result[0].speaker_name).toBe("小王");
+  });
+
   it("resolves student utterance via event cluster binding", () => {
     const state: ReconcileSessionState = {
       bindings: { c_01: "Alice" },

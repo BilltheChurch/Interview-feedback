@@ -435,16 +435,27 @@ export function buildReconciledTranscript(options: {
     // Name extraction patterns — use global flag to find ALL matches per utterance
     // Note: Capture groups must NOT be too greedy — stop before common English words
     // like "and", "I", "in", "from" etc. to avoid capturing "Daisy and I am now..." as a name.
-    const namePatterns: RegExp[] = [
-      /\b[Mm]y name is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,2})/g,
-      /\b(?:[Uu]sually\s+)?[Gg]o(?:es)?\s+by\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g,
-      /\b(?:(?:[Yy]ou\s+)?[Cc]an\s+)?(?:[Cc]all|[Jj]ust\s+call)\s+me\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g,
-      /\bI'm\s+([A-Z][a-z]{1,20})\b/g,
-      /\bI am\s+([A-Z][a-z]{1,20})\b/g,
-      /\b[Tt]his is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})\b/g,
-      /我(?:的名字)?(?:叫|是)\s*([\u4e00-\u9fff]{2,4})/g,
+    // Preferred-name patterns (isPreferred=true): the speaker explicitly asks to be called
+    // a nickname — these beat formal-name patterns for the same cluster.
+    // Formal-name patterns (isPreferred=false): "my name is X", "I'm X", etc.
+    const namePatternEntries: Array<{ pattern: RegExp; isPreferred: boolean }> = [
+      { pattern: /\b[Mm]y name is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,2})/g, isPreferred: false },
+      { pattern: /\b(?:[Uu]sually\s+)?[Gg]o(?:es)?\s+by\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g, isPreferred: true },
+      { pattern: /\b(?:(?:[Yy]ou\s+)?[Cc]an\s+)?(?:[Cc]all|[Jj]ust\s+call)\s+me\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})/g, isPreferred: true },
+      { pattern: /\bI'm\s+([A-Z][a-z]{1,20})\b/g, isPreferred: false },
+      { pattern: /\bI am\s+([A-Z][a-z]{1,20})\b/g, isPreferred: false },
+      { pattern: /\b[Tt]his is\s+([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,1})\b/g, isPreferred: false },
+      { pattern: /我(?:的名字)?(?:叫|是)\s*([\u4e00-\u9fff]{2,4})/g, isPreferred: false },
       // Fallback: "please call me [name]" with lowercase (ASR may not capitalize)
-      /\bplease\s+call\s+me\s+([A-Za-z]{2,20})/gi,
+      { pattern: /\bplease\s+call\s+me\s+([A-Za-z]{2,20})/gi, isPreferred: true },
+      // Chinese preferred-name patterns: 请叫我X / 可以叫我X / 叫我X就好|就行 / 我喜欢(别人)叫我X
+      { pattern: /请叫我\s*([\u4e00-\u9fff]{2,4}|[A-Za-z]{2,20})/g, isPreferred: true },
+      // Matches {大家|你|…}可以叫我X via the optional leading 大家 plus the unanchored 可以叫我
+      // substring (e.g. "你可以叫我小李" matches at 可以叫我小李) — broad coverage is intended.
+      { pattern: /(?:大家\s*)?可以叫我\s*([\u4e00-\u9fff]{2,4}|[A-Za-z]{2,20})/g, isPreferred: true },
+      { pattern: /叫我\s*([\u4e00-\u9fff]{2,4}|[A-Za-z]{2,20})\s*(?:就好|就行)/g, isPreferred: true },
+      // ASR interview context — preferred-name false-positive risk accepted
+      { pattern: /我喜欢(?:别人)?叫我\s*([\u4e00-\u9fff]{2,4}|[A-Za-z]{2,20})/g, isPreferred: true },
     ];
 
     // Phase 1: Extract ALL name anchors from each utterance
@@ -454,6 +465,8 @@ export function buildReconciledTranscript(options: {
       charIndex: number;
       timeMs: number;
       edgeClusterId: string | null;
+      /** True when the speaker explicitly asked to be called this name ("call me X", "go by X"). */
+      isPreferred: boolean;
     }
 
     // Cloud emits word-level utterances, so a self-intro ("I'm Tina") spans several
@@ -474,7 +487,7 @@ export function buildReconciledTranscript(options: {
         ? valueAsStr(eventByUtterance.get(item.utterance_id)?.cluster_id ?? null)
         : null;
 
-      for (const pattern of namePatterns) {
+      for (const { pattern, isPreferred } of namePatternEntries) {
         pattern.lastIndex = 0; // Reset for global regex
         let match: RegExpExecArray | null;
         while ((match = pattern.exec(text)) !== null) {
@@ -510,7 +523,8 @@ export function buildReconciledTranscript(options: {
             rosterName,
             charIndex: match.index,
             timeMs,
-            edgeClusterId: cloudClusterId ?? bestTurn?.cluster_id ?? null
+            edgeClusterId: cloudClusterId ?? bestTurn?.cluster_id ?? null,
+            isPreferred,
           });
         }
       }
@@ -523,17 +537,21 @@ export function buildReconciledTranscript(options: {
       // (a) Single speaker intro: "my name is Kenny Tan, go by Tina" → 1 roster match → apply to all
       // (b) Multi-speaker utterance: "my name is Daisy... my name is Stephanie" → 2+ distinct
       //     roster matches → each anchor keeps its own match; unmatched gets nearest neighbor.
+      // NOTE: preferred-name anchors (isPreferred=true, e.g. "call me X") are intentionally
+      // excluded from roster propagation — they carry explicit intent and must not be overwritten
+      // by a formal name's roster match for the same cluster.
       const distinctRosterNames = new Set(anchors.filter(a => a.rosterName).map(a => a.rosterName));
       if (distinctRosterNames.size === 1) {
-        // Single speaker — apply the one roster name to all unmatched
+        // Single speaker — apply the one roster name to all unmatched NON-preferred anchors.
+        // Preferred anchors already carry the speaker's desired display name.
         const name = [...distinctRosterNames][0]!;
         for (const anchor of anchors) {
-          if (!anchor.rosterName) anchor.rosterName = name;
+          if (!anchor.rosterName && !anchor.isPreferred) anchor.rosterName = name;
         }
       } else if (distinctRosterNames.size > 1) {
-        // Multiple speakers — assign unmatched to nearest roster-matched anchor by char position
+        // Multiple speakers — assign unmatched non-preferred to nearest roster-matched anchor by char position
         for (const anchor of anchors) {
-          if (anchor.rosterName) continue;
+          if (anchor.rosterName || anchor.isPreferred) continue;
           let nearest: NameAnchor | null = null;
           let minDist = Infinity;
           for (const other of anchors) {
@@ -545,16 +563,26 @@ export function buildReconciledTranscript(options: {
         }
       }
 
-      // Phase 3: Populate speakerMapByCluster with roster-matched names
+      // Phase 3: Populate speakerMapByCluster with names, giving preferred-name anchors
+      // priority over formal-name anchors for the same cluster.
+      // Algorithm: iterate anchors in charIndex order; a preferred anchor always overwrites
+      // a previous formal anchor for the same cluster, and a formal anchor never overwrites
+      // a previously committed preferred anchor.
+      // Two preferred anchors for the same cluster: the later one (higher charIndex) wins
+      // (e.g. "go by Tim... actually call me Tom" → Tom). Only formal anchors are blocked here.
+      const committedPreferred = new Set<string>(); // cluster IDs already bound by a preferred anchor
       for (const anchor of anchors) {
         const name = anchor.rosterName || anchor.rawName;
         if (!anchor.edgeClusterId || !name) continue;
+        // Never overwrite a preferred-name binding with a formal-name one
+        if (!anchor.isPreferred && committedPreferred.has(anchor.edgeClusterId)) continue;
         speakerMapByCluster.set(anchor.edgeClusterId, {
           cluster_id: anchor.edgeClusterId,
           person_id: name,
           display_name: name,
           source: "name_extract"
         });
+        if (anchor.isPreferred) committedPreferred.add(anchor.edgeClusterId);
       }
     }
 
