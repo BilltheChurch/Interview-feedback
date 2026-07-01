@@ -40,6 +40,32 @@ export interface ReconcileSessionState {
     source?: string;
     locked?: boolean;
   }>;
+  /**
+   * Session config subset — carries the interviewer's configured name so the
+   * teacher (interviewer) stream can be labeled in the report transcript
+   * instead of collapsing to "Unknown". Optional because live/state views and
+   * older callers may omit it; the label then falls back to "Interviewer".
+   */
+  config?: Record<string, unknown>;
+}
+
+/**
+ * Resolve the interviewer's display name for teacher-stream utterances in the
+ * report transcript. The teacher stream is ALWAYS the interviewer, so it must
+ * never render as "Unknown". Priority mirrors resolveTeacherIdentity (used by
+ * the realtime path) so live captions and the finalized report stay consistent:
+ *   1. config.teams_interviewer_name
+ *   2. config.interviewer_name
+ *   3. "Interviewer" (constant fallback — never null, never the internal
+ *      "teacher" sentinel).
+ */
+export function resolveInterviewerDisplayName(state: ReconcileSessionState): string {
+  const config = state.config ?? {};
+  const teamsName = config.teams_interviewer_name;
+  if (typeof teamsName === "string" && teamsName.trim()) return teamsName.trim();
+  const interviewerName = config.interviewer_name;
+  if (typeof interviewerName === "string" && interviewerName.trim()) return interviewerName.trim();
+  return "Interviewer";
 }
 
 /**
@@ -777,8 +803,21 @@ export function buildReconciledTranscript(options: {
         );
       }
     } else {
+      // Teacher stream = the interviewer, ALWAYS. It must never render as
+      // "Unknown" (which is what a null speaker_name produces in the desktop
+      // TranscriptSection). Prefer a resolved event name, but treat the internal
+      // "teacher" sentinel as unresolved and fall back to the configured
+      // interviewer name (→ "Interviewer" as a last resort). This keeps the
+      // report transcript consistent with the realtime captions (R-A) and feeds
+      // the LLM synthesizer a transcript where the interviewer's turns are
+      // clearly attributed. Note: per_person/studentStats exclusion is keyed by
+      // stream_role ("teacher") in finalize_v2.speakerKey(), NOT by this name,
+      // so labeling the interviewer here never leaks them into student scoring.
+      const eventName = event?.speaker_name ?? null;
+      const resolvedTeacherName =
+        eventName && eventName !== "teacher" ? eventName : resolveInterviewerDisplayName(state);
       reconciled = {
-        speaker_name: event?.speaker_name ?? null,
+        speaker_name: resolvedTeacherName,
         decision: event?.decision ?? null
       };
     }

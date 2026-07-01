@@ -1204,3 +1204,156 @@ describe("buildReconciledTranscript: 1v1 unresolved-student fallback", () => {
     expect(result[0].speaker_name).toBeNull();
   });
 });
+
+describe("buildReconciledTranscript: teacher-stream interviewer labeling (P0-b)", () => {
+  const baseSpeakerLogs: SpeakerLogs = {
+    source: "cloud",
+    turns: [],
+    clusters: [],
+    speaker_map: [],
+    updated_at: "2026-07-01T00:00:00Z",
+  };
+
+  const teacherUtterance: ReconcileUtterance = {
+    utterance_id: "t1",
+    stream_role: "teacher",
+    text: "Can you walk me through your resume?",
+    start_ms: 0,
+    end_ms: 4000,
+    duration_ms: 4000,
+  };
+
+  it("labels an unresolved teacher utterance with config.interviewer_name (not null/Unknown)", () => {
+    const state: ReconcileSessionState = {
+      bindings: {},
+      cluster_binding_meta: {},
+      config: { interviewer_name: "Tim" },
+    };
+    const result = buildReconciledTranscript({
+      utterances: [teacherUtterance],
+      events: [], // no teacher speaker event → previously resolved to null → "Unknown" in UI
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].stream_role).toBe("teacher");
+    expect(result[0].speaker_name).toBe("Tim");
+    expect(result[0].speaker_name).not.toBeNull();
+  });
+
+  it("labels an unresolved teacher utterance with config.teams_interviewer_name when interviewer_name absent", () => {
+    const state: ReconcileSessionState = {
+      bindings: {},
+      cluster_binding_meta: {},
+      config: { teams_interviewer_name: "Sarah" },
+    };
+    const result = buildReconciledTranscript({
+      utterances: [teacherUtterance],
+      events: [],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result[0].speaker_name).toBe("Sarah");
+  });
+
+  it("falls back to 'Interviewer' (never null) when no interviewer name is configured", () => {
+    const state: ReconcileSessionState = {
+      bindings: {},
+      cluster_binding_meta: {},
+    };
+    const result = buildReconciledTranscript({
+      utterances: [teacherUtterance],
+      events: [],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result[0].speaker_name).toBe("Interviewer");
+    expect(result[0].speaker_name).not.toBeNull();
+  });
+
+  it("never emits the internal 'teacher' sentinel as a display name", () => {
+    const state: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+    const result = buildReconciledTranscript({
+      utterances: [teacherUtterance],
+      events: [{ stream_role: "teacher", utterance_id: "t1", speaker_name: "teacher", decision: "auto" }],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result[0].speaker_name).toBe("Interviewer");
+  });
+
+  it("prefers an already-resolved teacher event speaker_name over the config fallback", () => {
+    const state: ReconcileSessionState = {
+      bindings: {},
+      cluster_binding_meta: {},
+      config: { interviewer_name: "Tim" },
+    };
+    const result = buildReconciledTranscript({
+      utterances: [teacherUtterance],
+      events: [{ stream_role: "teacher", utterance_id: "t1", speaker_name: "Dr. Wells", decision: "auto" }],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+    });
+    expect(result[0].speaker_name).toBe("Dr. Wells");
+  });
+
+  it("REGRESSION: labeling teacher with a real name keeps it out of per_person/studentStats", () => {
+    const state: ReconcileSessionState = {
+      bindings: {},
+      cluster_binding_meta: {},
+      config: { interviewer_name: "Tim" },
+    };
+    const utterances: ReconcileUtterance[] = [
+      { utterance_id: "t1", stream_role: "teacher", text: "Tell me about a hard bug.", start_ms: 0, end_ms: 4000, duration_ms: 4000 },
+      { utterance_id: "s1", stream_role: "students", text: "I once traced a race condition.", start_ms: 4000, end_ms: 9000, duration_ms: 5000 },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events: [{ stream_role: "students", utterance_id: "s1", speaker_name: "Alex", decision: "auto" }],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      roster: ["Alex"],
+    });
+    // Teacher utterance is now labeled "Tim" ...
+    const teacherRow = result.find((r) => r.utterance_id === "t1");
+    expect(teacherRow?.speaker_name).toBe("Tim");
+    // ... yet stats keying is by stream_role, so it collapses to the "teacher" key,
+    // and studentStats (speaker_key !== "teacher") must NOT include the interviewer.
+    const stats = computeSpeakerStats(result);
+    const studentStats = stats.filter((s) => s.speaker_key !== "teacher");
+    expect(studentStats.some((s) => s.speaker_name === "Tim")).toBe(false);
+    expect(studentStats.map((s) => s.speaker_name)).toContain("Alex");
+    // The teacher must still exist under the "teacher" key (kept for LLM context).
+    expect(stats.some((s) => s.speaker_key === "teacher")).toBe(true);
+  });
+
+  it("REGRESSION: students-stream resolution is unchanged by the teacher-labeling fix", () => {
+    const state: ReconcileSessionState = {
+      bindings: {},
+      cluster_binding_meta: {},
+      config: { interviewer_name: "Tim" },
+    };
+    // Unresolved single student with a one-candidate roster still hits the sole-candidate fallback.
+    const utterances: ReconcileUtterance[] = [
+      { utterance_id: "t1", stream_role: "teacher", text: "Go ahead.", start_ms: 0, end_ms: 2000, duration_ms: 2000 },
+      { utterance_id: "s1", stream_role: "students", text: "这是一段没有归属的回答", start_ms: 2000, end_ms: 7000, duration_ms: 5000 },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events: [],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      roster: ["Candidate Li"],
+    });
+    const studentRow = result.find((r) => r.utterance_id === "s1");
+    expect(studentRow?.speaker_name).toBe("Candidate Li");
+    expect(studentRow?.decision).toBe("confirm");
+  });
+});
