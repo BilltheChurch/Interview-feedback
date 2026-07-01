@@ -166,6 +166,33 @@ function matchToRoster(name: string, roster: string[]): string | null {
 }
 
 /**
+ * Determine the sole interviewee name in a 1v1 interview, or null if the setup
+ * is not an unambiguous 1v1. Preference order:
+ *   1. Explicit roster with exactly one candidate name.
+ *   2. No roster, but the resolved students-stream utterances name exactly one
+ *      distinct person (all other students utterances being unresolved).
+ * Any ambiguity (0 or ≥2 candidates) → null (do not auto-bind).
+ */
+function resolveSoleRosterCandidate(
+  roster: string[],
+  transcript: Array<{ stream_role: string; speaker_name?: string | null }>
+): string | null {
+  const cleanRoster = roster.map((r) => r.trim()).filter(Boolean);
+  if (cleanRoster.length === 1) return cleanRoster[0];
+  if (cleanRoster.length > 1) return null; // known group interview → never auto-bind
+
+  // No roster: infer from resolved student speaker names.
+  const resolvedNames = new Set<string>();
+  for (const u of transcript) {
+    if (u.stream_role !== "students") continue;
+    const name = (u.speaker_name ?? "").trim();
+    if (name) resolvedNames.add(name);
+  }
+  if (resolvedNames.size === 1) return [...resolvedNames][0];
+  return null;
+}
+
+/**
  * Merge overlapping edge turns with the same cluster_id into non-overlapping segments.
  * This deduplicates the ~5x redundancy from overlapping pyannote windows (10s window, 2s hop).
  */
@@ -766,6 +793,22 @@ export function buildReconciledTranscript(options: {
       end_ms: item.end_ms,
       duration_ms: item.duration_ms
     });
+  }
+
+  // ── 1v1 fallback: bind unresolved students to the sole roster candidate ──
+  // In a 1-on-1 interview there is exactly one interviewee. Any students-stream
+  // utterance that survived resolution unattributed can only belong to that one
+  // person, so leaving it null (→ front-end "Unknown") is strictly wrong. We only
+  // apply this in the unambiguous single-candidate case to avoid mis-attributing
+  // group interviews.
+  const soleCandidate = resolveSoleRosterCandidate(roster, result);
+  if (soleCandidate) {
+    for (const u of result) {
+      if (u.stream_role === "students" && !u.speaker_name) {
+        u.speaker_name = soleCandidate;
+        u.decision = "confirm";
+      }
+    }
   }
 
   // ── Post-filter: remove redundant ASR consolidation artifacts ──

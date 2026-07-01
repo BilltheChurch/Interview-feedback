@@ -143,7 +143,9 @@ export interface Tier2Status {
 
 export interface EvidenceItem {
   evidence_id: string;
-  type: "quote" | "segment" | "stats_summary" | "interaction_pattern" | "transcript_quote";
+  // "note" = interviewer's free-form memo/note text (NOT a candidate transcript quote).
+  // Never treat a "note" evidence's `quote` as something the candidate actually said.
+  type: "quote" | "segment" | "stats_summary" | "interaction_pattern" | "transcript_quote" | "note";
   time_range_ms: [number, number];
   utterance_ids: string[];
   speaker: {
@@ -155,7 +157,7 @@ export interface EvidenceItem {
   confidence: number;
   weak?: boolean;
   weak_reason?: string | null;
-  source?: "explicit_anchor" | "semantic_match" | "speaker_fallback" | "memo_text" | "llm_backfill" | "auto_generated";
+  source?: "explicit_anchor" | "semantic_match" | "speaker_fallback" | "memo_text" | "memo_note" | "llm_backfill" | "auto_generated";
   source_tier?: 1 | 2 | 3;              // 1=candidate speech, 2=memo, 3=interviewer evaluative
   source_tier_label?: string;            // "面试者发言" | "面试官观察" | "辅助佐证"
 }

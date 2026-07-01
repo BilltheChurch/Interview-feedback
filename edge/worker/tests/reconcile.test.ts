@@ -857,15 +857,20 @@ describe("buildMultiEvidence semantic matching", () => {
     }
   });
 
-  it("should create fallback evidence with source=memo_text when no match", () => {
+  it("should create a NOTE-type fallback (not a candidate quote) when no match", () => {
     const noMatchMemos = [
       { memo_id: "m_nomatch", created_at_ms: Date.now(), author_role: "teacher" as const, type: "observation" as const, tags: [], text: "整体节奏可以再快一些" },
     ];
     const evidence = buildMultiEvidence({ memos: noMatchMemos, transcript, bindings: [] });
-    const fallback = evidence.find(e => e.utterance_ids.length === 0);
+    const fallback = evidence.find(e => e.utterance_ids.length === 0 && e.source === "memo_note");
     expect(fallback).toBeDefined();
     expect(fallback!.confidence).toBe(0.35);
-    expect(fallback!.source).toBe("memo_text");
+    // The interviewer note must NOT be labelled a candidate transcript quote.
+    expect(fallback!.type).toBe("note");
+    // Unbound memo → unattributed (no fabricated null/unknown candidate line).
+    expect(fallback!.speaker.display_name).toBeNull();
+    // created_at_ms is a raw Date.now() epoch — it must NOT leak as a timestamp.
+    expect(fallback!.time_range_ms).toEqual([0, 0]);
   });
 });
 
@@ -1153,5 +1158,49 @@ describe("backfillSupportingUtterances", () => {
     const result = backfillSupportingUtterances(evidence, perPerson);
     const updated = result.find(e => e.evidence_id === "e_000003");
     expect(updated!.confidence).toBe(0.95); // 0.90 + 0.10 = 1.00, capped at 0.95
+  });
+});
+
+describe("buildReconciledTranscript: 1v1 unresolved-student fallback", () => {
+  const baseSpeakerLogs: SpeakerLogs = {
+    source: "cloud",
+    turns: [],
+    clusters: [],
+    speaker_map: [],
+    updated_at: "2026-02-15T00:00:00Z",
+  };
+  const state: ReconcileSessionState = { bindings: { teacher: "Interviewer" }, cluster_binding_meta: {} };
+
+  it("binds an unresolved students utterance to the sole roster candidate (no Unknown)", () => {
+    const utterances: ReconcileUtterance[] = [
+      { utterance_id: "u1", stream_role: "students", text: "而且现在的情况是这样的一段回答", start_ms: 5000, end_ms: 9000, duration_ms: 4000 },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events: [], // no speaker event → would normally resolve to null
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      roster: ["Candidate Li"], // exactly one interviewee → 1v1
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].speaker_name).toBe("Candidate Li");
+    expect(result[0].decision).toBe("confirm");
+  });
+
+  it("does NOT auto-bind when the roster has multiple candidates (group interview)", () => {
+    const utterances: ReconcileUtterance[] = [
+      { utterance_id: "u1", stream_role: "students", text: "some unresolved answer text here", start_ms: 5000, end_ms: 9000, duration_ms: 4000 },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events: [],
+      speakerLogs: baseSpeakerLogs,
+      state,
+      diarizationBackend: "cloud",
+      roster: ["Alice", "Bob"],
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].speaker_name).toBeNull();
   });
 });

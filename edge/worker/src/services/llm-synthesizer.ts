@@ -453,6 +453,9 @@ function buildSystemPrompt(payload: SynthesizeRequestPayload): string {
     "1. EVIDENCE: Every claim cites 1-5 evidence_ids from evidence_pack only (no invented IDs). " +
     "Memos/free-form notes are first-class evidence — cross-reference with transcript. " +
     "Match evidence to speakers via speaker_key AND quote text content. " +
+    "evidence_kind='interviewer_note' 是面试官自己写的笔记/观察，绝不是候选人说过的原话——" +
+    "可作为面试官观察的依据，但严禁把它的 quote 当成候选人 transcript 引用照抄或标注为候选人发言；" +
+    "只有 evidence_kind='candidate_quote' 才是候选人真实转写。" +
     "claim.text 必须是纯自然语言，引用放 evidence_refs 数组。优先 tier_1 证据，tier_3 仅作补充。\n" +
     "2. CONFIDENCE: Single-evidence claims → confidence < 0.4. Weak-evidence dimensions → ONE claim at 0.3-0.4. " +
     "binding_status='unresolved' speakers → ALL claim confidence ≤ 0.5 (code-enforced).\n" +
@@ -507,12 +510,16 @@ function buildUserPrompt(
   truncatedTranscript: TranscriptUtterance[]
 ): string {
   // Evidence pack with source_tier (default 1).
+  // evidence_kind marks whether the text is a candidate transcript quote or the
+  // interviewer's own free-form note. A "note" must NEVER be cited as something
+  // the candidate said (see RULE 1).
   const evidencePack = payload.evidence.map((e) => ({
     evidence_id: e.evidence_id,
     speaker_key: evidenceSpeakerKey(e),
     time_range_ms: e.time_range_ms,
     quote: (e.quote ?? "").slice(0, 400),
     source_tier: e.source_tier ?? 1,
+    evidence_kind: e.type === "note" ? "interviewer_note" : "candidate_quote",
   }));
 
   const transcriptSegments = truncatedTranscript.map((u) => ({

@@ -305,6 +305,53 @@ function normalizeMemoText(text: string): string {
   return text.trim().replace(/\s+/g, " ");
 }
 
+/**
+ * Upper bound for a plausible session-relative timestamp (ms). Anything above
+ * this is almost certainly a raw `Date.now()` epoch value (~1.7e12 ms in 2024+)
+ * that leaked in where a session-relative offset was expected. A memo's
+ * `created_at_ms` is a wall-clock epoch, not a session offset, so it must never
+ * be used verbatim as an utterance/evidence `start_ms`.
+ */
+export const MAX_SESSION_RELATIVE_MS = 24 * 60 * 60 * 1000; // 24h
+
+/** True when `ms` looks like a raw epoch timestamp rather than a session offset. */
+export function isEpochLikeTimestamp(ms: number): boolean {
+  return !Number.isFinite(ms) || ms > MAX_SESSION_RELATIVE_MS;
+}
+
+/**
+ * Clamp a candidate session-relative timestamp: epoch-like or negative values
+ * collapse to 0 so downstream formatters never render astronomical minutes
+ * (e.g. `29714713:08`).
+ */
+export function sanitizeSessionRelativeMs(ms: number): number {
+  if (!Number.isFinite(ms) || ms < 0) return 0;
+  if (ms > MAX_SESSION_RELATIVE_MS) return 0;
+  return ms;
+}
+
+/**
+ * Sanitize a [start, end] range for a session-relative timeline. Any epoch-like
+ * bound collapses to 0, so a memo's wall-clock `created_at_ms` never surfaces as
+ * a real timestamp.
+ */
+export function sanitizeTimeRange(range: [number, number]): [number, number] {
+  return [sanitizeSessionRelativeMs(range[0]), sanitizeSessionRelativeMs(range[1])];
+}
+
+/**
+ * Resolve the target speaker for a memo-derived note. When the memo bound to
+ * exactly one speaker we attribute the note to that person; otherwise (zero or
+ * ambiguous bindings) we leave it unattributed (null) rather than fabricating an
+ * "unknown"-bucketed candidate.
+ */
+function memoTargetSpeaker(boundSpeakers: Set<string>): string | null {
+  if (boundSpeakers.size !== 1) return null;
+  const [only] = boundSpeakers;
+  const trimmed = String(only ?? "").trim();
+  return trimmed || null;
+}
+
 // ── Common non-name words to filter out ──
 const NON_NAME_WORDS = new Set([
   // English interview terms
@@ -541,7 +588,7 @@ export function buildMultiEvidence(options: {
       evidence.push({
         evidence_id: nextEvidenceId(),
         type: "quote",
-        time_range_ms: [u.start_ms, u.end_ms],
+        time_range_ms: sanitizeTimeRange([u.start_ms, u.end_ms]),
         utterance_ids: [u.utterance_id],
         speaker: {
           cluster_id: u.cluster_id ?? null,
@@ -556,23 +603,34 @@ export function buildMultiEvidence(options: {
       });
     }
 
-    // 5. If no utterances found, create fallback evidence from memo text itself
+    // 5. If no utterances found, emit a NOTE-type evidence from the memo text.
+    //    IMPORTANT: this is the interviewer's own note, NOT a candidate transcript
+    //    quote. We must not:
+    //      - label it type "quote" (LLM would cite it as something the candidate said),
+    //      - leave speaker=null (→ "unknown" bucket → renders as "Unknown" line), or
+    //      - use memo.created_at_ms as a session-relative timestamp (it is a raw
+    //        Date.now() epoch → astronomical `29714713:08`-style timestamps).
     if (pickedItems.length === 0) {
+      // Bind the note to its target person when the memo resolved to a speaker.
+      const targetSpeaker = memoTargetSpeaker(boundSpeakers);
       evidence.push({
         evidence_id: nextEvidenceId(),
-        type: "quote",
-        time_range_ms: [memo.created_at_ms, memo.created_at_ms],
+        type: "note",
+        // Notes have no reliable session-relative timeline anchor → 0 (not epoch).
+        time_range_ms: [0, 0],
         utterance_ids: [],
         speaker: {
           cluster_id: null,
-          person_id: null,
-          display_name: null,
+          person_id: targetSpeaker,
+          display_name: targetSpeaker,
         },
         quote: quoteFromUtterance(memo.text),
         confidence: 0.35,
         weak: false,
         weak_reason: null,
-        source: "memo_text",
+        source: "memo_note",
+        source_tier: 2,
+        source_tier_label: "面试官笔记",
       });
     }
   }
@@ -586,7 +644,7 @@ export function buildMultiEvidence(options: {
     evidence.push({
       evidence_id: nextEvidenceId(),
       type: "quote",
-      time_range_ms: [item.start_ms, item.end_ms],
+      time_range_ms: sanitizeTimeRange([item.start_ms, item.end_ms]),
       utterance_ids: [item.utterance_id],
       speaker: {
         cluster_id: item.cluster_id ?? null,
@@ -638,7 +696,7 @@ export function enrichEvidencePack(
       evidence.push({
         evidence_id: nextEvidenceId(),
         type: "transcript_quote",
-        time_range_ms: [u.start_ms, u.end_ms],
+        time_range_ms: sanitizeTimeRange([u.start_ms, u.end_ms]),
         utterance_ids: [u.utterance_id],
         speaker: {
           cluster_id: u.cluster_id ?? null,
@@ -700,7 +758,7 @@ export function enrichEvidencePack(
         evidence.push({
           evidence_id: nextEvidenceId(),
           type: "interaction_pattern",
-          time_range_ms: [curr.start_ms, curr.end_ms],
+          time_range_ms: sanitizeTimeRange([curr.start_ms, curr.end_ms]),
           utterance_ids: [curr.utterance_id],
           speaker: {
             cluster_id: curr.cluster_id ?? null,
@@ -733,7 +791,7 @@ export function enrichEvidencePack(
             evidence.push({
               evidence_id: nextEvidenceId(),
               type: "interaction_pattern",
-              time_range_ms: [curr.start_ms, curr.end_ms],
+              time_range_ms: sanitizeTimeRange([curr.start_ms, curr.end_ms]),
               utterance_ids: [curr.utterance_id],
               speaker: {
                 cluster_id: curr.cluster_id ?? null,
@@ -979,26 +1037,53 @@ export function buildEvidence(options: {
     }
 
     if (picked) {
+      // A real transcript utterance backs this memo → emit a candidate QUOTE.
       range = [picked.start_ms, picked.end_ms];
+      evidence.push({
+        evidence_id: nextEvidenceId(),
+        type: "quote",
+        time_range_ms: sanitizeTimeRange(range),
+        utterance_ids: utteranceIds,
+        speaker: {
+          cluster_id: picked.cluster_id ?? null,
+          person_id: picked.speaker_name ?? null,
+          display_name: picked.speaker_name ?? null,
+        },
+        quote: quoteFromUtterance(picked.text),
+        confidence: weakUtterances.has(picked.utterance_id) ? 0.56 : 0.8,
+        weak: weakUtterances.has(picked.utterance_id),
+        weak_reason: weakUtterances.has(picked.utterance_id) ? "overlap_risk" : null,
+        source_tier: 2,
+        source_tier_label: "面试官观察",
+      });
+    } else {
+      // No transcript match → this is the interviewer's own NOTE, not a candidate
+      // quote. Emit type "note" so the LLM never cites it as candidate speech, and
+      // never surface memo.created_at_ms (a raw epoch) as a session timestamp.
+      // A memo-supplied session-relative anchor range (if any) is kept & sanitized;
+      // the bare created_at_ms epoch fallback collapses to [0, 0].
+      const noteRange: [number, number] = memo.anchors?.time_range_ms
+        ? sanitizeTimeRange(memo.anchors.time_range_ms)
+        : [0, 0];
+      evidence.push({
+        evidence_id: nextEvidenceId(),
+        type: "note",
+        time_range_ms: noteRange,
+        utterance_ids: [],
+        speaker: {
+          cluster_id: null,
+          person_id: null,
+          display_name: null,
+        },
+        quote: quoteFromUtterance(memo.text),
+        confidence: 0.52,
+        weak: false,
+        weak_reason: null,
+        source: "memo_note",
+        source_tier: 2,
+        source_tier_label: "面试官笔记",
+      });
     }
-
-    evidence.push({
-      evidence_id: nextEvidenceId(),
-      type: "quote",
-      time_range_ms: range,
-      utterance_ids: utteranceIds,
-      speaker: {
-        cluster_id: picked?.cluster_id ?? null,
-        person_id: picked?.speaker_name ?? null,
-        display_name: picked?.speaker_name ?? null,
-      },
-      quote: picked ? quoteFromUtterance(picked.text) : quoteFromUtterance(memo.text),
-      confidence: picked ? (weakUtterances.has(picked.utterance_id) ? 0.56 : 0.8) : 0.52,
-      weak: picked ? weakUtterances.has(picked.utterance_id) : false,
-      weak_reason: picked && weakUtterances.has(picked.utterance_id) ? "overlap_risk" : null,
-      source_tier: 2,
-      source_tier_label: "面试官观察",
-    });
   }
 
   // Keep a transcript-backed fallback evidence index so report claims always
@@ -1010,7 +1095,7 @@ export function buildEvidence(options: {
     evidence.push({
       evidence_id: nextEvidenceId(),
       type: "quote",
-      time_range_ms: [item.start_ms, item.end_ms],
+      time_range_ms: sanitizeTimeRange([item.start_ms, item.end_ms]),
       utterance_ids: [item.utterance_id],
       speaker: {
         cluster_id: item.cluster_id ?? null,
