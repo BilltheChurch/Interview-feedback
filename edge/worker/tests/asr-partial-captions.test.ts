@@ -125,7 +125,7 @@ describe("maybeForwardPartial (R4)", () => {
   it("throttles two changed partials that arrive inside the throttle window", async () => {
     const { ctx, calls } = makeCtx({});
     await maybeForwardPartial("sess", "students", "hello", "S1", ctx);
-    vi.setSystemTime(10_050); // +50ms < STT_PARTIAL_THROTTLE_MS (200)
+    vi.setSystemTime(10_050); // +50ms < resolvePartialThrottleMs default (100)
     await maybeForwardPartial("sess", "students", "hello world", "S1", ctx);
     expect(calls).toHaveLength(1);
     // Past the window → the next changed partial forwards.
@@ -273,7 +273,7 @@ describe("handleSpeechmaticsMessage — partial vs final routing (R4)", () => {
     );
     expect(calls).toHaveLength(1); // final buffers, does not broadcast
 
-    // 3) The NEXT utterance's first partial arrives well inside the 200ms throttle window
+    // 3) The NEXT utterance's first partial arrives well inside the 100ms throttle window
     //    (fake time never advanced). It must still forward — the final's reset makes it
     //    look like "never sent" so the throttle is skipped.
     await handleSpeechmaticsMessage(

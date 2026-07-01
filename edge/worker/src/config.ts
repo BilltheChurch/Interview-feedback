@@ -115,9 +115,11 @@ export function resolveSpeechmaticsMaxDelay(env: Pick<Env, "SPEECHMATICS_MAX_DEL
 }
 
 /** Default silence gap (ms) between consecutive finals that ends the current utterance.
- *  R6: lowered from 800 → 500 so a final utterance settles ~300ms sooner. With live
- *  partial captions streaming (R4), a shorter final gap keeps the transcript snappy. */
-export const STT_UTTERANCE_GAP_MS_DEFAULT = 500;
+ *  R-D: raised from 500 → 900. Now that the live partial line reveals words character-by-
+ *  character (R-D typewriter), "fast to appear" no longer depends on a tight flush gap, so
+ *  we widen the gap to a more natural pause (~1s) — this stops one spoken sentence from
+ *  being chopped into several short settled rows. Overridable via STT_UTTERANCE_GAP_MS. */
+export const STT_UTTERANCE_GAP_MS_DEFAULT = 900;
 
 /**
  * Resolve the STT utterance gap (ms) from the environment (R4/R6). This is the silence
@@ -132,11 +134,28 @@ export function resolveSttUtteranceGapMs(env: Pick<Env, "STT_UTTERANCE_GAP_MS">)
   return value;
 }
 
-/** Minimum interval (ms) between two partial (interim) transcript frames forwarded to the
- *  Desktop for the same stream. Speechmatics emits AddPartialTranscript very frequently;
- *  throttling to this cadence keeps the downlink light while staying visually "live". A
- *  partial whose text is unchanged is dropped regardless (see maybeForwardPartial). */
-export const STT_PARTIAL_THROTTLE_MS = 200;
+/** Default minimum interval (ms) between two partial (interim) transcript frames forwarded
+ *  to the Desktop for the same stream. Speechmatics emits AddPartialTranscript very
+ *  frequently; throttling to this cadence keeps the downlink light while staying visually
+ *  "live". A partial whose text is unchanged is dropped regardless (see maybeForwardPartial).
+ *
+ *  R-D: lowered from 200 → 100. The Desktop now animates the partial line character-by-
+ *  character (typewriter), so a denser stream of fresher target texts makes the reveal
+ *  track speech more smoothly. Overridable via STT_PARTIAL_THROTTLE_MS. */
+export const STT_PARTIAL_THROTTLE_MS_DEFAULT = 100;
+
+/**
+ * Resolve the partial-transcript forward throttle (ms) from the environment (R-D). This is
+ * the minimum interval between two partial frames forwarded to the Desktop for one stream.
+ * Non-positive or non-integer input falls back to the default (100).
+ */
+export function resolvePartialThrottleMs(env: Pick<Env, "STT_PARTIAL_THROTTLE_MS">): number {
+  const raw = (env.STT_PARTIAL_THROTTLE_MS ?? "").trim();
+  if (!raw) return STT_PARTIAL_THROTTLE_MS_DEFAULT;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) return STT_PARTIAL_THROTTLE_MS_DEFAULT;
+  return value;
+}
 
 // ── Stream roles ────────────────────────────────────────────────────
 export type StreamRole = "mixed" | "teacher" | "students";
@@ -558,7 +577,7 @@ export interface AsrRealtimeRuntime {
    *  unchanged. Reset on flush/close so the next utterance starts fresh. */
   lastPartialTextNorm: string;
   /** R4 partial captions: Date.now() of the last partial frame forwarded to the Desktop.
-   *  Throttles partial forwarding to STT_PARTIAL_THROTTLE_MS. */
+   *  Throttles partial forwarding to resolvePartialThrottleMs() (default 100ms, R-D). */
   lastPartialSentAt: number;
   /** Endpointing: accumulate Speechmatics word-level finals into one sentence-level
    *  utterance, flushed on a silence gap, speaker change, EndOfTranscript, or close. */
@@ -626,9 +645,12 @@ export interface Env {
   /** R6: Speechmatics final-transcript latency budget in seconds. Parsed by
    *  resolveSpeechmaticsMaxDelay(); clamped to [0.7, 4]; defaults to 1.0. */
   SPEECHMATICS_MAX_DELAY?: string;
-  /** R4/R6: silence gap (ms) between consecutive finals that flushes the accumulated
-   *  utterance. Parsed by resolveSttUtteranceGapMs(); defaults to 500. */
+  /** R4/R-D: silence gap (ms) between consecutive finals that flushes the accumulated
+   *  utterance. Parsed by resolveSttUtteranceGapMs(); defaults to 900. */
   STT_UTTERANCE_GAP_MS?: string;
+  /** R-D: minimum interval (ms) between partial (interim) frames forwarded to the Desktop
+   *  per stream. Parsed by resolvePartialThrottleMs(); defaults to 100. */
+  STT_PARTIAL_THROTTLE_MS?: string;
   /** Maximum number of speakers for Speechmatics diarization (students stream only).
    *  Parsed by resolveMaxSpeakers(); values < 2 or non-integer are treated as unset
    *  (Speechmatics enforces a minimum of 2; undefined lets it auto-detect). Default: "6". */

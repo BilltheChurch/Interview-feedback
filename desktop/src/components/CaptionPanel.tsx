@@ -8,6 +8,7 @@ import type {
   PartialTranscript,
 } from '../stores/sessionStore';
 import { formatSessionTime } from '../lib/formatTime';
+import { useTypewriter } from '../hooks/useTypewriter';
 
 /** Map a stream role + raw speaker to the display label.
  *
@@ -68,6 +69,22 @@ type PartialRow = {
   speaker: string;
   text: string;
 };
+
+/** R-D: the text body of a live partial line. Runs the newest cumulative partial text
+ *  through useTypewriter so characters appear to be typed one-by-one at the tail, then
+ *  renders a trailing "…" (and a blinking caret) to signal "still being transcribed".
+ *  Split into its own component so the hook is called unconditionally per partial row.
+ *  Respects prefers-reduced-motion internally (shows the full text immediately). */
+function PartialCaptionText({ text }: { text: string }) {
+  const revealed = useTypewriter(text);
+  return (
+    <p className="text-xs text-ink-tertiary italic leading-relaxed pl-3">
+      {revealed}
+      <span className="text-ink-tertiary">…</span>
+      <span className="inline-block w-px h-3 align-middle bg-ink-tertiary/60 ml-0.5 animate-pulse" />
+    </p>
+  );
+}
 
 export function CaptionPanel({
   captions: acsCaptions,
@@ -273,10 +290,8 @@ export function CaptionPanel({
                     {row.speaker}
                   </span>
                 </div>
-                <p className="text-xs text-ink-tertiary italic leading-relaxed pl-3">
-                  {row.text}
-                  <span className="text-ink-tertiary">…</span>
-                </p>
+                {/* R-D: per-character typewriter reveal of the live cumulative partial. */}
+                <PartialCaptionText text={row.text} />
               </div>
             );
           })}

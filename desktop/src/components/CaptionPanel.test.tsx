@@ -1,7 +1,25 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, act } from '@testing-library/react';
 import { CaptionPanel } from './CaptionPanel';
 import type { TranscriptSegment, PartialTranscript } from '../stores/sessionStore';
+
+/** Force prefers-reduced-motion so the partial-line typewriter reveal (R-D) shows the
+ *  full cumulative text immediately — lets content-parity assertions read synchronously
+ *  without pumping animation frames, and exercises the reduced-motion path. */
+function stubReducedMotion(reduced: boolean) {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches: reduced && query.includes('prefers-reduced-motion'),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
 
 /**
  * R-A: a teacher-role transcript segment is the interviewer. The Worker's
@@ -83,6 +101,11 @@ describe('CaptionPanel — teacher/student labelling (R-A)', () => {
 });
 
 describe('CaptionPanel — live partial captions (R4)', () => {
+  // R-D: the partial body now types in character-by-character. Under reduced-motion the
+  // full text renders immediately, so these presence/label assertions stay synchronous.
+  beforeEach(() => stubReducedMotion(true));
+  afterEach(() => vi.unstubAllGlobals());
+
   it('renders finals plus a visually distinct in-progress partial line', () => {
     const segments: TranscriptSegment[] = [
       seg({ id: 's1', role: 'students', speaker: 'S1', text: 'Hello there.' }),
@@ -173,6 +196,66 @@ describe('CaptionPanel — live partial captions (R4)', () => {
     );
     expect(screen.getByText('ACS caption')).toBeInTheDocument();
     expect(screen.queryByTestId('partial-students')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * R-D: the live partial line types in character-by-character. With motion enabled the
+ * body starts short and grows toward the full cumulative partial text; at every step the
+ * visible text is a prefix of the target, and the "still typing" marker (…) is present.
+ */
+describe('CaptionPanel — typewriter reveal for live partials (R-D)', () => {
+  // Controllable rAF so we can pump animation frames deterministically.
+  let rafCallbacks: Array<{ id: number; cb: FrameRequestCallback }> = [];
+  let rafId = 0;
+
+  beforeEach(() => {
+    stubReducedMotion(false);
+    rafCallbacks = [];
+    rafId = 0;
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback): number => {
+      rafId += 1;
+      rafCallbacks.push({ id: rafId, cb });
+      return rafId;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number): void => {
+      rafCallbacks = rafCallbacks.filter((entry) => entry.id !== id);
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function flushFrame(times = 1) {
+    for (let i = 0; i < times; i += 1) {
+      const pending = rafCallbacks;
+      rafCallbacks = [];
+      act(() => {
+        for (const entry of pending) entry.cb(performance.now());
+      });
+    }
+  }
+
+  it('reveals the partial body progressively as a prefix, keeping the … marker', () => {
+    const partials: Record<string, PartialTranscript> = {
+      students: { role: 'students', speaker: 'S1', text: 'once upon a time' },
+    };
+    render(
+      <CaptionPanel
+        captions={[]}
+        acsStatus="off"
+        transcriptSegments={[]}
+        partialTranscripts={partials}
+      />
+    );
+    const partialRow = screen.getByTestId('partial-students');
+    // Before any frame the typing has not caught up: the full cumulative text is NOT yet
+    // shown, but the "still typing" marker is already present.
+    expect(partialRow.textContent).not.toContain('once upon a time');
+    expect(partialRow.textContent).toContain('…');
+
+    // Pump enough frames → the full cumulative text is revealed at the tail.
+    flushFrame(20);
+    expect(partialRow.textContent).toContain('once upon a time');
+    expect(partialRow.textContent).toContain('…');
   });
 });
 

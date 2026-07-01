@@ -37,10 +37,16 @@
     "SPEECHMATICS_OPERATING_POINT": "enhanced",
     "SPEECHMATICS_MAX_DELAY": "1.0",
     "SPEECHMATICS_LANGUAGE": "cmn_en",
-    // R4/R6: silence gap (ms) between consecutive finals that flushes the accumulated
-    // utterance. Lowered 800 → 500 so finals settle sooner; with live partial captions
-    // streaming (R4) a shorter final gap keeps the transcript snappy. resolveSttUtteranceGapMs.
-    "STT_UTTERANCE_GAP_MS": "500",
+    // R-D: silence gap (ms) between consecutive finals that flushes the accumulated
+    // utterance. Raised 500 → 900: the live partial line now types in word-by-word
+    // (Desktop typewriter reveal), so "fast to appear" no longer needs a tight flush gap;
+    // a wider ~1s gap follows natural pauses and stops one sentence being chopped into
+    // several short settled rows. resolveSttUtteranceGapMs.
+    "STT_UTTERANCE_GAP_MS": "900",
+    // R-D: min interval (ms) between partial (interim) frames forwarded to the Desktop per
+    // stream. Lowered 200 → 100: denser, fresher target texts make the Desktop typewriter
+    // reveal track speech more smoothly. resolvePartialThrottleMs.
+    "STT_PARTIAL_THROTTLE_MS": "100",
     "ASR_ENDPOINT": "",
     // NOTE: ASR_LANGUAGE / ASR_MODEL / ASR_WS_URL are legacy DashScope/Whisper vars —
     // they have NO effect on the Speechmatics realtime path (ASR_PROVIDER=speechmatics).

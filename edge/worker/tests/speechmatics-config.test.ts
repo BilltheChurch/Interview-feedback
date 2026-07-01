@@ -5,7 +5,9 @@ import {
   resolveSpeechmaticsOperatingPoint,
   resolveSpeechmaticsMaxDelay,
   resolveSttUtteranceGapMs,
+  resolvePartialThrottleMs,
   STT_UTTERANCE_GAP_MS_DEFAULT,
+  STT_PARTIAL_THROTTLE_MS_DEFAULT,
 } from "../src/config";
 
 // ── buildStartRecognition — maxSpeakers / speaker_diarization_config ──────────
@@ -144,10 +146,10 @@ describe("resolveSttUtteranceGapMs", () => {
     return val !== undefined ? { STT_UTTERANCE_GAP_MS: val } : {};
   }
 
-  it("defaults to 500 when unset (R6 lowered from 800)", () => {
-    expect(STT_UTTERANCE_GAP_MS_DEFAULT).toBe(500);
-    expect(resolveSttUtteranceGapMs(makeEnv(undefined))).toBe(500);
-    expect(resolveSttUtteranceGapMs(makeEnv(""))).toBe(500);
+  it("defaults to 900 when unset (R-D: live partial reveal removes the need for a tight gap; wider gap avoids over-fragmenting sentences)", () => {
+    expect(STT_UTTERANCE_GAP_MS_DEFAULT).toBe(900);
+    expect(resolveSttUtteranceGapMs(makeEnv(undefined))).toBe(900);
+    expect(resolveSttUtteranceGapMs(makeEnv(""))).toBe(900);
   });
 
   it("honours a valid positive integer override", () => {
@@ -156,9 +158,35 @@ describe("resolveSttUtteranceGapMs", () => {
   });
 
   it("falls back to the default for non-positive or non-integer input", () => {
-    expect(resolveSttUtteranceGapMs(makeEnv("0"))).toBe(500);
-    expect(resolveSttUtteranceGapMs(makeEnv("-100"))).toBe(500);
-    expect(resolveSttUtteranceGapMs(makeEnv("1.5"))).toBe(500);
-    expect(resolveSttUtteranceGapMs(makeEnv("abc"))).toBe(500);
+    expect(resolveSttUtteranceGapMs(makeEnv("0"))).toBe(900);
+    expect(resolveSttUtteranceGapMs(makeEnv("-100"))).toBe(900);
+    expect(resolveSttUtteranceGapMs(makeEnv("1.5"))).toBe(900);
+    expect(resolveSttUtteranceGapMs(makeEnv("abc"))).toBe(900);
+  });
+});
+
+// ── resolvePartialThrottleMs — R-D partial forwarding cadence ─────────────────
+
+describe("resolvePartialThrottleMs", () => {
+  function makeEnv(val: string | undefined): { STT_PARTIAL_THROTTLE_MS?: string } {
+    return val !== undefined ? { STT_PARTIAL_THROTTLE_MS: val } : {};
+  }
+
+  it("defaults to 100 when unset (R-D: denser partials → smoother typewriter reveal, was 200)", () => {
+    expect(STT_PARTIAL_THROTTLE_MS_DEFAULT).toBe(100);
+    expect(resolvePartialThrottleMs(makeEnv(undefined))).toBe(100);
+    expect(resolvePartialThrottleMs(makeEnv(""))).toBe(100);
+  });
+
+  it("honours a valid positive integer override", () => {
+    expect(resolvePartialThrottleMs(makeEnv("50"))).toBe(50);
+    expect(resolvePartialThrottleMs(makeEnv("200"))).toBe(200);
+  });
+
+  it("falls back to the default for non-positive or non-integer input", () => {
+    expect(resolvePartialThrottleMs(makeEnv("0"))).toBe(100);
+    expect(resolvePartialThrottleMs(makeEnv("-100"))).toBe(100);
+    expect(resolvePartialThrottleMs(makeEnv("1.5"))).toBe(100);
+    expect(resolvePartialThrottleMs(makeEnv("abc"))).toBe(100);
   });
 });

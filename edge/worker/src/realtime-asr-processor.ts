@@ -57,7 +57,7 @@ import {
   resolveSpeechmaticsOperatingPoint,
   resolveSpeechmaticsMaxDelay,
   resolveSttUtteranceGapMs,
-  STT_PARTIAL_THROTTLE_MS,
+  resolvePartialThrottleMs,
 } from "./config";
 import type {
   Env,
@@ -1063,7 +1063,7 @@ export async function handleSpeechmaticsMessage(
  *
  * Speechmatics emits AddPartialTranscript very frequently. To keep the downlink light we
  * (a) drop empties, (b) drop partials whose normalized text is unchanged since the last
- * forward, and (c) throttle to at most one frame per STT_PARTIAL_THROTTLE_MS per stream.
+ * forward, and (c) throttle to at most one frame per resolvePartialThrottleMs() per stream.
  * The teacher speaker is resolved through resolveTeacherIdentity so the partial line
  * matches the eventual final (never mislabelled as a student — R1). Partials are UI-only:
  * they are NOT persisted to utterances and do NOT advance any seq cursor.
@@ -1088,7 +1088,8 @@ export async function maybeForwardPartial(
   // very first partial of an utterance (lastPartialSentAt === 0 after a reset/flush)
   // always forwards so the live line appears immediately.
   const now = Date.now();
-  if (runtime.lastPartialSentAt > 0 && now - runtime.lastPartialSentAt < STT_PARTIAL_THROTTLE_MS) {
+  const throttleMs = resolvePartialThrottleMs(ctx.env);
+  if (runtime.lastPartialSentAt > 0 && now - runtime.lastPartialSentAt < throttleMs) {
     return;
   }
 
