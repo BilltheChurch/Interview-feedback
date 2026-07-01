@@ -160,6 +160,59 @@ describe('normalizeApiReport', () => {
     expect(result.transcript[0].text).toBe('Hello there.');
   });
 
+  it('prefers cleaned_transcript (punctuated) over raw transcript when present', () => {
+    const raw: RawApiReport = {
+      transcript: [
+        { utterance_id: 'u1', speaker_name: 'Alice', text: '你好 我叫小明', start_ms: 0, end_ms: 2000 },
+      ],
+      cleaned_transcript: [
+        { utterance_id: 'u1', speaker_name: 'Alice', text: '你好，我叫小明。', start_ms: 0, end_ms: 2000 },
+      ],
+    };
+    const result = normalizeApiReport(raw);
+    expect(result.transcript).toHaveLength(1);
+    // Punctuated cleaned text must win over the raw punctuation-free text.
+    expect(result.transcript[0].text).toBe('你好，我叫小明。');
+  });
+
+  it('falls back to raw transcript when cleaned_transcript is missing', () => {
+    const raw: RawApiReport = {
+      transcript: [
+        { utterance_id: 'u1', speaker_name: 'Alice', text: 'no punctuation here', start_ms: 0, end_ms: 2000 },
+      ],
+    };
+    const result = normalizeApiReport(raw);
+    expect(result.transcript).toHaveLength(1);
+    expect(result.transcript[0].text).toBe('no punctuation here');
+  });
+
+  it('falls back to raw transcript when cleaned_transcript is present but empty', () => {
+    const raw: RawApiReport = {
+      transcript: [
+        { utterance_id: 'u1', speaker_name: 'Alice', text: 'raw text', start_ms: 0, end_ms: 2000 },
+      ],
+      cleaned_transcript: [],
+    };
+    const result = normalizeApiReport(raw);
+    expect(result.transcript).toHaveLength(1);
+    expect(result.transcript[0].text).toBe('raw text');
+  });
+
+  it('preserves per-utterance start_ms from cleaned_transcript', () => {
+    const raw: RawApiReport = {
+      transcript: [
+        { utterance_id: 'u1', speaker_name: 'Alice', text: 'a b', start_ms: 0, end_ms: 2000 },
+        { utterance_id: 'u2', speaker_name: 'Alice', text: 'c d', start_ms: 5000, end_ms: 7000 },
+      ],
+      cleaned_transcript: [
+        { utterance_id: 'u1', speaker_name: 'Alice', text: 'A, b.', start_ms: 0, end_ms: 2000 },
+        { utterance_id: 'u2', speaker_name: 'Alice', text: 'C, d.', start_ms: 5000, end_ms: 7000 },
+      ],
+    };
+    const result = normalizeApiReport(raw);
+    expect(result.transcript.map((u) => u.start_ms)).toEqual([0, 5000]);
+  });
+
   it('builds utteranceEvidenceMap from evidence utterance_ids', () => {
     const raw: RawApiReport = {
       evidence: [

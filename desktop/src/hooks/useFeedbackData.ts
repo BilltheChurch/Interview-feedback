@@ -106,6 +106,13 @@ export interface RawApiReport {
   evidence?: RawEvidenceItem[];
   memos?: RawMemo[];
   transcript?: RawUtterance[];
+  /**
+   * Punctuated transcript produced by the Worker (P2): same shape as `transcript`
+   * (utterance_id / speaker_name / text / start_ms / end_ms) but with deterministic
+   * sentence-final punctuation and pure-filler utterances dropped. Preferred over
+   * `transcript` for display when present and non-empty.
+   */
+  cleaned_transcript?: RawUtterance[];
   session?: { session_id?: string; caption_source?: string; [key: string]: unknown };
   session_id?: string;
   session_name?: string;
@@ -370,8 +377,16 @@ export function normalizeApiReport(
   }));
 
   const normalizedTranscript: FeedbackReport['transcript'] = (() => {
-    if (!Array.isArray(raw.transcript)) return [];
-    return raw.transcript.map((u: RawUtterance) => ({
+    // Prefer the punctuated cleaned_transcript (P2) when the Worker provides it;
+    // fall back to the raw punctuation-free transcript otherwise. Both share the
+    // same per-utterance shape (utterance_id / speaker_name / text / start_ms /
+    // end_ms), so downstream metrics and per-utterance timestamps are unaffected.
+    const source = Array.isArray(raw.cleaned_transcript) && raw.cleaned_transcript.length > 0
+      ? raw.cleaned_transcript
+      : Array.isArray(raw.transcript)
+        ? raw.transcript
+        : [];
+    return source.map((u: RawUtterance) => ({
       utterance_id: u.utterance_id || '',
       speaker_name: u.speaker_name || null,
       text: u.text || '',

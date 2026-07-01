@@ -115,10 +115,25 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
     return result;
   }, [transcript, activeSpeaker, searchQuery, evidenceMap, speakerColorMap]);
 
+  // Estimate each group's height from its utterance count: a ~28px speaker
+  // header plus ~26px per per-utterance row (timestamp + text). Actual heights
+  // are re-measured after render via `virtualizer.measureElement`, so this only
+  // needs to be a reasonable initial estimate to avoid scroll jumps.
+  const HEADER_PX = 28;
+  const UTTERANCE_ROW_PX = 26;
+  const estimateGroupSize = useCallback(
+    (index: number) => {
+      const g = groups[index];
+      const itemCount = g ? g.items.length : 1;
+      return HEADER_PX + itemCount * UTTERANCE_ROW_PX;
+    },
+    [groups],
+  );
+
   const virtualizer = useVirtualizer({
     count: groups.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 72,
+    estimateSize: estimateGroupSize,
     overscan: 10,
   });
 
@@ -222,9 +237,9 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                   isGroupHighlighted ? 'border-l-2 border-l-accent bg-accent/5' : ''
                 }`}
               >
-                {/* Speaker header */}
+                {/* Speaker header: name + color dot identify the group; the
+                    per-utterance timestamps below give each sentence its own time. */}
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs text-ink-secondary font-mono">{formatSessionTime(group.startMs)}</span>
                   <span className={`w-2 h-2 rounded-full ${SPEAKER_BG[group.speakerIndex]} ${SPEAKER_COLORS[group.speakerIndex]} ring-1 ring-current`} />
                   <span className={`text-sm font-medium ${SPEAKER_COLORS[group.speakerIndex]}`}>
                     {group.speaker}
@@ -241,11 +256,16 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                     </div>
                   )}
                 </div>
-                {/* Utterance texts */}
+                {/* Utterance rows: each sentence gets its own real timestamp. */}
                 {group.items.map(u => (
-                  <p key={u.utterance_id} className="text-sm text-ink leading-relaxed pl-6">
-                    {highlightText(u.text)}
-                  </p>
+                  <div key={u.utterance_id} className="flex items-start gap-2 pl-4">
+                    <span className="text-xs text-ink-secondary font-mono shrink-0 pt-0.5 tabular-nums">
+                      {formatSessionTime(u.start_ms)}
+                    </span>
+                    <p className="text-sm text-ink leading-relaxed flex-1 min-w-0">
+                      {highlightText(u.text)}
+                    </p>
+                  </div>
                 ))}
               </div>
             );
