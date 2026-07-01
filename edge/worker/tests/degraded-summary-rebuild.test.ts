@@ -54,15 +54,15 @@ function tItem(
 
 describe("buildDegradedSummarySections (确定性拼接)", () => {
   it("首段复用 no-student-speech notice 语义（本场未检测到候选人发言）", () => {
+    const customNotice = "自定义提示：本场没有候选人发言。";
     const sections = buildDegradedSummarySections({
       transcript: [tItem("u1", "teacher", "我们今天聊聊这个岗位的职责。", 0, 5000)],
       freeFormNotes: null,
-      notice: NO_STUDENT_SPEECH_NOTICE,
+      notice: customNotice,
     });
     expect(sections.length).toBeGreaterThan(0);
-    const joined = sections.flatMap((s) => s.bullets).join(" ");
-    // 明确告知无法生成个人维度评估
-    expect(joined).toMatch(/未检测到|候选人|个人维度/);
+    // 首段 bullet 应包含传入的 notice 文案，证明 notice 参数被真正使用（非 dead param）。
+    expect(sections[0].bullets[0]).toContain("自定义提示");
   });
 
   it("补充面试官/teacher 流发言要点（较长/有信息量的发言）", () => {
@@ -114,6 +114,83 @@ describe("buildDegradedSummarySections (确定性拼接)", () => {
     });
     const joined = sections.flatMap((s) => s.bullets).join(" ");
     expect(joined).not.toContain("本场记录已生成，建议结合个人维度反馈查看。");
+  });
+
+  // ── 边界兜底 ────────────────────────────────────────────────────────────────
+
+  it("(a) teacher 只有短句(<12字) + 无 notes → 走最长兜底，含实际发言而非纯 notice", () => {
+    const transcript = [
+      tItem("u1", "teacher", "嗯。", 0, 800),
+      tItem("u2", "teacher", "好的。", 800, 1600),
+      tItem("u3", "teacher", "下一位。", 1600, 2600), // 最长的短句
+    ];
+    const sections = buildDegradedSummarySections({
+      transcript,
+      freeFormNotes: null,
+      notice: NO_STUDENT_SPEECH_NOTICE,
+    });
+    // 必须有"面试官发言要点"段（而非只剩 notice 段）。
+    const pointsSection = sections.find((s) => s.topic === "面试官发言要点");
+    expect(pointsSection).toBeDefined();
+    const pointsJoined = pointsSection!.bullets.join(" ");
+    // 兜底取最长的 1-2 条短句 → 至少含最长那句"下一位。"
+    expect(pointsJoined).toContain("下一位");
+  });
+
+  it("(b) 完全无 teacher 发言(无任何 transcript) → notice 段不含统计、无发言要点段", () => {
+    const sections = buildDegradedSummarySections({
+      transcript: [],
+      freeFormNotes: null,
+      notice: NO_STUDENT_SPEECH_NOTICE,
+    });
+    // 只有 notice 段，且不虚构统计（0 段发言 → 不追加"N 段/M 秒"）。
+    expect(sections.length).toBe(1);
+    expect(sections[0].topic).toBe("本场概述");
+    const joined = sections[0].bullets.join(" ");
+    expect(joined).not.toMatch(/\d+ 段发言/);
+  });
+
+  it("(b2) 有面试官发言 → notice 段补确定性统计(N 段 / M 秒)", () => {
+    const transcript = [
+      tItem("u1", "teacher", "我们今天围绕你在后端分布式系统上的项目经验展开面试。", 0, 10000),
+      tItem("u2", "teacher", "接下来聊聊团队协作。", 10000, 16000),
+    ];
+    const sections = buildDegradedSummarySections({
+      transcript,
+      freeFormNotes: null,
+      notice: NO_STUDENT_SPEECH_NOTICE,
+    });
+    const noticeJoined = sections[0].bullets.join(" ");
+    // 2 段发言、总时长 16 秒。
+    expect(noticeJoined).toContain("2 段发言");
+    expect(noticeJoined).toContain("16 秒");
+  });
+
+  it("(c) stream_role 全 undefined 的降级场景 → fallback 仍抽到面试官发言", () => {
+    // 模拟 stream_role 缺失/非 teacher：降级场景已无学生发言，剩下的应视为面试官。
+    const transcript: TranscriptItem[] = [
+      {
+        utterance_id: "u1",
+        stream_role: undefined as unknown as TranscriptItem["stream_role"],
+        speaker_name: "Mr. Lee",
+        cluster_id: null,
+        decision: "auto",
+        text: "我们今天主要围绕你在系统设计与架构决策上的经验展开面试。",
+        start_ms: 0,
+        end_ms: 9000,
+        duration_ms: 9000,
+      },
+    ];
+    const sections = buildDegradedSummarySections({
+      transcript,
+      freeFormNotes: null,
+      notice: NO_STUDENT_SPEECH_NOTICE,
+    });
+    const pointsSection = sections.find((s) => s.topic === "面试官发言要点");
+    expect(pointsSection).toBeDefined();
+    expect(pointsSection!.bullets.join(" ")).toContain("系统设计");
+    // 统计也应基于 fallback 源计算（1 段发言）。
+    expect(sections[0].bullets.join(" ")).toContain("1 段发言");
   });
 });
 

@@ -213,6 +213,8 @@ const DEGRADED_BULLET_MAX_CHARS = 140;
 const DEGRADED_TEACHER_BULLET_MAX = 4;
 /** 一条发言要作为"有信息量的要点"至少需要的字符数（滤掉"早上好。"这类开场白）。 */
 const DEGRADED_MIN_UTTERANCE_CHARS = 12;
+/** 放宽门槛的兜底：teacher 要点为空时，退回取最长的这么多条发言（不设字数门槛）。 */
+const DEGRADED_TEACHER_FALLBACK_MAX = 2;
 /** session notes 摘要的字符上限。 */
 const DEGRADED_NOTES_MAX_CHARS = 400;
 
@@ -224,15 +226,42 @@ function clampText(text: string, maxChars: number): string {
 }
 
 /**
+ * 从降级场景的 transcript 里挑出"面试官候选发言"。
+ *
+ * 优先取 `stream_role === "teacher"` 的发言；但降级场景（无候选人发言）里，若
+ * 转写完全没有标为 teacher 的 utterance（stream_role 缺失 / mixed / 未来数据变化），
+ * 就把所有非空 utterance 视为面试官候选 —— 反正学生一侧没发言，剩下的就是面试官。
+ * 返回按时间序排好的原始文本数组（已折叠空白、去空串）。
+ */
+function collectInterviewerUtterances(transcript: TranscriptItem[]): string[] {
+  const textOf = (item: TranscriptItem): string =>
+    typeof item.text === "string" ? item.text.trim().replace(/\s+/g, " ") : "";
+  const byTime = (a: TranscriptItem, b: TranscriptItem): number =>
+    a.start_ms - b.start_ms || a.end_ms - b.end_ms;
+
+  const teacherItems = transcript.filter((item) => item.stream_role === "teacher");
+  // stream_role fallback：无任何 teacher 流 utterance 时，退回全部非空 utterance。
+  const source = teacherItems.length > 0 ? teacherItems : transcript;
+  return source
+    .slice()
+    .sort(byTime)
+    .map(textOf)
+    .filter((text) => text.length > 0);
+}
+
+/**
  * R2 降级 fork 专用 —— 用确定性拼接（不调用 LLM）重建 overview 的
  * `summary_sections`，让"只有面试官说话 / 无候选人发言"的场次也有一份能反映
  * 本场实际内容的概述，而不是那句通用占位。
  *
  * 组装内容：
  *   1. 首段：no-student-speech notice —— 明确告知本场未检测到候选人发言、
- *      无法生成个人维度评估（复用现有 notice 语义）。
- *   2. （若有）面试官/记录者发言要点：从 teacher 流挑若干条较长/有信息量的
- *      发言（按时间序，滤掉过短开场白），每条截断到合理长度。
+ *      无法生成个人维度评估。文案直接取调用方传入的 `notice`（三处降级 fork
+ *      已算好同一常量），并在有面试官发言时补一句本场发言的确定性统计
+ *      （共 N 段、总时长约 M 秒 —— 直接从 transcript 算，无 LLM）。
+ *   2. 面试官/记录者发言要点：优先取较长/有信息量的发言（按时间序，滤掉过短
+ *      开场白）；若过滤后为空，退回取最长的 1-2 条原始发言（去掉字数门槛），
+ *      避免"面试官只说了短句 + 没记 notes → summary 只剩 notice"的空洞退化。
  *   3. （若有）session notes 摘要：free-form notes 折叠成一段。
  *
  * evidence_ids 一律为空 `[]` —— 降级 summary 不挂 footnote，杜绝旧代码"按
@@ -249,24 +278,44 @@ export function buildDegradedSummarySections(params: {
 }): Array<{ topic: string; bullets: string[]; evidence_ids: string[] }> {
   const sections: Array<{ topic: string; bullets: string[]; evidence_ids: string[] }> = [];
 
-  // 1. notice —— 本场未检测到候选人发言（中文，与产品一致）。
+  // 面试官候选发言（含 stream_role fallback）。
+  const interviewerUtterances = collectInterviewerUtterances(params.transcript);
+
+  // 1. notice —— 本场未检测到候选人发言。首段 bullet 直接用调用方传入的 notice，
+  //    并在有面试官发言时补一句确定性统计（发言段数 + 总时长秒）。
+  const noticeBullets: string[] = [clampText(params.notice, DEGRADED_BULLET_MAX_CHARS)];
+  const teacherStreamItems = params.transcript.filter((item) => item.stream_role === "teacher");
+  const statSource = teacherStreamItems.length > 0 ? teacherStreamItems : params.transcript;
+  const speechCount = statSource.filter(
+    (item) => typeof item.text === "string" && item.text.trim().length > 0
+  ).length;
+  if (speechCount > 0) {
+    const totalMs = statSource.reduce(
+      (sum, item) => sum + Math.max(0, (item.end_ms ?? 0) - (item.start_ms ?? 0)),
+      0
+    );
+    const totalSeconds = Math.round(totalMs / 1000);
+    noticeBullets.push(`本场面试官共 ${speechCount} 段发言，总时长约 ${totalSeconds} 秒。`);
+  }
   sections.push({
     topic: "本场概述",
-    bullets: [
-      "本场未检测到候选人（学生）发言，无法生成个人维度评估。以下为本场面试官发言与记录要点。",
-    ],
+    bullets: noticeBullets,
     evidence_ids: [],
   });
 
-  // 2. 面试官/记录者发言要点（teacher 流，按时间序，滤掉过短开场白）。
-  const teacherBullets = params.transcript
-    .filter((item) => item.stream_role === "teacher")
-    .slice()
-    .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
-    .map((item) => (typeof item.text === "string" ? item.text.trim() : ""))
+  // 2. 面试官/记录者发言要点。优先较长/有信息量的发言；过滤后为空则退回最长 1-2 条。
+  let teacherBullets = interviewerUtterances
     .filter((text) => text.replace(/\s+/g, "").length >= DEGRADED_MIN_UTTERANCE_CHARS)
     .slice(0, DEGRADED_TEACHER_BULLET_MAX)
     .map((text) => clampText(text, DEGRADED_BULLET_MAX_CHARS));
+  if (teacherBullets.length === 0 && interviewerUtterances.length > 0) {
+    // 兜底：面试官只说了短句 —— 放宽门槛，取最长的 1-2 条，保证 summary 有实际发言。
+    teacherBullets = interviewerUtterances
+      .slice()
+      .sort((a, b) => b.length - a.length)
+      .slice(0, DEGRADED_TEACHER_FALLBACK_MAX)
+      .map((text) => clampText(text, DEGRADED_BULLET_MAX_CHARS));
+  }
   if (teacherBullets.length > 0) {
     sections.push({
       topic: "面试官发言要点",
