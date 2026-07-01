@@ -175,3 +175,53 @@ describe('CaptionPanel — live partial captions (R4)', () => {
     expect(screen.queryByTestId('partial-students')).not.toBeInTheDocument();
   });
 });
+
+/**
+ * R-I: each settled caption segment (one pause / one utterance) is shown on its
+ * own, prefixed with its session-relative start time (mm:ss). Consecutive
+ * same-speaker segments must NOT be merged — that would erase the pause
+ * boundaries and each utterance's individual start time.
+ */
+describe('CaptionPanel — per-utterance timestamps + no merge across pauses (R-I)', () => {
+  it('shows each settled segment start time as mm:ss', () => {
+    const segments: TranscriptSegment[] = [
+      seg({ id: 's1', role: 'students', speaker: 'S1', text: 'first line', startMs: 65000 }),
+    ];
+    render(
+      <CaptionPanel captions={[]} acsStatus="off" transcriptSegments={segments} />
+    );
+    expect(screen.getByText('01:05')).toBeInTheDocument();
+    expect(screen.getByText('first line')).toBeInTheDocument();
+  });
+
+  it('does NOT merge two consecutive same-speaker segments — each keeps its own timestamp', () => {
+    const segments: TranscriptSegment[] = [
+      seg({ id: 's1', role: 'students', speaker: 'S1', text: 'first utterance', startMs: 5000 }),
+      seg({ id: 's2', role: 'students', speaker: 'S1', text: 'second utterance', startMs: 12000 }),
+    ];
+    render(
+      <CaptionPanel captions={[]} acsStatus="off" transcriptSegments={segments} />
+    );
+    // Both utterances render as distinct lines.
+    expect(screen.getByText('first utterance')).toBeInTheDocument();
+    expect(screen.getByText('second utterance')).toBeInTheDocument();
+    // Each utterance shows its own start time (no merge into a single group).
+    expect(screen.getByText('00:05')).toBeInTheDocument();
+    expect(screen.getByText('00:12')).toBeInTheDocument();
+    // The speaker label appears once per utterance (two independent groups), not
+    // collapsed into a single merged group.
+    expect(screen.getAllByText('S1')).toHaveLength(2);
+  });
+
+  it('falls back to no timestamp when startMs is 0 for an ACS caption source', () => {
+    // ACS captions carry no session start offset; they must still render fine.
+    render(
+      <CaptionPanel
+        captions={[{ id: 'c1', speaker: 'Alice', text: 'ACS caption', timestamp: 0, language: 'en' }]}
+        acsStatus="receiving"
+        transcriptSegments={[]}
+      />
+    );
+    expect(screen.getByText('ACS caption')).toBeInTheDocument();
+  });
+});

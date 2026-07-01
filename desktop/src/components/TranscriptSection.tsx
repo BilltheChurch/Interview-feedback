@@ -1,6 +1,7 @@
 import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Search, Filter } from 'lucide-react';
+import { formatSessionTime } from '../lib/formatTime';
 
 /** Single transcript utterance from ResultV2. */
 export type TranscriptUtterance = {
@@ -41,13 +42,6 @@ const SPEAKER_BG = [
   'bg-rose-50',
   'bg-cyan-50',
 ];
-
-function formatTime(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
 
 /** Merge consecutive utterances from the same speaker into groups. */
 type UtteranceGroup = {
@@ -230,7 +224,7 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
               >
                 {/* Speaker header */}
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs text-ink-secondary font-mono">{formatTime(group.startMs)}</span>
+                  <span className="text-xs text-ink-secondary font-mono">{formatSessionTime(group.startMs)}</span>
                   <span className={`w-2 h-2 rounded-full ${SPEAKER_BG[group.speakerIndex]} ${SPEAKER_COLORS[group.speakerIndex]} ring-1 ring-current`} />
                   <span className={`text-sm font-medium ${SPEAKER_COLORS[group.speakerIndex]}`}>
                     {group.speaker}

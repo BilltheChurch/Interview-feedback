@@ -7,6 +7,7 @@ import type {
   TranscriptSegment,
   PartialTranscript,
 } from '../stores/sessionStore';
+import { formatSessionTime } from '../lib/formatTime';
 
 /** Map a stream role + raw speaker to the display label.
  *
@@ -47,25 +48,17 @@ const SPEAKER_DOT_COLORS = [
   'bg-cyan-400',
 ];
 
-/* ── Group consecutive captions by same speaker ── */
+/* ── Caption rows ──
+ *
+ *  R-I: one caption row = one utterance (one pause / speaker turn). We deliberately
+ *  do NOT merge consecutive same-speaker rows — merging would erase the pause
+ *  boundaries and each utterance's individual session start time. Each row carries
+ *  its own `startMs` (session-relative offset) so the panel can prefix it with an
+ *  mm:ss timestamp, matching the post-session TranscriptSection view. ACS/Teams
+ *  captions have no session offset, so `startMs` is left undefined and no timestamp
+ *  is shown for that source. */
 
-type CaptionGroup = {
-  speaker: string;
-  entries: CaptionEntry[];
-};
-
-function groupCaptions(captions: CaptionEntry[]): CaptionGroup[] {
-  const groups: CaptionGroup[] = [];
-  for (const cap of captions) {
-    const last = groups[groups.length - 1];
-    if (last && last.speaker === cap.speaker) {
-      last.entries.push(cap);
-    } else {
-      groups.push({ speaker: cap.speaker, entries: [cap] });
-    }
-  }
-  return groups;
-}
+type CaptionRow = CaptionEntry & { startMs?: number };
 
 /* ── CaptionPanel ── */
 
@@ -95,7 +88,8 @@ export function CaptionPanel({
   // realtime transcript segments (Speechmatics/DashScope downlink, A2/B5) as captions so
   // non-Teams meetings still get live captions.
   const usingAcs = acsCaptions.length > 0;
-  const captions = useMemo<CaptionEntry[]>(() => {
+  const captions = useMemo<CaptionRow[]>(() => {
+    // ACS captions carry no session-relative start offset → no mm:ss prefix.
     if (usingAcs) return acsCaptions;
     return transcriptSegments.map((seg) => ({
       id: seg.id,
@@ -106,6 +100,8 @@ export function CaptionPanel({
       text: seg.text,
       timestamp: seg.tsMs,
       language: '',
+      // R-I: session-relative start of this utterance, rendered as an mm:ss prefix.
+      startMs: seg.startMs,
     }));
   }, [usingAcs, acsCaptions, transcriptSegments]);
 
@@ -138,7 +134,6 @@ export function CaptionPanel({
     return map;
   }, [captions, partialRows]);
 
-  const groups = useMemo(() => groupCaptions(captions), [captions]);
 
   // Auto-scroll to bottom when new captions OR partials arrive (only if already at bottom).
   // Partials update in place very frequently, so their text (not just count) is a dep.
@@ -228,26 +223,34 @@ export function CaptionPanel({
           </div>
         ) : (
           <>
-          {groups.map((group) => {
-            const colorIdx = speakerColorMap.get(group.speaker) ?? 0;
+          {/* R-I: one row per utterance (one pause / turn). No cross-pause merging —
+              each keeps its own speaker label and its own mm:ss start time. */}
+          {captions.map((cap) => {
+            const colorIdx = speakerColorMap.get(cap.speaker) ?? 0;
             const dotColor = SPEAKER_DOT_COLORS[colorIdx];
             const textColor = SPEAKER_COLORS[colorIdx].split(' ')[0];
+            // Only the universal transcript path carries a session start offset; ACS
+            // captions leave startMs undefined → no timestamp prefix.
+            const showTime = cap.startMs !== undefined;
 
             return (
-              <div key={`${group.speaker}-${group.entries[0].id}`} className="flex flex-col gap-0.5">
-                {/* Speaker name */}
+              <div key={cap.id} className="flex flex-col gap-0.5">
+                {/* Speaker name + session start time */}
                 <div className="flex items-center gap-1 mt-0.5">
                   <span className={`w-1.5 h-1.5 rounded-full ${dotColor} shrink-0`} />
                   <span className={`text-xs font-medium ${textColor} truncate`}>
-                    {group.speaker}
+                    {cap.speaker}
                   </span>
+                  {showTime && (
+                    <span className="text-[10px] text-ink-tertiary font-mono tabular-nums shrink-0 ml-auto">
+                      {formatSessionTime(cap.startMs!)}
+                    </span>
+                  )}
                 </div>
-                {/* Grouped caption texts */}
-                {group.entries.map((entry) => (
-                  <p key={entry.id} className="text-xs text-ink-secondary leading-relaxed pl-3">
-                    {entry.text}
-                  </p>
-                ))}
+                {/* Utterance text */}
+                <p className="text-xs text-ink-secondary leading-relaxed pl-3">
+                  {cap.text}
+                </p>
               </div>
             );
           })}
