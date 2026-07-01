@@ -280,6 +280,64 @@ describe('EvaluationRubricEditor', () => {
     expect(lastArg.dimensions[0].key).toBe('leadership');
   });
 
+  /* ── 选中项显示（selectedTemplateId state 修复）── */
+
+  it('选择 template 后下拉框显示该 template 名（value 变为其 id，不再是占位符）', async () => {
+    const stored = [
+      {
+        id: 'tpl_show',
+        name: 'My Show Template',
+        interview_type: 'technical',
+        dimensions: [
+          { key: 'k1', label_en: 'D1', label_zh: '', description: 'd', weight: 1 },
+          { key: 'k2', label_en: 'D2', label_zh: '', description: 'd', weight: 2 },
+          { key: 'k3', label_en: 'D3', label_zh: '', description: 'd', weight: 3 },
+        ],
+      },
+    ];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+
+    const user = userEvent.setup();
+    function Harness() {
+      const [val, setVal] = useState(academicValue());
+      return <EvaluationRubricEditor value={val} onChange={setVal} />;
+    }
+    render(<Harness />);
+
+    const templateSelect = screen.getByLabelText(/saved template/i) as HTMLSelectElement;
+    // 选择前：下拉 value 为空（占位符）
+    expect(templateSelect.value).toBe('');
+
+    await user.selectOptions(templateSelect, 'tpl_show');
+
+    // 选择后：下拉 value 应为 template id，select 显示模板名而非占位符
+    expect(templateSelect.value).toBe('tpl_show');
+    // 当前选中 option 的文本应为模板名
+    const selectedOption = templateSelect.options[templateSelect.selectedIndex];
+    expect(selectedOption.text).toBe('My Show Template');
+  });
+
+  it('另存新 template 后下拉框自动选中新模板', async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [val, setVal] = useState(academicValue());
+      return <EvaluationRubricEditor value={val} onChange={setVal} />;
+    }
+    render(<Harness />);
+
+    // 另存为
+    await user.click(screen.getByRole('button', { name: /save as template/i }));
+    const nameInput = await screen.findByPlaceholderText(/template name/i);
+    await user.type(nameInput, 'Auto Select Tpl');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    // 保存后下拉应自动选中新模板
+    const templateSelect = screen.getByLabelText(/saved template/i) as HTMLSelectElement;
+    expect(templateSelect.value).not.toBe('');
+    const selectedOption = templateSelect.options[templateSelect.selectedIndex];
+    expect(selectedOption.text).toBe('Auto Select Tpl');
+  });
+
   /* ── Rendering the English labels ── */
 
   it('renders only English (no CJK) in the description inputs for the default academic preset (D6)', () => {

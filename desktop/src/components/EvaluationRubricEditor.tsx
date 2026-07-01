@@ -180,6 +180,8 @@ export function EvaluationRubricEditor({ value, onChange }: EvaluationRubricEdit
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [templateError, setTemplateError] = useState('');
+  // 记录当前已选中的 template id，驱动受控 <select> 显示选中项名称
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
 
   /* ── Type pill selection ── */
 
@@ -225,6 +227,8 @@ export function EvaluationRubricEditor({ value, onChange }: EvaluationRubricEdit
     if (!id) return;
     const tpl = templates.find((t) => t.id === id);
     if (!tpl) return;
+    // 同步更新选中项 state，让受控 <select> 显示 template 名称而非占位符
+    setSelectedTemplateId(id);
     // Lazy migration: backfill keys/weights for legacy entries on load.
     onChange({
       interviewType: tpl.interview_type,
@@ -253,6 +257,8 @@ export function EvaluationRubricEditor({ value, onChange }: EvaluationRubricEdit
     const next = [...templates, tpl];
     writeTemplates(next);
     setTemplates(next);
+    // 另存为成功后自动选中新模板，下拉立即反映
+    setSelectedTemplateId(tpl.id);
     setSavingTemplate(false);
   };
 
@@ -354,7 +360,7 @@ export function EvaluationRubricEditor({ value, onChange }: EvaluationRubricEdit
             <select
               id="saved-template-select"
               aria-label="Saved template"
-              value=""
+              value={selectedTemplateId}
               onChange={(e) => applyTemplate(e.target.value)}
               disabled={templates.length === 0}
               className="
