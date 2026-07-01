@@ -313,6 +313,11 @@ export function setupWebSocketPair(
     clearTimeout(authTimer);
     ctx.unregisterIngestSocket(connectionRole, server);
     if (ctx.asrRealtimeEnabled()) {
+      // gracefulFinish=true (+ sessionId) so a residual endpointing buffer is flushed on an
+      // instantaneous socket drop. Intentional: the buffer is in-memory DO state — if the DO is
+      // evicted it is gone, so flushing the already-recognized words here is strictly better than
+      // losing them. This is a hard socket close (no EndOfStream→EndOfTranscript round-trip), so
+      // the explicit flush inside closeRealtimeAsrSession is the only path that saves them.
       ctx
         .closeRealtimeAsrSession(connectionRole, "ingest-ws-closed", false, true, sessionId)
         .then(() => ctx.refreshAsrStreamMetrics(sessionId, connectionRole))

@@ -60,6 +60,7 @@ import {
   resolveSttUtteranceGapMs,
   resolveSttSilenceFlushMs,
   resolveSttMaxUtteranceSilenceMs,
+  resolveSttMaxUtteranceMs,
   resolvePartialThrottleMs,
   joinTranscriptPieces,
 } from "./config";
@@ -1118,6 +1119,18 @@ export async function handleSpeechmaticsMessage(
   // STT_SILENCE_FLUSH_MS this settles the trailing sentence (a pure pause otherwise never
   // reaches the gap-flush path, which needs a subsequent final to compare against).
   armSilenceFlushTimer(sessionId, streamRole, ctx);
+
+  // Duration cap (last-resort backstop). A fluent unpunctuated monologue — the primary CJK case,
+  // where Speechmatics cmn_en emits no sentence-final marks and breaths stay under the silence
+  // backstop, with no speaker change — otherwise accumulates into ONE giant utterance forever.
+  // Once the accumulated word-time span reaches STT_MAX_UTTERANCE_MS, force-flush at THIS final
+  // boundary (never mid-word) so the monologue is cut into segments. The subsequent final starts
+  // a fresh buffer (new segment) and arms its own timer. flushSttBuffer is idempotent, so this is
+  // safe even if the silence timer just fired.
+  const active = runtime.sttBuffer;
+  if (active && active.endMs - active.startMs >= resolveSttMaxUtteranceMs(ctx.env)) {
+    await flushSttBuffer(sessionId, streamRole, ctx);
+  }
 }
 
 /**

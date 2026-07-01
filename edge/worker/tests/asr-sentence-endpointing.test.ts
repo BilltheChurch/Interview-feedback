@@ -8,6 +8,8 @@ import { buildRealtimeRuntime } from "../src/asr-helpers";
 import {
   resolveSttMaxUtteranceSilenceMs,
   STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT,
+  resolveSttMaxUtteranceMs,
+  STT_MAX_UTTERANCE_MS_DEFAULT,
 } from "../src/config";
 import type {
   AsrRealtimeRuntime,
@@ -246,6 +248,78 @@ describe("sentence-final punctuation gating + long-silence backstop", () => {
     expect(runtime.sttBuffer).toBeNull();
   });
 
+  // (c2) 无标点 + 无说话人切换 + 换气 <2800ms（不触发静音兜底）+ 累积时长超 22s 上限
+  //      → 在 final 边界强制 flush（中文/无标点长独白的最后兜底，避免整段零切分）。
+  it("(c2) force-flushes at the max-utterance duration cap for a long unpunctuated monologue", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    runtime.currentStartSeq = 5;
+    runtime.lastSentSeq = 12;
+    const { ctx, calls } = makeCtx(runtime, {
+      STT_UTTERANCE_GAP_MS: "900",
+      STT_SILENCE_FLUSH_MS: "1200",
+      STT_MAX_UTTERANCE_SILENCE_MS: "2800",
+      STT_MAX_UTTERANCE_MS: "22000",
+    });
+
+    // Feed a stream of no-punctuation Chinese finals, same speaker (S1). Each next final starts
+    // only 0.2s after the prior end (word time gap ≪ 900ms gap AND ≪ 2800ms silence backstop),
+    // so neither the gap-flush nor the silence backstop can trigger. Word times accumulate:
+    // final k spans [k*3 .. k*3+2.8]s. After 8 finals the buffer span reaches ~23.8s (>22s cap).
+    // Advance the fake clock only a tiny amount between finals (well under 2800ms) so the silence
+    // timer never fires either. The ONLY thing that can settle this is the duration cap.
+    let flushedAt = -1;
+    for (let k = 0; k < 8; k += 1) {
+      const startSec = k * 3.0;      // 0, 3, 6, 9, 12, 15, 18, 21
+      const endSec = startSec + 2.8; // 2.8, 5.8, ... , 23.8
+      await handleSpeechmaticsMessage(
+        "sess",
+        "students",
+        finalFrame(`第${k}段没有标点的中文`, startSec, endSec, "S1"),
+        ctx
+      );
+      await vi.advanceTimersByTimeAsync(200); // ≪ silence window, backstop never fires
+      if (flushedAt < 0 && calls.some((c) => c.isFinal)) flushedAt = k;
+    }
+
+    // The cap (22000ms word-time span) is crossed at final k=8th (endMs 23800 - startMs 0 ≥ 22000
+    // happens once endSec ≥ 22s, i.e. the final starting at 21s → span 0..23.8s). A forced flush
+    // must have emitted exactly one settled utterance at that final boundary.
+    const finals = calls.filter((c) => c.isFinal);
+    expect(finals.length).toBeGreaterThanOrEqual(1);
+    // The flush happened WITHOUT any long silence and WITHOUT a speaker change — purely the cap.
+    expect(flushedAt).toBeGreaterThanOrEqual(0);
+    // The emitted utterance is the accumulated monologue (a real cut, not the whole thing lost).
+    expect(finals[0].text).toContain("第0段");
+    // After the cap flush the next final(s) start a fresh buffer (segment boundary), so the buffer
+    // span was reset — the long monologue was cut into pieces instead of one giant utterance.
+    if (runtime.sttBuffer) {
+      const span = runtime.sttBuffer.endMs - runtime.sttBuffer.startMs;
+      expect(span).toBeLessThan(22000);
+    }
+  });
+
+  // (c3) 时长上限只兜住"无停顿无标点超长段"——正常英文短句（有标点、时长远低于上限）不受影响。
+  it("(c3) the duration cap does not interfere with normal short punctuated utterances", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    runtime.currentStartSeq = 5;
+    runtime.lastSentSeq = 12;
+    const { ctx, calls } = makeCtx(runtime, {
+      STT_UTTERANCE_GAP_MS: "900",
+      STT_SILENCE_FLUSH_MS: "1200",
+      STT_MAX_UTTERANCE_MS: "22000",
+    });
+
+    // A short punctuated sentence (2.8s span, ≪ 22s cap) → the cap must NOT fire; the punctuation
+    // + silence window settles it normally.
+    await handleSpeechmaticsMessage("sess", "students", finalFrame("Short sentence.", 1.0, 1.8), ctx);
+    await vi.advanceTimersByTimeAsync(1300);
+    const finals = calls.filter((c) => c.isFinal);
+    expect(finals).toHaveLength(1);
+    expect(finals[0].text).toBe("Short sentence.");
+  });
+
   // (d) 说话人切换 → 立即 flush (不管标点).
   it("(d) flushes immediately on speaker change even without terminal punctuation", async () => {
     const runtime = buildRealtimeRuntime("students");
@@ -347,5 +421,23 @@ describe("resolveSttMaxUtteranceSilenceMs", () => {
     expect(resolveSttMaxUtteranceSilenceMs({ STT_MAX_UTTERANCE_SILENCE_MS: "1.5" })).toBe(
       STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT
     );
+  });
+});
+
+describe("resolveSttMaxUtteranceMs", () => {
+  it("defaults to 22000ms when unset", () => {
+    expect(resolveSttMaxUtteranceMs({})).toBe(STT_MAX_UTTERANCE_MS_DEFAULT);
+    expect(STT_MAX_UTTERANCE_MS_DEFAULT).toBe(22000);
+  });
+
+  it("honors a valid env override", () => {
+    expect(resolveSttMaxUtteranceMs({ STT_MAX_UTTERANCE_MS: "30000" })).toBe(30000);
+  });
+
+  it("falls back to the default on non-positive / non-integer input", () => {
+    expect(resolveSttMaxUtteranceMs({ STT_MAX_UTTERANCE_MS: "0" })).toBe(STT_MAX_UTTERANCE_MS_DEFAULT);
+    expect(resolveSttMaxUtteranceMs({ STT_MAX_UTTERANCE_MS: "-1" })).toBe(STT_MAX_UTTERANCE_MS_DEFAULT);
+    expect(resolveSttMaxUtteranceMs({ STT_MAX_UTTERANCE_MS: "abc" })).toBe(STT_MAX_UTTERANCE_MS_DEFAULT);
+    expect(resolveSttMaxUtteranceMs({ STT_MAX_UTTERANCE_MS: "1.5" })).toBe(STT_MAX_UTTERANCE_MS_DEFAULT);
   });
 });

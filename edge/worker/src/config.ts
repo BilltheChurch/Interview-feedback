@@ -199,7 +199,11 @@ export function resolveSttSilenceFlushMs(env: Pick<Env, "STT_SILENCE_FLUSH_MS">)
  *  is the unconditional fallback: once the silence since the last final reaches this budget,
  *  the buffer is flushed regardless of punctuation, so a long monologue still definitively
  *  settles. ~2.8s ≫ STT_SILENCE_FLUSH_MS (1.2s) so ordinary thinking pauses keep accumulating
- *  while a genuine end-of-turn pause forces a flush. Overridable via STT_MAX_UTTERANCE_SILENCE_MS. */
+ *  while a genuine end-of-turn pause forces a flush. Overridable via STT_MAX_UTTERANCE_SILENCE_MS.
+ *  INVARIANT: this backstop MUST be set significantly greater than STT_SILENCE_FLUSH_MS. If it
+ *  ever falls at/below the short window, the two-level silence timer collapses and the
+ *  sentence-final punctuation gate degrades (an unpunctuated buffer would flush on the short pause
+ *  again — the exact carving-mid-phrase bug this change fixes). */
 export const STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT = 2800;
 
 /**
@@ -215,6 +219,34 @@ export function resolveSttMaxUtteranceSilenceMs(
   if (!raw) return STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT;
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) return STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT;
+  return value;
+}
+
+/** Default max single-utterance duration (ms) — the hard length cap that force-flushes an
+ *  utterance at a final boundary regardless of punctuation or silence. This is the LAST-RESORT
+ *  backstop for a "no pause, no punctuation" super-long segment: a Chinese monologue spoken
+ *  fluently (breaths < STT_MAX_UTTERANCE_SILENCE_MS, no speaker change) carries no CJK
+ *  sentence-final marks and never triggers the silence backstop, so without this cap it would
+ *  accumulate into ONE giant utterance with zero intermediate cuts — violating the user's
+ *  "one stretch splits into at most 2–3 segments" expectation (CJK is the primary scenario).
+ *  22s is a deliberate trade-off: ~30s speech ≈ 1–2 segments, ~60s ≈ 3, ~90s ≈ 4 — near the
+ *  "2–3 segments" target (real speech has pauses, so actual segment counts run lower). English
+ *  hits sentence-final punctuation first, real Chinese hits a > backstop pause first — both
+ *  settle well before 22s; only a continuous unpunctuated monologue reaches this cap.
+ *  Overridable via STT_MAX_UTTERANCE_MS. */
+export const STT_MAX_UTTERANCE_MS_DEFAULT = 22000;
+
+/**
+ * Resolve the max single-utterance duration cap (ms) from the environment. Measured on the
+ * Speechmatics word-time span (buf.endMs - buf.startMs). When the accumulated span reaches this
+ * cap after buffering a final, the utterance is force-flushed at that final boundary (never mid-
+ * word). Non-positive or non-integer input falls back to the default (22000).
+ */
+export function resolveSttMaxUtteranceMs(env: Pick<Env, "STT_MAX_UTTERANCE_MS">): number {
+  const raw = (env.STT_MAX_UTTERANCE_MS ?? "").trim();
+  if (!raw) return STT_MAX_UTTERANCE_MS_DEFAULT;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) return STT_MAX_UTTERANCE_MS_DEFAULT;
   return value;
 }
 
@@ -768,6 +800,11 @@ export interface Env {
    *  Chinese / unpunctuated long monologue still settles). Parsed by
    *  resolveSttMaxUtteranceSilenceMs(); defaults to 2800. */
   STT_MAX_UTTERANCE_SILENCE_MS?: string;
+  /** Hard duration cap (ms) on a single accumulated utterance (Speechmatics word-time span).
+   *  Force-flushes at a final boundary regardless of punctuation/silence — the last-resort cut
+   *  for a continuous unpunctuated monologue (fluent CJK with sub-backstop breaths). Parsed by
+   *  resolveSttMaxUtteranceMs(); defaults to 22000. */
+  STT_MAX_UTTERANCE_MS?: string;
   /** Maximum number of speakers for Speechmatics diarization (students stream only).
    *  Parsed by resolveMaxSpeakers(); values < 2 or non-integer are treated as unset
    *  (Speechmatics enforces a minimum of 2; undefined lets it auto-detect). Default: "6". */
