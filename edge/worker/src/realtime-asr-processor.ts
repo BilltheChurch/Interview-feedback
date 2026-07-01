@@ -56,8 +56,10 @@ import {
   resolveMaxSpeakers,
   resolveSpeechmaticsOperatingPoint,
   resolveSpeechmaticsMaxDelay,
+  resolveSpeechmaticsPunctuation,
   resolveSttUtteranceGapMs,
   resolvePartialThrottleMs,
+  joinTranscriptPieces,
 } from "./config";
 import type {
   Env,
@@ -950,6 +952,9 @@ async function connectSpeechmaticsRealtime(
     maxDelaySeconds: resolveSpeechmaticsMaxDelay(ctx.env),
     sampleRate: TARGET_SAMPLE_RATE,
     maxSpeakers: isDiarization ? resolveMaxSpeakers(ctx.env) : undefined,
+    // R-H: request punctuation (。？！， for cmn/cmn_en). undefined when the env gate
+    // disables it → punctuation_overrides omitted, never risking an invalid_config reject.
+    punctuationSensitivity: resolveSpeechmaticsPunctuation(ctx.env),
   })));
 
   const timeoutMs = parseTimeoutMs(ctx.env.ASR_TIMEOUT_MS ?? "45000");
@@ -1139,7 +1144,10 @@ async function flushSttBuffer(
   const buf = runtime.sttBuffer;
   runtime.sttBuffer = null;
   if (!buf || buf.texts.length === 0) return;
-  const text = buf.texts.join(" ").replace(/\s+/g, " ").trim();
+  // R-H: CJK-aware join — plain ASCII-space join inserted phantom spaces into Chinese
+  // ("你好 世界"). joinTranscriptPieces picks the separator per boundary (empty across a
+  // CJK/punctuation boundary, single space between Latin words).
+  const text = joinTranscriptPieces(buf.texts);
   if (!text) return;
   await emitRealtimeUtterance(sessionId, streamRole, text, ctx, buf.speaker);
 }

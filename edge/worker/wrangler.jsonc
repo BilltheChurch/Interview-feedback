@@ -37,6 +37,15 @@
     "SPEECHMATICS_OPERATING_POINT": "enhanced",
     "SPEECHMATICS_MAX_DELAY": "1.0",
     "SPEECHMATICS_LANGUAGE": "cmn_en",
+    // R-H: request Speechmatics punctuation so cmn/cmn_en captions get 。？！， etc.
+    // Every Speechmatics language pack supports punctuation and it is on by default; we
+    // request it explicitly with permitted_marks=["all"] (the documented default value,
+    // valid for every language, so it never triggers invalid_config) + a tunable
+    // sensitivity (0..1, higher → more marks). Set SPEECHMATICS_PUNCTUATION to a falsy
+    // value ("false"/"0"/"off") to omit punctuation_overrides entirely (safe rollback —
+    // Speechmatics still applies its on-by-default punctuation). resolveSpeechmaticsPunctuation.
+    "SPEECHMATICS_PUNCTUATION": "true",
+    "SPEECHMATICS_PUNCTUATION_SENSITIVITY": "0.5",
     // R-D: silence gap (ms) between consecutive finals that flushes the accumulated
     // utterance. Raised 500 → 900: the live partial line now types in word-by-word
     // (Desktop typewriter reveal), so "fast to appear" no longer needs a tight flush gap;

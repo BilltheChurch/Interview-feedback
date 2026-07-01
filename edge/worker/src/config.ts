@@ -114,6 +114,42 @@ export function resolveSpeechmaticsMaxDelay(env: Pick<Env, "SPEECHMATICS_MAX_DEL
   return Math.min(SPEECHMATICS_MAX_DELAY_MAX, Math.max(SPEECHMATICS_MAX_DELAY_MIN, value));
 }
 
+/** Default Speechmatics punctuation sensitivity (0..1). Higher → more punctuation.
+ *  0.5 matches the Speechmatics server-side default. */
+export const SPEECHMATICS_PUNCTUATION_SENSITIVITY_DEFAULT = 0.5;
+
+/**
+ * Resolve the Speechmatics punctuation setting from the environment (R-H).
+ *
+ * Returns a sensitivity in [0, 1] when punctuation should be REQUESTED (the caller then
+ * sends punctuation_overrides = { permitted_marks: ["all"], sensitivity }), or undefined
+ * when punctuation should be OMITTED entirely (safe rollback — no punctuation_overrides
+ * field is sent, so StartRecognition can never be rejected over it).
+ *
+ * Punctuation is on by default (every Speechmatics language pack, incl. cmn/cmn_en,
+ * supports it) — so the gate defaults to enabled. Set SPEECHMATICS_PUNCTUATION to a
+ * falsy value ("false"/"0"/"off"/"no") to disable. SPEECHMATICS_PUNCTUATION_SENSITIVITY
+ * overrides the sensitivity; out-of-range or non-numeric input falls back to the default.
+ *
+ * NB: permitted_marks is always ["all"], the documented default value that is valid for
+ * every language — we never enumerate specific marks, which avoids any risk of listing a
+ * mark a given language pack rejects (invalid_config).
+ */
+export function resolveSpeechmaticsPunctuation(
+  env: Pick<Env, "SPEECHMATICS_PUNCTUATION" | "SPEECHMATICS_PUNCTUATION_SENSITIVITY">
+): number | undefined {
+  const gate = (env.SPEECHMATICS_PUNCTUATION ?? "").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(gate)) return undefined;
+
+  const raw = (env.SPEECHMATICS_PUNCTUATION_SENSITIVITY ?? "").trim();
+  if (!raw) return SPEECHMATICS_PUNCTUATION_SENSITIVITY_DEFAULT;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    return SPEECHMATICS_PUNCTUATION_SENSITIVITY_DEFAULT;
+  }
+  return value;
+}
+
 /** Default silence gap (ms) between consecutive finals that ends the current utterance.
  *  R-D: raised from 500 → 900. Now that the live partial line reveals words character-by-
  *  character (R-D typewriter), "fast to appear" no longer depends on a tight flush gap, so
@@ -645,6 +681,14 @@ export interface Env {
   /** R6: Speechmatics final-transcript latency budget in seconds. Parsed by
    *  resolveSpeechmaticsMaxDelay(); clamped to [0.7, 4]; defaults to 1.0. */
   SPEECHMATICS_MAX_DELAY?: string;
+  /** R-H: gate for requesting Speechmatics punctuation. Any falsy value
+   *  ("false"/"0"/"off"/"no") omits punctuation_overrides entirely (safe rollback);
+   *  otherwise punctuation is requested. Parsed by resolveSpeechmaticsPunctuation();
+   *  defaults to enabled. */
+  SPEECHMATICS_PUNCTUATION?: string;
+  /** R-H: Speechmatics punctuation sensitivity (0..1, higher → more marks). Parsed by
+   *  resolveSpeechmaticsPunctuation(); out-of-range/non-numeric falls back to 0.5. */
+  SPEECHMATICS_PUNCTUATION_SENSITIVITY?: string;
   /** R4/R-D: silence gap (ms) between consecutive finals that flushes the accumulated
    *  utterance. Parsed by resolveSttUtteranceGapMs(); defaults to 900. */
   STT_UTTERANCE_GAP_MS?: string;
@@ -1252,6 +1296,85 @@ export function stitchTextByTokenOverlap(baseText: string, nextText: string, min
   const suffix = nextWords.slice(overlap).join(" ").trim();
   if (!suffix) return baseText.trim();
   return `${baseText.trim()} ${suffix}`.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * R-H: Join word/utterance pieces into one string with a CJK-aware separator.
+ *
+ * Speechmatics emits word-level finals; the endpointing layer accumulates several into
+ * one utterance. Joining with a plain ASCII space corrupts Chinese — CJK text has no
+ * inter-word spaces, so "你好" + " " + "世界" becomes "你好 世界" (wrong, and it also hides
+ * sentence structure). Conversely, Latin words DO need a space.
+ *
+ * Rule per boundary between consecutive non-empty pieces: insert a single space ONLY when
+ * both the left piece's last visible char and the right piece's first visible char are
+ * "spacing" (ASCII letter/digit and similar). If either side is CJK, or the right side
+ * starts with punctuation (ASCII or full-width), use no separator. This keeps Chinese
+ * contiguous ("你好世界" / "你好。"), attaches punctuation tightly ("hello."), and preserves
+ * normal English spacing ("hello world"). Each piece's own internal whitespace is
+ * collapsed to single spaces first.
+ */
+export function joinTranscriptPieces(pieces: string[]): string {
+  const cleaned = pieces
+    .map((p) => (p ?? "").replace(/\s+/g, " ").trim())
+    .filter((p) => p.length > 0);
+  if (cleaned.length === 0) return "";
+
+  let out = cleaned[0];
+  for (let i = 1; i < cleaned.length; i += 1) {
+    const prevChar = out[out.length - 1];
+    const next = cleaned[i];
+    const nextChar = next[0];
+    out += needsSpaceBetween(prevChar, nextChar) ? " " + next : next;
+  }
+  return out;
+}
+
+/** True when a single ASCII space belongs between two boundary characters (R-H). */
+function needsSpaceBetween(left: string, right: string): boolean {
+  // No space before any punctuation (ASCII or CJK full-width): "hello." / "你好。".
+  if (isPunctuationChar(right)) return false;
+  // After ASCII punctuation, English wants a space before the next spacing word
+  // ("hello, world") — but CJK full-width punctuation never takes one ("你好，世界").
+  if (isAsciiPunctuationChar(left)) return isSpacingChar(right);
+  if (isPunctuationChar(left)) return false; // CJK punctuation → attach tightly.
+  // Space only when BOTH sides are spacing (Latin/digit) chars. Any CJK side → no space.
+  return isSpacingChar(left) && isSpacingChar(right);
+}
+
+/** A "spacing" char is one whose neighbours are normally space-separated (Latin/digit). */
+function isSpacingChar(ch: string): boolean {
+  if (!ch) return false;
+  if (isCjkChar(ch)) return false;
+  if (isPunctuationChar(ch)) return false;
+  return true;
+}
+
+/** CJK ideographs + common CJK ranges (Chinese chars, incl. extensions & compat forms). */
+function isCjkChar(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return (
+    (code >= 0x3400 && code <= 0x9fff) || // CJK Unified Ideographs (+ Ext A)
+    (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
+    (code >= 0x20000 && code <= 0x2ffff) // CJK Unified Ideographs Ext B–F
+  );
+}
+
+/** ASCII sentence/clause punctuation that attaches without a leading space. */
+function isAsciiPunctuationChar(ch: string): boolean {
+  return /[.,!?;:)\]}]/.test(ch);
+}
+
+/** ASCII and CJK full-width punctuation that should attach without a leading space. */
+function isPunctuationChar(ch: string): boolean {
+  if (!ch) return false;
+  if (isAsciiPunctuationChar(ch)) return true;
+  const code = ch.codePointAt(0) ?? 0;
+  // CJK Symbols and Punctuation (。、〈…) + full-width forms (，！？；：）).
+  return (
+    (code >= 0x3000 && code <= 0x303f) ||
+    (code >= 0xff00 && code <= 0xffef)
+  );
 }
 
 export function mergeUtterances(utterances: UtteranceRaw[]): UtteranceMerged[] {

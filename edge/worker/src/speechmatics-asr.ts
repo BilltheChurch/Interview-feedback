@@ -41,6 +41,12 @@ export interface SpeechmaticsConfig {
   /** Maximum number of speakers for diarization. Speechmatics enforces a minimum of 2;
    *  undefined lets Speechmatics auto-detect. Only applied when diarization is true. */
   maxSpeakers?: number;
+  /** R-H: punctuation sensitivity (0..1). When set, request punctuation_overrides with
+   *  permitted_marks=["all"] + this sensitivity (higher → more marks). When undefined,
+   *  the punctuation_overrides field is omitted entirely (safe rollback — Speechmatics
+   *  still applies its own on-by-default punctuation, and StartRecognition can never be
+   *  rejected over the field). Resolved from env via resolveSpeechmaticsPunctuation. */
+  punctuationSensitivity?: number;
 }
 
 export const DEFAULT_SPEECHMATICS_CONFIG: Omit<SpeechmaticsConfig, "language" | "diarization"> = {
@@ -63,6 +69,16 @@ export function buildStartRecognition(cfg: SpeechmaticsConfig): Record<string, u
   // omitting it lets Speechmatics apply its own default ("standard").
   if (cfg.operatingPoint !== undefined) {
     transcription_config.operating_point = cfg.operatingPoint;
+  }
+  // R-H: request punctuation explicitly so cmn/cmn_en captions get 。？！， etc.
+  // permitted_marks=["all"] is the documented default value (valid for every language,
+  // so it never triggers invalid_config). Only sent when a sensitivity is provided —
+  // undefined omits the field entirely (safe rollback via SPEECHMATICS_PUNCTUATION).
+  if (cfg.punctuationSensitivity !== undefined) {
+    transcription_config.punctuation_overrides = {
+      permitted_marks: ["all"],
+      sensitivity: cfg.punctuationSensitivity,
+    };
   }
   // Only request diarization when wanted — the teacher channel is single-speaker and
   // enabling it there would split the interviewer into phantom S1/S2 (§9.3.4).
