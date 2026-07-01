@@ -1,3 +1,5 @@
+import { sanitizeTimeRange } from "./finalize_v2";
+
 type AnalysisEventType = "support" | "interrupt" | "summary" | "decision" | "silence";
 
 interface TranscriptUtterance {
@@ -177,7 +179,15 @@ export function analyzeEventsLocally(params: {
     const text = memo.text.trim();
     if (!text) continue;
     if (memo.type !== "observation" && memo.type !== "decision") continue;
-    const range = memo.anchors?.time_range_ms ?? [memo.created_at_ms, memo.created_at_ms];
+    // memo.created_at_ms is a wall-clock epoch (~1.7e12 ms), NOT a session-relative
+    // offset. Using it verbatim as an event start/end leaks an astronomical timestamp
+    // into the synthesis payload (same class as the memo-evidence leak fixed by F2 in
+    // finalize_v2.ts). Prefer the memo's session-relative anchor when present, else
+    // collapse to [0, 0]; then sanitize with the shared 24h-bound guard so any
+    // epoch-scale anchor value is clamped too. Mirrors finalize_v2.ts memo-note path.
+    const range: [number, number] = sanitizeTimeRange(
+      memo.anchors?.time_range_ms ?? [0, 0]
+    );
     pushEvent(memo.type === "decision" ? "decision" : "summary", {
       utterance_id: memo.memo_id,
       stream_role: "teacher",
