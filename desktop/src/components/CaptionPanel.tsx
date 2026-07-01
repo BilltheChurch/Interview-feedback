@@ -65,7 +65,11 @@ export function CaptionPanel({
     if (acsCaptions.length > 0) return acsCaptions;
     return transcriptSegments.map((seg) => ({
       id: seg.id,
-      speaker: seg.speaker ?? (seg.role === 'teacher' ? 'Interviewer' : 'Candidate'),
+      // The teacher stream has diarization off and is, by definition, the
+      // interviewer — so force "Interviewer" and ignore seg.speaker (which the
+      // Worker may have mislabelled as a student, e.g. a single-entry roster).
+      // Only student segments trust the diarization-derived speaker label.
+      speaker: seg.role === 'teacher' ? 'Interviewer' : (seg.speaker ?? 'Candidate'),
       text: seg.text,
       timestamp: seg.tsMs,
       language: '',

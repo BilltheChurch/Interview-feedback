@@ -28,6 +28,14 @@ export function resolveTeacherIdentity(
   const configTeamsName = valueAsString(config.teams_interviewer_name);
   const configInterviewerName = valueAsString(config.interviewer_name);
 
+  // The roster (teams_participants) lists the *candidates* only — the
+  // interviewer is tracked separately via interviewer_name /
+  // teams_interviewer_name. The teacher stream must therefore never be
+  // resolved to a roster member unless a configured interviewer name
+  // explicitly matches one. Only bind to a roster entry on an explicit match;
+  // otherwise fall through to the preconfig / extract / "teacher" fallbacks.
+  // (R1: previously a single-entry roster was blindly returned as the teacher,
+  // mislabelling the interviewer as the sole student.)
   if (roster.length > 0) {
     if (configTeamsName) {
       const matched = roster.find((item) => item.name.trim().toLowerCase() === configTeamsName.trim().toLowerCase());
@@ -40,9 +48,6 @@ export function resolveTeacherIdentity(
       if (matched) {
         return { speakerName: matched.name, identitySource: "teams_participants" };
       }
-    }
-    if (roster.length === 1) {
-      return { speakerName: roster[0].name, identitySource: "teams_participants" };
     }
   }
 
