@@ -190,6 +190,34 @@ export function resolveSttSilenceFlushMs(env: Pick<Env, "STT_SILENCE_FLUSH_MS">)
   return value;
 }
 
+/** Default long-silence backstop (ms). Real-user round-3 endpointing: a short pause
+ *  (STT_SILENCE_FLUSH_MS) only settles the buffer when its text already ends on a
+ *  sentence-final punctuation mark, so a thinking pause never chops a phrase ("Imperial
+ *  College … London") mid-way. But an utterance that never terminates on punctuation — a
+ *  Chinese monologue (Speechmatics cmn_en emits no CJK sentence-final marks in realtime) or
+ *  a long unpunctuated English independent clause — would then be held forever. This backstop
+ *  is the unconditional fallback: once the silence since the last final reaches this budget,
+ *  the buffer is flushed regardless of punctuation, so a long monologue still definitively
+ *  settles. ~2.8s ≫ STT_SILENCE_FLUSH_MS (1.2s) so ordinary thinking pauses keep accumulating
+ *  while a genuine end-of-turn pause forces a flush. Overridable via STT_MAX_UTTERANCE_SILENCE_MS. */
+export const STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT = 2800;
+
+/**
+ * Resolve the long-silence backstop (ms) from the environment. This is the max silence, since
+ * the last buffered final, after which the accumulated utterance is force-flushed even when it
+ * lacks sentence-final punctuation. Non-positive or non-integer input falls back to the default
+ * (2800).
+ */
+export function resolveSttMaxUtteranceSilenceMs(
+  env: Pick<Env, "STT_MAX_UTTERANCE_SILENCE_MS">
+): number {
+  const raw = (env.STT_MAX_UTTERANCE_SILENCE_MS ?? "").trim();
+  if (!raw) return STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) return STT_MAX_UTTERANCE_SILENCE_MS_DEFAULT;
+  return value;
+}
+
 /** Default minimum interval (ms) between two partial (interim) transcript frames forwarded
  *  to the Desktop for the same stream. Speechmatics emits AddPartialTranscript very
  *  frequently; throttling to this cadence keeps the downlink light while staying visually
@@ -735,6 +763,11 @@ export interface Env {
    *  1200 (slightly above STT_UTTERANCE_GAP_MS so the gap-flush wins when a next final does
    *  arrive). */
   STT_SILENCE_FLUSH_MS?: string;
+  /** Long-silence backstop (ms): max silence since the last buffered final after which the
+   *  accumulated utterance is force-flushed even without sentence-final punctuation (so a
+   *  Chinese / unpunctuated long monologue still settles). Parsed by
+   *  resolveSttMaxUtteranceSilenceMs(); defaults to 2800. */
+  STT_MAX_UTTERANCE_SILENCE_MS?: string;
   /** Maximum number of speakers for Speechmatics diarization (students stream only).
    *  Parsed by resolveMaxSpeakers(); values < 2 or non-integer are treated as unset
    *  (Speechmatics enforces a minimum of 2; undefined lets it auto-detect). Default: "6". */

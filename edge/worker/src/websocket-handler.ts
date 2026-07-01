@@ -77,8 +77,15 @@ export interface WsHandlerContext {
   /** Persist captionSource to storage (fire-and-forget). */
   persistCaptionSource(sessionId: string, src: CaptionSource): void;
 
-  /** Close the realtime ASR session for a stream. */
-  closeRealtimeAsrSession(role: StreamRole, reason: string, clearQueue: boolean): Promise<void>;
+  /** Close the realtime ASR session for a stream. sessionId is threaded so a graceful close
+   *  can settle any residual endpointing buffer (round-3) without losing trailing words. */
+  closeRealtimeAsrSession(
+    role: StreamRole,
+    reason: string,
+    clearQueue: boolean,
+    gracefulFinish?: boolean,
+    sessionId?: string
+  ): Promise<void>;
 
   /** Refresh ASR stream metrics after a close. */
   refreshAsrStreamMetrics(sessionId: string, role: StreamRole): Promise<void>;
@@ -200,7 +207,7 @@ export async function dispatchWsMessage(
   if (type === "close") {
     const reason = String(message.reason ?? "client-close").slice(0, WS_CLOSE_REASON_MAX_LEN);
     if (ctx.asrRealtimeEnabled()) {
-      await ctx.closeRealtimeAsrSession(connectionRole, `client-close:${reason}`, false);
+      await ctx.closeRealtimeAsrSession(connectionRole, `client-close:${reason}`, false, true, sessionId);
       await ctx.refreshAsrStreamMetrics(sessionId, connectionRole);
     }
     ctx.sendWsJson(server, { type: "closing", reason, stream_role: connectionRole });
@@ -307,7 +314,7 @@ export function setupWebSocketPair(
     ctx.unregisterIngestSocket(connectionRole, server);
     if (ctx.asrRealtimeEnabled()) {
       ctx
-        .closeRealtimeAsrSession(connectionRole, "ingest-ws-closed", false)
+        .closeRealtimeAsrSession(connectionRole, "ingest-ws-closed", false, true, sessionId)
         .then(() => ctx.refreshAsrStreamMetrics(sessionId, connectionRole))
         .catch((err) => {
           log("warn", "ws-close: ASR teardown error", {

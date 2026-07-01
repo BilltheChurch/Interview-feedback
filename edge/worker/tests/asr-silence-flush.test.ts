@@ -151,7 +151,9 @@ describe("silence-timeout flush", () => {
     const { ctx, raw, calls } = makeCtx(runtime, { STT_SILENCE_FLUSH_MS: "1200" });
 
     // One final arrives → buffered, not yet emitted (single final never gap-flushes).
-    await handleSpeechmaticsMessage("sess", "students", finalFrame("hello there", 1.0, 1.8), ctx);
+    // Round-3 endpointing: the text ends on sentence-final punctuation, so the SHORT silence
+    // window is allowed to settle it (an unpunctuated buffer would wait for the long backstop).
+    await handleSpeechmaticsMessage("sess", "students", finalFrame("hello there.", 1.0, 1.8), ctx);
     expect(runtime.sttBuffer).not.toBeNull();
     expect(calls.filter((c) => c.isFinal)).toHaveLength(0);
 
@@ -162,11 +164,11 @@ describe("silence-timeout flush", () => {
     expect(runtime.sttBuffer).toBeNull();
     const finals = calls.filter((c) => c.isFinal);
     expect(finals).toHaveLength(1);
-    expect(finals[0].text).toBe("hello there");
+    expect(finals[0].text).toBe("hello there.");
     expect(finals[0].role).toBe("students");
     // A raw utterance was persisted.
     expect(raw.students).toHaveLength(1);
-    expect(raw.students[0].text).toBe("hello there");
+    expect(raw.students[0].text).toBe("hello there.");
     // start_seq/end_seq remain the SESSION ingest chunk seq (finalize cutoff/ordering key).
     expect(raw.students[0].start_seq).toBe(5);
     expect(raw.students[0].end_seq).toBe(12);
@@ -201,14 +203,16 @@ describe("silence-timeout flush", () => {
     // First final at t0.
     await handleSpeechmaticsMessage("sess", "students", finalFrame("part one", 1.0, 1.5), ctx);
     // Second final 800ms later — same speaker, tiny gap → accumulates, does NOT gap-flush.
+    // Ends on sentence-final punctuation so the SHORT silence window may settle the combined
+    // sentence (round-3 punctuation gate; an unpunctuated buffer would wait for the backstop).
     await vi.advanceTimersByTimeAsync(800);
-    await handleSpeechmaticsMessage("sess", "students", finalFrame("part two", 1.6, 2.1), ctx);
+    await handleSpeechmaticsMessage("sess", "students", finalFrame("part two.", 1.6, 2.1), ctx);
 
     // 800ms after the SECOND final (1600ms after the first). If the first timer had NOT
     // been reset it would have fired at 1200ms and flushed a truncated sentence. It must not.
     await vi.advanceTimersByTimeAsync(800);
     expect(runtime.sttBuffer).not.toBeNull();
-    expect(runtime.sttBuffer?.texts).toEqual(["part one", "part two"]);
+    expect(runtime.sttBuffer?.texts).toEqual(["part one", "part two."]);
     expect(calls.filter((c) => c.isFinal)).toHaveLength(0);
 
     // Now let the (reset) timer expire → one combined utterance settles.
@@ -216,7 +220,7 @@ describe("silence-timeout flush", () => {
     expect(runtime.sttBuffer).toBeNull();
     const finals = calls.filter((c) => c.isFinal);
     expect(finals).toHaveLength(1);
-    expect(finals[0].text).toBe("part one part two");
+    expect(finals[0].text).toBe("part one part two.");
   });
 
   it("a gap-triggered flush cancels the silence timer (no duplicate emit)", async () => {
@@ -226,26 +230,27 @@ describe("silence-timeout flush", () => {
     runtime.lastSentSeq = 6;
     const { ctx, calls } = makeCtx(runtime, { STT_SILENCE_FLUSH_MS: "1200" });
 
-    // First final.
-    await handleSpeechmaticsMessage("sess", "students", finalFrame("sentence one", 1.0, 1.5), ctx);
+    // First final. Ends on sentence-final punctuation so the gap-flush gate (round-3) allows
+    // the far-later final to settle it.
+    await handleSpeechmaticsMessage("sess", "students", finalFrame("sentence one.", 1.0, 1.5), ctx);
     // A far-later final (> STT_UTTERANCE_GAP_MS default 900 gap) → gap-flushes sentence one
     // immediately, then buffers sentence two.
     runtime.currentStartSeq = 8;
     runtime.lastSentSeq = 14;
-    await handleSpeechmaticsMessage("sess", "students", finalFrame("sentence two", 5.0, 5.6), ctx);
+    await handleSpeechmaticsMessage("sess", "students", finalFrame("sentence two.", 5.0, 5.6), ctx);
 
     // Exactly one final so far (sentence one) — sentence two still buffered.
     let finals = calls.filter((c) => c.isFinal);
     expect(finals).toHaveLength(1);
-    expect(finals[0].text).toBe("sentence one");
-    expect(runtime.sttBuffer?.texts).toEqual(["sentence two"]);
+    expect(finals[0].text).toBe("sentence one.");
+    expect(runtime.sttBuffer?.texts).toEqual(["sentence two."]);
 
     // The silence timer (re-armed by sentence two's buffering) fires → sentence two settles
     // exactly ONCE. The old timer from sentence one must not double-emit.
     await vi.advanceTimersByTimeAsync(1300);
     finals = calls.filter((c) => c.isFinal);
     expect(finals).toHaveLength(2);
-    expect(finals[1].text).toBe("sentence two");
+    expect(finals[1].text).toBe("sentence two.");
     expect(runtime.sttBuffer).toBeNull();
   });
 

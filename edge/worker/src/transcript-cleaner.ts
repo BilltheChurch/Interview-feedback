@@ -39,8 +39,13 @@ const ZH_FILLER = ["嗯", "呃", "唔"];
 /**
  * Sentence-final punctuation (ASCII + CJK). Used to decide whether an utterance
  * already terminates in a stop — if it does, we never append another one.
+ *
+ * Exported so the realtime endpointing path (realtime-asr-processor.ts) can reuse
+ * the SAME set to gate a short-pause flush: a short thinking pause only settles the
+ * buffer when its text already ends on a sentence stop (English finals carry it;
+ * Chinese finals do not, so they fall through to the long-silence backstop).
  */
-const SENTENCE_FINAL_PUNCT = /[.。!！?？…；;]$/;
+export const SENTENCE_FINAL_PUNCT = /[.。!！?？…；;]$/;
 
 /**
  * Interrogative sentence-final particles in Chinese. When a CJK utterance ends

@@ -59,9 +59,11 @@ import {
   resolveSpeechmaticsPunctuation,
   resolveSttUtteranceGapMs,
   resolveSttSilenceFlushMs,
+  resolveSttMaxUtteranceSilenceMs,
   resolvePartialThrottleMs,
   joinTranscriptPieces,
 } from "./config";
+import { SENTENCE_FINAL_PUNCT } from "./transcript-cleaner";
 import type {
   Env,
   StreamRole,
@@ -183,7 +185,8 @@ export async function closeRealtimeAsrSession(
   reason: string,
   ctx: RealtimeAsrContext,
   clearQueue = false,
-  gracefulFinish = true
+  gracefulFinish = true,
+  sessionId?: string
 ): Promise<void> {
   const runtime = ctx.asrRealtimeByStream[streamRole];
   const ws = runtime.ws;
@@ -192,6 +195,19 @@ export async function closeRealtimeAsrSession(
   // clearQueue), because reconnect closes with clearQueue=false and a stale timer firing
   // during the reconnect window could flush against a moved-on buffer / a torn-down WS.
   clearSilenceFlushTimer(runtime);
+
+  // Graceful close (client-close / finalize / DashScope finish) is a terminal boundary: settle any
+  // residual accumulated buffer NOW so no words are lost. This matters more since round-3 — the
+  // buffer is held longer (short pauses no longer flush without sentence-final punctuation), so a
+  // no-punctuation trailing sentence could otherwise sit unsettled at teardown. A RECONNECT close
+  // (gracefulFinish=false) intentionally does NOT flush here: the buffer must survive the reconnect
+  // (clearQueue=false) so accumulation continues on the new connection. A hard reset (clearQueue=true)
+  // discards it below regardless. A real sessionId must be supplied (callers thread it from their
+  // scope) — without it the emitted utterance would be keyed to a placeholder, so we skip the flush
+  // and fall back to the EndOfStream→EndOfTranscript round-trip (which carries the real sessionId).
+  if (gracefulFinish && !clearQueue && sessionId) {
+    await flushSttBuffer(sessionId, streamRole, ctx);
+  }
 
   if (clearQueue) {
     runtime.sendQueue = [];
@@ -1076,12 +1092,21 @@ export async function handleSpeechmaticsMessage(
   runtime.lastPartialSentAt = 0;
 
   // Endpointing: Speechmatics emits word-level finals, which fragment self-introductions
-  // and evidence quotes. Accumulate finals into one sentence-level utterance, flushing
-  // when a silence gap exceeds the threshold or the diarization speaker changes.
+  // and evidence quotes. Accumulate finals into one sentence-level utterance. Real-user
+  // round-3: a SHORT pause (gap) must only settle the buffer when its text already ends on a
+  // sentence-final punctuation mark — otherwise a thinking / breathing pause chops a phrase
+  // ("Imperial College … London") mid-way. A speaker change is a HARD turn boundary and always
+  // flushes (regardless of punctuation). Buffers that never terminate on punctuation (Chinese —
+  // Speechmatics cmn_en emits no CJK sentence-final marks in realtime, or long unpunctuated
+  // clauses) are settled by the long-silence backstop in armSilenceFlushTimer instead.
   const gapMs = resolveSttUtteranceGapMs(ctx.env);
   const buf = runtime.sttBuffer;
-  if (buf && (t.start_ms - buf.endMs > gapMs || speaker !== buf.speaker)) {
-    await flushSttBuffer(sessionId, streamRole, ctx);
+  if (buf) {
+    const speakerChanged = speaker !== buf.speaker;
+    const gapExceeded = t.start_ms - buf.endMs > gapMs;
+    if (speakerChanged || (gapExceeded && bufferEndsWithSentenceStop(buf))) {
+      await flushSttBuffer(sessionId, streamRole, ctx);
+    }
   }
   if (!runtime.sttBuffer) {
     runtime.sttBuffer = { texts: [text], speaker, startMs: t.start_ms, endMs: t.end_ms };
@@ -1184,11 +1209,35 @@ function clearSilenceFlushTimer(runtime: AsrRealtimeRuntime): void {
 }
 
 /**
- * Arm (or re-arm) the per-stream silence-timeout flush. Every time a final buffers a word
- * into sttBuffer (new or appended) we reset this timer; if STT_SILENCE_FLUSH_MS elapses with
- * no further final, it flushes the accumulated utterance so a trailing sentence settles on a
- * pause instead of hanging as an unfinalized partial. flushSttBuffer is already idempotent
- * (it nulls sttBuffer before the empty check), so a race with the gap-flush path is a no-op.
+ * Whether the accumulated buffer text already terminates on a sentence-final punctuation mark
+ * (reuses transcript-cleaner's SENTENCE_FINAL_PUNCT so the endpointing gate and the cleaner
+ * agree on what "a complete sentence" looks like). Latin finals from Speechmatics carry ".?!";
+ * Chinese realtime finals do not, so CJK utterances read as unterminated and rely on the
+ * long-silence backstop. Compares the LAST buffered final's trailing char (that is the text
+ * flushSttBuffer would join to the end).
+ */
+function bufferEndsWithSentenceStop(
+  buf: NonNullable<AsrRealtimeRuntime["sttBuffer"]>
+): boolean {
+  const last = buf.texts[buf.texts.length - 1]?.trim() ?? "";
+  return SENTENCE_FINAL_PUNCT.test(last);
+}
+
+/**
+ * Arm (or re-arm) the per-stream silence-timeout flush — now a TWO-LEVEL settle so that a short
+ * thinking pause never chops an unfinished phrase (real-user round-3):
+ *
+ *   1. At STT_SILENCE_FLUSH_MS (short pause) we only settle the buffer if its text already ends
+ *      on sentence-final punctuation. If it does not (mid-phrase pause, or a Chinese utterance
+ *      that carries no CJK sentence mark), we do NOT flush — instead we re-arm toward the
+ *      backstop deadline so accumulation continues.
+ *   2. At STT_MAX_UTTERANCE_SILENCE_MS (long-silence backstop, since the LAST buffered final) we
+ *      flush UNCONDITIONALLY, so a long unpunctuated monologue still definitively settles instead
+ *      of hanging forever.
+ *
+ * Each buffered final re-arms level 1 (bufferedAtMs = now), so the backstop is measured from the
+ * most recent final. flushSttBuffer is idempotent (nulls sttBuffer before the empty check), so a
+ * race with the gap-flush / speaker-change path is a harmless no-op.
  */
 function armSilenceFlushTimer(
   sessionId: string,
@@ -1196,14 +1245,44 @@ function armSilenceFlushTimer(
   ctx: RealtimeAsrContext
 ): void {
   const runtime = ctx.asrRealtimeByStream[streamRole];
-  clearSilenceFlushTimer(runtime);
   const silenceMs = resolveSttSilenceFlushMs(ctx.env);
+  const backstopMs = resolveSttMaxUtteranceSilenceMs(ctx.env);
+  // Backstop deadline (Date.now() basis) measured from THIS final. Re-armed every buffered final.
+  const backstopDeadline = Date.now() + backstopMs;
+  scheduleSilenceCheck(sessionId, streamRole, ctx, silenceMs, backstopDeadline);
+}
+
+/**
+ * Schedule the next silence-flush check `delayMs` from now. When it fires it either flushes (buffer
+ * ends on a sentence stop, or the backstop deadline has been reached) or re-schedules a check at the
+ * backstop deadline. Split out from armSilenceFlushTimer so the re-arm on a punctuation miss reuses
+ * the SAME deadline (the backstop stays anchored to the last final, not pushed forward each hop).
+ */
+function scheduleSilenceCheck(
+  sessionId: string,
+  streamRole: StreamRole,
+  ctx: RealtimeAsrContext,
+  delayMs: number,
+  backstopDeadline: number
+): void {
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+  clearSilenceFlushTimer(runtime);
   runtime.silenceFlushTimer = setTimeout(() => {
     runtime.silenceFlushTimer = null;
-    // Fire-and-forget: flushSttBuffer is self-contained and idempotent. Swallow errors so an
-    // emit failure can never surface as an unhandled rejection on the timer callback.
-    void flushSttBuffer(sessionId, streamRole, ctx).catch(() => {});
-  }, silenceMs);
+    const buf = runtime.sttBuffer;
+    if (!buf || buf.texts.length === 0) return;
+    const backstopReached = Date.now() >= backstopDeadline;
+    if (backstopReached || bufferEndsWithSentenceStop(buf)) {
+      // Fire-and-forget: flushSttBuffer is self-contained and idempotent. Swallow errors so an
+      // emit failure can never surface as an unhandled rejection on the timer callback.
+      void flushSttBuffer(sessionId, streamRole, ctx).catch(() => {});
+      return;
+    }
+    // Short pause with no terminal punctuation → keep accumulating; re-schedule the next check at
+    // the (unchanged) backstop deadline so the long-silence force-flush still fires on time.
+    const remaining = Math.max(0, backstopDeadline - Date.now());
+    scheduleSilenceCheck(sessionId, streamRole, ctx, remaining, backstopDeadline);
+  }, delayMs);
 }
 
 async function flushSttBuffer(

@@ -1103,9 +1103,12 @@ export class MeetingSessionDO extends DurableObject<Env> {
     };
     await this.storeFinalizeV2Status(next);
     await this.setFinalizeLock(false);
+    // Thread the resolved sessionId so a residual endpointing buffer settles before teardown
+    // (round-3: buffers are held longer, so a trailing no-punctuation sentence must not be lost).
+    const watchdogSessionId = await this.resolveSessionId();
     await Promise.all([
-      this.closeRealtimeAsrSession("teacher", "finalize-watchdog", false, true),
-      this.closeRealtimeAsrSession("students", "finalize-watchdog", false, true)
+      this.closeRealtimeAsrSession("teacher", "finalize-watchdog", false, true, watchdogSessionId),
+      this.closeRealtimeAsrSession("students", "finalize-watchdog", false, true, watchdogSessionId)
     ]);
     await this.ctx.storage.put(STORAGE_KEY_UPDATED_AT, nowIso);
     return next;
@@ -1195,8 +1198,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
     return refreshAsrStreamMetricsFn(sessionId, streamRole, this.realtimeAsrCtx, patch);
   }
 
-  async closeRealtimeAsrSession(streamRole: StreamRole, reason: string, clearQueue = false, gracefulFinish = true): Promise<void> {
-    return closeRealtimeAsrSessionFn(streamRole, reason, this.realtimeAsrCtx, clearQueue, gracefulFinish);
+  async closeRealtimeAsrSession(streamRole: StreamRole, reason: string, clearQueue = false, gracefulFinish = true, sessionId?: string): Promise<void> {
+    return closeRealtimeAsrSessionFn(streamRole, reason, this.realtimeAsrCtx, clearQueue, gracefulFinish, sessionId);
   }
 
   private async hydrateRuntimeFromCursor(streamRole: StreamRole): Promise<void> {
