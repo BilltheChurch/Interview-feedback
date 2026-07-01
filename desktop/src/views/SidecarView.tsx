@@ -94,6 +94,8 @@ export function SidecarView() {
   const captions = useSessionStore((s) => s.captions);
   const transcriptSegments = useSessionStore((s) => s.transcriptSegments);
   const partialTranscripts = useSessionStore((s) => s.partialTranscripts);
+  const storeParticipants = useSessionStore((s) => s.participants);
+  const interviewerName = useSessionStore((s) => s.interviewerName);
   const systemReady = useSessionStore((s) => s.systemReady);
   const systemAudioFailureReason = useSessionStore((s) => s.systemAudioFailureReason);
   const isCapturing = useSessionStore((s) => s.isCapturing);
@@ -108,17 +110,35 @@ export function SidecarView() {
     ? storeStages
     : (locationState?.stages && locationState.stages.length > 0 ? locationState.stages : defaultStages);
 
-  // Build participant list from locationState only (no mock data)
+  // ── Build the participant roster (Bug A) ──
+  // Source of truth is the STORE, not the router location state: in 1v1 and after a
+  // PiP round-trip the store still holds the roster while location.state is empty or
+  // stale. Fall back to location.state only when the store roster is empty.
+  // The candidate names (students) come from the roster; the interviewer row is ALWAYS
+  // present (even with an empty roster, so 1v1 shows at least the interviewer + any
+  // candidate) and carries the configured interviewer real name (Bug B name fix). The
+  // `isInterviewer` flag — not the display name — is the stable branch key downstream.
+  const candidateNames: string[] =
+    storeParticipants.length > 0
+      ? storeParticipants.map((p) => p.name)
+      : (locationState?.participants || []);
+  const interviewerDisplayName = (interviewerName || '').trim() || 'Interviewer';
   const initialParticipants: Participant[] = [
-    ...(locationState?.participants || []).map(name => ({
+    {
+      name: interviewerDisplayName,
+      status: 'matched' as ParticipantStatus,
+      confidence: 1.0,
+      talkTimePct: 0,
+      turnCount: 0,
+      isInterviewer: true,
+    },
+    ...candidateNames.map((name) => ({
       name,
       status: 'pending' as ParticipantStatus,
       talkTimePct: 0,
       turnCount: 0,
+      isInterviewer: false,
     })),
-    ...(locationState?.participants && locationState.participants.length > 0
-      ? [{ name: 'Interviewer', status: 'matched' as ParticipantStatus, confidence: 1.0, talkTimePct: 0, turnCount: 0 }]
-      : []),
   ];
 
   const baseApiUrl = useSessionStore((s) => s.baseApiUrl);
@@ -210,61 +230,95 @@ export function SidecarView() {
     };
   }, []);
 
-  // ── Local audio-level-based talk time accumulation ──
-  const storeStatus = useSessionStore((s) => s.status);
-  const storeMicActive = useSessionStore((s) => s.micActiveSeconds);
-  const storeSysActive = useSessionStore((s) => s.sysActiveSeconds);
-  const micTimeRef = useRef(storeMicActive);
-  const sysTimeRef = useRef(storeSysActive);
-
-  // Re-seed refs when store values change (e.g. after restoreSession)
+  // ── Roster sync (Bug A) ──
+  // Keep the enrollment-carrying `participants` state in sync with the store roster +
+  // interviewer name, which may arrive late (1v1) or change after a PiP round-trip. We
+  // reconcile by NAME + isInterviewer so an already-enrolled candidate keeps its
+  // enrollment status/confidence across a resync instead of resetting to 'pending'.
+  const rosterSignature = `${interviewerDisplayName}|${candidateNames.join(' ')}`;
   useEffect(() => {
-    micTimeRef.current = storeMicActive;
-    sysTimeRef.current = storeSysActive;
-  }, [storeMicActive, storeSysActive]);
+    setParticipants((prev) => {
+      const byName = new Map(prev.map((p) => [p.name, p]));
+      const next = initialParticipants.map((base) => {
+        const existing = byName.get(base.name);
+        // Preserve live enrollment state; the interviewer row stays 'matched'.
+        if (existing) {
+          return { ...base, status: existing.status, confidence: existing.confidence };
+        }
+        return base;
+      });
+      return next;
+    });
+    // initialParticipants is derived from rosterSignature; depend on the signature to
+    // avoid re-running every render (new array identity each time).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rosterSignature]);
 
-  useEffect(() => {
-    if (storeStatus !== 'recording') {
-      return;
+  // ── Speaker-activity talk-time — derived from real transcript utterances (Bug B) ──
+  // ROOT-CAUSE FIX: talk-time no longer comes from local RMS levels (which cannot tell
+  // real speech from music/noise/echo and mis-credited any system audio to students).
+  // Instead we count FINAL transcript utterances per speaker: music/background audio
+  // produces no utterances → silent students stay at 0%. Partials are excluded to avoid
+  // jitter. Weighting is per-utterance (turn count): reliable and explainable, and it
+  // needs no endMs (TranscriptSegment has startMs but no endMs).
+  //   - role 'teacher'  → the interviewer row (matched by isInterviewer, not by name).
+  //   - role 'students' → the segment's diarization `speaker` label, mapped onto the
+  //     roster: exact name match wins; otherwise, if there is exactly one candidate,
+  //     all student utterances fold into that candidate (1v1); else the raw speaker
+  //     label is credited (shown as its own bucket).
+  const participantsWithActivity: Participant[] = useMemo(() => {
+    const finals = transcriptSegments.filter((s) => s.isFinal);
+    const rosterCandidates = participants.filter((p) => !p.isInterviewer);
+    const soleCandidate = rosterCandidates.length === 1 ? rosterCandidates[0].name : null;
+
+    // Tally utterance counts per bucket key (participant name).
+    const counts = new Map<string, number>();
+    let total = 0;
+    for (const seg of finals) {
+      let key: string;
+      if (seg.role === 'teacher') {
+        key = interviewerDisplayName;
+      } else {
+        const label = (seg.speaker ?? '').trim();
+        if (label && rosterCandidates.some((c) => c.name === label)) {
+          key = label; // diarization label matches a roster candidate
+        } else if (soleCandidate) {
+          key = soleCandidate; // 1v1 → fold all student speech into the sole candidate
+        } else {
+          key = label || 'Student'; // unmatched multi-candidate → its own bucket
+        }
+      }
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      total += 1;
     }
 
-    const interval = setInterval(() => {
-      const store = useSessionStore.getState();
-      const levels = store.audioLevels;
-      // Per-stream silence gate on the 0–100 readRmsLevel scale — see
-      // isSpeechActive. The mic uses the lower MIC gate because noise suppression
-      // drops soft/gapped interviewer speech below the system gate (R-C: else the
-      // interviewer showed 0%); the system keeps the R7 gate so a silent loopback
-      // never credits idle students.
-      if (isSpeechActive(levels.mic, MIC_ACTIVITY_LEVEL_THRESHOLD)) micTimeRef.current++;
-      if (isSpeechActive(levels.system, SYSTEM_ACTIVITY_LEVEL_THRESHOLD)) sysTimeRef.current++;
+    // Apply counts to the known roster rows.
+    const withActivity = participants.map((p) => {
+      const c = counts.get(p.name) ?? 0;
+      return {
+        ...p,
+        turnCount: c,
+        talkTimePct: total > 0 ? Math.round((c / total) * 100) : 0,
+      };
+    });
 
-      store.setMicActiveSeconds(micTimeRef.current);
-      store.setSysActiveSeconds(sysTimeRef.current);
-
-      const micT = micTimeRef.current;
-      const sysT = sysTimeRef.current;
-      const total = micT + sysT;
-      if (total === 0) return;
-
-      setParticipants(prev => {
-        if (prev.length === 0) return prev;
-        const others = prev.filter(pp => pp.name !== 'Interviewer').length;
-        return prev.map(p => {
-          if (p.name === 'Interviewer') {
-            return { ...p, talkTimePct: Math.round((micT / total) * 100), turnCount: micT };
-          }
-          if (sysT === 0 || others === 0) {
-            return { ...p, talkTimePct: 0, turnCount: 0 };
-          }
-          const share = Math.round((sysT / total / others) * 100);
-          return { ...p, talkTimePct: share, turnCount: Math.round(sysT / others) };
+    // Surface any student speaker labels that matched no roster row (multi-candidate,
+    // diarization label unknown to the roster) so their talk-time is not silently lost.
+    const knownNames = new Set(participants.map((p) => p.name));
+    for (const [key, c] of counts) {
+      if (!knownNames.has(key)) {
+        withActivity.push({
+          name: key,
+          status: 'unknown' as ParticipantStatus,
+          talkTimePct: total > 0 ? Math.round((c / total) * 100) : 0,
+          turnCount: c,
+          isInterviewer: false,
         });
-      });
-    }, 1000);
+      }
+    }
 
-    return () => clearInterval(interval);
-  }, [storeStatus]);
+    return withActivity;
+  }, [transcriptSegments, participants, interviewerDisplayName]);
 
   // Enrich store memos with stage name for display
   const memos: DisplayMemo[] = useMemo(
@@ -546,7 +600,7 @@ export function SidecarView() {
           onToggle={() => setDrawerOpen((v) => !v)}
           currentStage={currentStage}
           onAdvanceStage={handleAdvanceStage}
-          participants={participants}
+          participants={participantsWithActivity}
           onEnroll={handleEnroll}
           onConfirm={handleConfirm}
           stages={stages}

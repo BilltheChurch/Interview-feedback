@@ -11,6 +11,10 @@ export type Participant = {
   confidence?: number;
   talkTimePct: number;
   turnCount: number;
+  /** Stable role flag — true for the interviewer row. Talk-time accumulation and
+   *  rendering branch on this, NOT on `name === 'Interviewer'`, so renaming the
+   *  interviewer (real name) never misroutes the branch. */
+  isInterviewer?: boolean;
 };
 
 /* ─── DisplayMemo — enriches store Memo with stage name ── */

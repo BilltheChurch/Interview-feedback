@@ -34,6 +34,9 @@ export function EnrollmentPanel({
   onEnroll: (name: string) => void;
   onConfirm: (name: string) => void;
 }) {
+  if (participants.length === 0) {
+    return <p className="text-xs text-ink-tertiary italic">No participants yet</p>;
+  }
   return (
     <>
       {participants.map((p) => (
@@ -88,6 +91,9 @@ export function EnrollmentPanel({
 /* ─── ParticipationSignals ───────────────────── */
 
 export function ParticipationSignals({ participants }: { participants: Participant[] }) {
+  if (participants.length === 0) {
+    return <p className="text-xs text-ink-tertiary italic">No participants yet</p>;
+  }
   return (
     <>
       {participants.map((p) => (

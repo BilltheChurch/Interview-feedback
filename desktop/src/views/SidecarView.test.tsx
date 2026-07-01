@@ -71,9 +71,12 @@ vi.mock('../hooks/useSessionOrchestrator', () => ({
 // Simulate Zustand's selector API by running the selector against a mock state object.
 const mockState: Record<string, unknown> = {};
 
-vi.mock('../stores/sessionStore', () => ({
-  useSessionStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) => selector(mockState)),
-}));
+vi.mock('../stores/sessionStore', () => {
+  const useSessionStore = vi.fn((selector: (s: Record<string, unknown>) => unknown) => selector(mockState));
+  // Some SidecarView callbacks/intervals read useSessionStore.getState() imperatively.
+  (useSessionStore as unknown as { getState: () => Record<string, unknown> }).getState = () => mockState;
+  return { useSessionStore };
+});
 
 vi.mock('../components/RichNoteEditor', () => ({
   RichNoteEditor: ({ onChange }: { onChange?: (html: string, text: string) => void }) => (
@@ -109,6 +112,7 @@ function populateMockState(overrides: Record<string, unknown> = {}) {
     status: 'recording',
     elapsedSeconds: 125,
     participants: [{ name: 'Alice' }, { name: 'Bob' }],
+    interviewerName: '',
     stages: ['Intro', 'Q1', 'Q2', 'Wrap-up'],
     currentStage: 'Intro',
     currentStageIndex: 0,
@@ -118,6 +122,10 @@ function populateMockState(overrides: Record<string, unknown> = {}) {
     audioLevels: { mic: 0.4, system: 0.2, mixed: 0.5 },
     micActiveSeconds: 10,
     sysActiveSeconds: 5,
+    transcriptSegments: [],
+    partialTranscripts: {},
+    systemReady: true,
+    isCapturing: false,
     wsStatus: 'connected',
     wsStatusStudents: 'connected',
     acsStatus: 'off',
@@ -133,6 +141,8 @@ function populateMockState(overrides: Record<string, unknown> = {}) {
     advanceStage: vi.fn(),
     addStageArchive: vi.fn(),
     archiveStage: vi.fn(),
+    setMicActiveSeconds: vi.fn(),
+    setSysActiveSeconds: vi.fn(),
     reset: vi.fn(),
     endSession: vi.fn(),
   };
@@ -229,6 +239,138 @@ describe('SidecarView', () => {
 
   it('renders the status dot indicating recording state', () => {
     renderSidecarView();
-    expect(screen.getByTestId('status-dot')).toBeInTheDocument();
+    // Store roster rows (pending) each render a StatusDot in addition to the header's,
+    // so assert presence rather than uniqueness.
+    expect(screen.getAllByTestId('status-dot').length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Bug A: participants must come from the store first, not the router location state.
+ * In 1v1 (and after a PiP round-trip) location.state is unreliable/empty while the
+ * store still holds the roster.
+ */
+describe('SidecarView — participants sourced from store (Bug A)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('shows store participants even when location state has none', () => {
+    // Store roster present, router state empty → panel must still show the roster.
+    populateMockState({ participants: [{ name: 'Carol' }, { name: 'Dan' }] });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/session', state: {} }]}>
+        <SidecarView />
+      </MemoryRouter>,
+    );
+    expect(screen.getAllByText('Carol').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Dan').length).toBeGreaterThan(0);
+  });
+
+  it('always shows the Interviewer row even with an empty roster (1v1)', () => {
+    populateMockState({ participants: [], interviewerName: '' });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/session', state: {} }]}>
+        <SidecarView />
+      </MemoryRouter>,
+    );
+    // With no roster and no configured name, the generic Interviewer label appears.
+    expect(screen.getAllByText('Interviewer').length).toBeGreaterThan(0);
+  });
+
+  it('shows the configured interviewer real name, not the hardcoded "Interviewer"', () => {
+    populateMockState({ participants: [], interviewerName: 'Tim' });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/session', state: {} }]}>
+        <SidecarView />
+      </MemoryRouter>,
+    );
+    expect(screen.getAllByText('Tim').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Interviewer')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Bug B: SPEAKER ACTIVITY must be derived from real transcript utterances, not local
+ * RMS levels. Music/background system audio produces no utterances, so silent students
+ * stay at 0% — the root-cause fix.
+ */
+describe('SidecarView — speaker activity derived from transcripts (Bug B)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function segFinal(over: Record<string, unknown>) {
+    return {
+      id: `id-${Math.random().toString(36).slice(2)}`,
+      role: 'students',
+      speaker: null,
+      text: 'x',
+      isFinal: true,
+      tsMs: 0,
+      startMs: 0,
+      createdAt: 0,
+      ...over,
+    };
+  }
+
+  it('splits talk-time between interviewer and student by final utterance share', () => {
+    // teacher×2 + students(S1)×2 → 50% / 50%, 2 turns each.
+    populateMockState({
+      participants: [{ name: 'Alice' }],
+      interviewerName: 'Tim',
+      transcriptSegments: [
+        segFinal({ role: 'teacher', speaker: 'Tim' }),
+        segFinal({ role: 'teacher', speaker: 'Tim' }),
+        segFinal({ role: 'students', speaker: 'S1' }),
+        segFinal({ role: 'students', speaker: 'S1' }),
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/session', state: {} }]}>
+        <SidecarView />
+      </MemoryRouter>,
+    );
+    // Two independent participation rows both at 50% / 2t.
+    expect(screen.getAllByText('50% / 2t').length).toBe(2);
+  });
+
+  it('keeps students at 0% when only the interviewer has spoken (no music inflation)', () => {
+    // teacher×3, NO student segments → student talk-time must be 0% / 0t. This is the
+    // core Bug B guarantee: system-audio music never inflates a student's activity.
+    populateMockState({
+      participants: [{ name: 'Alice' }],
+      interviewerName: 'Tim',
+      transcriptSegments: [
+        segFinal({ role: 'teacher', speaker: 'Tim' }),
+        segFinal({ role: 'teacher', speaker: 'Tim' }),
+        segFinal({ role: 'teacher', speaker: 'Tim' }),
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/session', state: {} }]}>
+        <SidecarView />
+      </MemoryRouter>,
+    );
+    // Interviewer at 100% / 3t.
+    expect(screen.getByText('100% / 3t')).toBeInTheDocument();
+    // The single candidate (Alice) at 0% / 0t.
+    expect(screen.getByText('0% / 0t')).toBeInTheDocument();
+  });
+
+  it('ignores partial (non-final) segments in talk-time', () => {
+    // Only a non-final student segment exists → treated as no student speech yet.
+    populateMockState({
+      participants: [{ name: 'Alice' }],
+      interviewerName: 'Tim',
+      transcriptSegments: [
+        segFinal({ role: 'teacher', speaker: 'Tim' }),
+        segFinal({ role: 'students', speaker: 'S1', isFinal: false }),
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/session', state: {} }]}>
+        <SidecarView />
+      </MemoryRouter>,
+    );
+    // Interviewer 100% (only final utterance), student 0%.
+    expect(screen.getByText('100% / 1t')).toBeInTheDocument();
+    expect(screen.getByText('0% / 0t')).toBeInTheDocument();
   });
 });
