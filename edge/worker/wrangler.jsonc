@@ -56,6 +56,12 @@
     // stream. Lowered 200 → 100: denser, fresher target texts make the Desktop typewriter
     // reveal track speech more smoothly. resolvePartialThrottleMs.
     "STT_PARTIAL_THROTTLE_MS": "100",
+    // Silence-timeout flush budget (ms). When a speaker finishes a sentence and then pauses
+    // (no NEXT final to trigger the gap-flush), a per-stream timer settles the buffered
+    // utterance after this window so it stops hanging as an unfinalized partial. Set slightly
+    // above STT_UTTERANCE_GAP_MS (900) so the gap-flush still wins when a next final does
+    // arrive within the pause. resolveSttSilenceFlushMs.
+    "STT_SILENCE_FLUSH_MS": "1200",
     "ASR_ENDPOINT": "",
     // NOTE: ASR_LANGUAGE / ASR_MODEL / ASR_WS_URL are legacy DashScope/Whisper vars —
     // they have NO effect on the Speechmatics realtime path (ASR_PROVIDER=speechmatics).

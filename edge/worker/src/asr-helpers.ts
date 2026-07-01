@@ -277,6 +277,7 @@ export function buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime
     lastPartialTextNorm: "",       // R4: last forwarded partial text (dedupe)
     lastPartialSentAt: 0,          // R4: last forwarded partial timestamp (throttle)
     sttBuffer: null,
+    silenceFlushTimer: null,       // silence-timeout flush handle (armed on buffer, cleared on flush/close)
     lastAudioSentAt: 0,            // epoch sentinel: never sent → keepalive eligible immediately
     lastSentToSpeechmaticsSeq: 0,  // per-connection send counter (resets on each WS connect)
     lastAckedSeq: 0                // per-connection ack counter (resets on each WS connect)

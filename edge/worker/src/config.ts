@@ -170,6 +170,26 @@ export function resolveSttUtteranceGapMs(env: Pick<Env, "STT_UTTERANCE_GAP_MS">)
   return value;
 }
 
+/** Default silence-timeout flush budget (ms). Slightly above STT_UTTERANCE_GAP_MS_DEFAULT
+ *  (900) so that when a NEXT final does arrive within the pause the existing gap-flush path
+ *  settles the utterance first; the timer is the fallback only for a genuine trailing pause
+ *  with no next final. ~1.2s tracks the "paused a beat, sentence should settle" feel. */
+export const STT_SILENCE_FLUSH_MS_DEFAULT = 1200;
+
+/**
+ * Resolve the silence-timeout flush budget (ms) from the environment. This is how long the
+ * per-stream timer waits after a final buffers (with no subsequent final) before actively
+ * flushing the accumulated utterance. Non-positive or non-integer input falls back to the
+ * default (1200).
+ */
+export function resolveSttSilenceFlushMs(env: Pick<Env, "STT_SILENCE_FLUSH_MS">): number {
+  const raw = (env.STT_SILENCE_FLUSH_MS ?? "").trim();
+  if (!raw) return STT_SILENCE_FLUSH_MS_DEFAULT;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) return STT_SILENCE_FLUSH_MS_DEFAULT;
+  return value;
+}
+
 /** Default minimum interval (ms) between two partial (interim) transcript frames forwarded
  *  to the Desktop for the same stream. Speechmatics emits AddPartialTranscript very
  *  frequently; throttling to this cadence keeps the downlink light while staying visually
@@ -618,6 +638,11 @@ export interface AsrRealtimeRuntime {
   /** Endpointing: accumulate Speechmatics word-level finals into one sentence-level
    *  utterance, flushed on a silence gap, speaker change, EndOfTranscript, or close. */
   sttBuffer: { texts: string[]; speaker: string | null; startMs: number; endMs: number } | null;
+  /** Silence-timeout flush: setTimeout handle armed each time a final buffers into
+   *  sttBuffer and cleared on flush / close. If no next final arrives within
+   *  STT_SILENCE_FLUSH_MS, it fires flushSttBuffer so a trailing sentence settles on a
+   *  pause instead of hanging as an unfinalized partial. Lives with sttBuffer. */
+  silenceFlushTimer: ReturnType<typeof setTimeout> | null;
   /** Timestamp (Date.now()) of the last real audio chunk sent to the outbound ASR WS.
    *  Used by shouldSendKeepalive to decide when silence padding is needed. */
   lastAudioSentAt: number;
@@ -695,6 +720,12 @@ export interface Env {
   /** R-D: minimum interval (ms) between partial (interim) frames forwarded to the Desktop
    *  per stream. Parsed by resolvePartialThrottleMs(); defaults to 100. */
   STT_PARTIAL_THROTTLE_MS?: string;
+  /** Silence-timeout flush: max ms to wait after a final buffers with no next final before
+   *  actively flushing the accumulated utterance (so a trailing sentence settles on a pause
+   *  instead of hanging as a partial). Parsed by resolveSttSilenceFlushMs(); defaults to
+   *  1200 (slightly above STT_UTTERANCE_GAP_MS so the gap-flush wins when a next final does
+   *  arrive). */
+  STT_SILENCE_FLUSH_MS?: string;
   /** Maximum number of speakers for Speechmatics diarization (students stream only).
    *  Parsed by resolveMaxSpeakers(); values < 2 or non-integer are treated as unset
    *  (Speechmatics enforces a minimum of 2; undefined lets it auto-detect). Default: "6". */

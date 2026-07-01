@@ -58,6 +58,7 @@ import {
   resolveSpeechmaticsMaxDelay,
   resolveSpeechmaticsPunctuation,
   resolveSttUtteranceGapMs,
+  resolveSttSilenceFlushMs,
   resolvePartialThrottleMs,
   joinTranscriptPieces,
 } from "./config";
@@ -186,6 +187,11 @@ export async function closeRealtimeAsrSession(
 ): Promise<void> {
   const runtime = ctx.asrRealtimeByStream[streamRole];
   const ws = runtime.ws;
+
+  // Always cancel any pending silence-timeout flush on teardown — unconditional (not gated on
+  // clearQueue), because reconnect closes with clearQueue=false and a stale timer firing
+  // during the reconnect window could flush against a moved-on buffer / a torn-down WS.
+  clearSilenceFlushTimer(runtime);
 
   if (clearQueue) {
     runtime.sendQueue = [];
@@ -1061,6 +1067,10 @@ export async function handleSpeechmaticsMessage(
     runtime.sttBuffer.texts.push(text);
     runtime.sttBuffer.endMs = Math.max(runtime.sttBuffer.endMs, t.end_ms);
   }
+  // Re-arm the silence-timeout flush on every buffered final. If no next final arrives within
+  // STT_SILENCE_FLUSH_MS this settles the trailing sentence (a pure pause otherwise never
+  // reaches the gap-flush path, which needs a subsequent final to compare against).
+  armSilenceFlushTimer(sessionId, streamRole, ctx);
 }
 
 /**
@@ -1135,12 +1145,48 @@ export async function maybeForwardPartial(
  * connection endpointing gap check in handleSpeechmaticsMessage, where both operands
  * share the same connection origin and the comparison is safe.
  */
+/**
+ * Cancel a pending silence-timeout flush timer (idempotent). Called whenever the buffer is
+ * settled (flush) or the stream is torn down (close), so a stale timer can never fire
+ * flushSttBuffer against a buffer that has since moved on to a newer sentence.
+ */
+function clearSilenceFlushTimer(runtime: AsrRealtimeRuntime): void {
+  if (runtime.silenceFlushTimer !== null) {
+    clearTimeout(runtime.silenceFlushTimer);
+    runtime.silenceFlushTimer = null;
+  }
+}
+
+/**
+ * Arm (or re-arm) the per-stream silence-timeout flush. Every time a final buffers a word
+ * into sttBuffer (new or appended) we reset this timer; if STT_SILENCE_FLUSH_MS elapses with
+ * no further final, it flushes the accumulated utterance so a trailing sentence settles on a
+ * pause instead of hanging as an unfinalized partial. flushSttBuffer is already idempotent
+ * (it nulls sttBuffer before the empty check), so a race with the gap-flush path is a no-op.
+ */
+function armSilenceFlushTimer(
+  sessionId: string,
+  streamRole: StreamRole,
+  ctx: RealtimeAsrContext
+): void {
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+  clearSilenceFlushTimer(runtime);
+  const silenceMs = resolveSttSilenceFlushMs(ctx.env);
+  runtime.silenceFlushTimer = setTimeout(() => {
+    runtime.silenceFlushTimer = null;
+    // Fire-and-forget: flushSttBuffer is self-contained and idempotent. Swallow errors so an
+    // emit failure can never surface as an unhandled rejection on the timer callback.
+    void flushSttBuffer(sessionId, streamRole, ctx).catch(() => {});
+  }, silenceMs);
+}
+
 async function flushSttBuffer(
   sessionId: string,
   streamRole: StreamRole,
   ctx: RealtimeAsrContext
 ): Promise<void> {
   const runtime = ctx.asrRealtimeByStream[streamRole];
+  clearSilenceFlushTimer(runtime);
   const buf = runtime.sttBuffer;
   runtime.sttBuffer = null;
   if (!buf || buf.texts.length === 0) return;
