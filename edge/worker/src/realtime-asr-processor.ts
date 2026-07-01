@@ -1115,8 +1115,19 @@ export async function maybeForwardPartial(
 }
 
 /**
- * Emit the accumulated sentence-level utterance (endpointing). Maps the buffered span to
- * chunk seq so emit's seq-based timing stays consistent, then clears the buffer.
+ * Emit the accumulated sentence-level utterance (endpointing), then clear the buffer.
+ *
+ * R-E: the ordering clock is the SESSION-MONOTONIC ingest chunk seq maintained by the
+ * drain loop (runtime.currentStartSeq / runtime.lastSentSeq), which counts real ingested
+ * chunks and never resets. emitRealtimeUtterance derives start_ms/end_ms from those
+ * cursors. We deliberately do NOT re-derive the cursors from buf.startMs/buf.endMs:
+ * those are Speechmatics CONNECTION-relative times that restart at ~0 on every WS
+ * reconnect (each StartRecognition renumbers its timeline). Overwriting the session
+ * cursors with them collapsed post-reconnect utterances back to small start values,
+ * inverting their order against pre-reconnect utterances in the finalize transcript
+ * (which sorts by start_ms). buf.startMs/buf.endMs remain used ONLY for the intra-
+ * connection endpointing gap check in handleSpeechmaticsMessage, where both operands
+ * share the same connection origin and the comparison is safe.
  */
 async function flushSttBuffer(
   sessionId: string,
@@ -1129,12 +1140,6 @@ async function flushSttBuffer(
   if (!buf || buf.texts.length === 0) return;
   const text = buf.texts.join(" ").replace(/\s+/g, " ").trim();
   if (!text) return;
-  if (buf.startMs >= 0 && buf.endMs >= buf.startMs) {
-    const startSeq = Math.max(1, Math.floor(buf.startMs / 1000) + 1);
-    const inferredEndSeq = Math.max(startSeq, Math.ceil(buf.endMs / 1000));
-    runtime.currentStartSeq = startSeq;
-    runtime.lastSentSeq = Math.max(runtime.lastSentSeq, inferredEndSeq);
-  }
   await emitRealtimeUtterance(sessionId, streamRole, text, ctx, buf.speaker);
 }
 
