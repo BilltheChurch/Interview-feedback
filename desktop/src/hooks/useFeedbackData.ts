@@ -376,24 +376,31 @@ export function normalizeApiReport(
     utterance_ids: Array.isArray(e.utterance_ids) ? e.utterance_ids : undefined,
   }));
 
-  const normalizedTranscript: FeedbackReport['transcript'] = (() => {
-    // Prefer the punctuated cleaned_transcript (P2) when the Worker provides it;
-    // fall back to the raw punctuation-free transcript otherwise. Both share the
-    // same per-utterance shape (utterance_id / speaker_name / text / start_ms /
-    // end_ms), so downstream metrics and per-utterance timestamps are unaffected.
-    const source = Array.isArray(raw.cleaned_transcript) && raw.cleaned_transcript.length > 0
-      ? raw.cleaned_transcript
-      : Array.isArray(raw.transcript)
-        ? raw.transcript
-        : [];
-    return source.map((u: RawUtterance) => ({
-      utterance_id: u.utterance_id || '',
-      speaker_name: u.speaker_name || null,
-      text: u.text || '',
-      start_ms: typeof u.start_ms === 'number' ? u.start_ms : 0,
-      end_ms: typeof u.end_ms === 'number' ? u.end_ms : 0,
-    }));
-  })();
+  const mapUtterance = (u: RawUtterance): FeedbackReport['transcript'][number] => ({
+    utterance_id: u.utterance_id || '',
+    speaker_name: u.speaker_name || null,
+    text: u.text || '',
+    start_ms: typeof u.start_ms === 'number' ? u.start_ms : 0,
+    end_ms: typeof u.end_ms === 'number' ? u.end_ms : 0,
+  });
+
+  // RAW (un-cleaned) transcript — the metrics source of truth. Communication
+  // metrics (fillerWordCount / turnCount / speakingTimeSec / latencies …) MUST
+  // stay on this array so that switching the DISPLAY to cleaned_transcript does
+  // not alter any KPI values. cleaned_transcript drops pure-filler utterances
+  // and strips in-word fillers, which would collapse fillerWordCount toward 0
+  // and undercount turns — so it must NOT feed metrics.
+  const rawTranscript: FeedbackReport['transcript'] = Array.isArray(raw.transcript)
+    ? raw.transcript.map(mapUtterance)
+    : [];
+
+  // DISPLAY transcript — prefer the punctuated cleaned_transcript (P2) when the
+  // Worker provides it; fall back to the raw transcript otherwise. Same
+  // per-utterance shape, only used for the post-session TRANSCRIPT rendering.
+  const normalizedTranscript: FeedbackReport['transcript'] =
+    Array.isArray(raw.cleaned_transcript) && raw.cleaned_transcript.length > 0
+      ? raw.cleaned_transcript.map(mapUtterance)
+      : rawTranscript;
 
   const utteranceEvidenceMap: FeedbackReport['utteranceEvidenceMap'] = {};
   const rawEvidence = Array.isArray(raw.evidence) ? raw.evidence : [];
@@ -412,14 +419,16 @@ export function normalizeApiReport(
 
   const durationMs = sessionMeta?.durationMs || raw.duration_ms || 0;
 
-  // Compute per-person communication metrics from transcript
+  // Compute per-person communication metrics from the RAW transcript (never the
+  // cleaned/display one) so KPI values are identical regardless of whether the
+  // Worker supplied cleaned_transcript.
   for (const person of persons) {
-    const personUtterances = normalizedTranscript.filter((u) => u.speaker_name === person.person_name);
+    const personUtterances = rawTranscript.filter((u) => u.speaker_name === person.person_name);
     if (personUtterances.length === 0) continue;
 
     const speakingTimeSec = personUtterances.reduce((sum, u) => sum + (u.end_ms - u.start_ms) / 1000, 0);
-    const totalSessionSec = normalizedTranscript.length > 0
-      ? (normalizedTranscript[normalizedTranscript.length - 1].end_ms - normalizedTranscript[0].start_ms) / 1000
+    const totalSessionSec = rawTranscript.length > 0
+      ? (rawTranscript[rawTranscript.length - 1].end_ms - rawTranscript[0].start_ms) / 1000
       : 1;
 
     let fillerCount = 0;
@@ -429,9 +438,9 @@ export function normalizeApiReport(
     }
 
     const latencies: number[] = [];
-    for (let i = 1; i < normalizedTranscript.length; i++) {
-      const prev = normalizedTranscript[i - 1];
-      const curr = normalizedTranscript[i];
+    for (let i = 1; i < rawTranscript.length; i++) {
+      const prev = rawTranscript[i - 1];
+      const curr = rawTranscript[i];
       if (curr.speaker_name === person.person_name && prev.speaker_name !== person.person_name) {
         latencies.push(Math.max(0, (curr.start_ms - prev.end_ms) / 1000));
       }
@@ -482,6 +491,9 @@ export function normalizeApiReport(
     persons,
     evidence,
     transcript: normalizedTranscript,
+    // Expose the raw transcript only when it differs from the display one, so
+    // evidence-jump substring matching can fall back to the original text.
+    rawTranscript: normalizedTranscript !== rawTranscript ? rawTranscript : undefined,
     utteranceEvidenceMap,
     captionSource,
     interviewType: raw.interview_type || raw.overall?.interview_type || undefined,

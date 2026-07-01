@@ -56,4 +56,42 @@ describe('TranscriptSection', () => {
     expect(screen.getByText('00:01')).toBeInTheDocument();
     expect(screen.getByText('00:08')).toBeInTheDocument();
   });
+
+  it('renders a SINGLE header timestamp when a group\'s utterances share the same start_ms', () => {
+    // Degraded / legacy data: every utterance has start_ms 0. Must NOT produce a
+    // column of identical 00:00 stamps — just one header timestamp.
+    const transcript: TranscriptUtterance[] = [
+      { utterance_id: 'u1', speaker_name: 'Tim', text: 'One.', start_ms: 0, end_ms: 0 },
+      { utterance_id: 'u2', speaker_name: 'Tim', text: 'Two.', start_ms: 0, end_ms: 0 },
+      { utterance_id: 'u3', speaker_name: 'Tim', text: 'Three.', start_ms: 0, end_ms: 0 },
+    ];
+
+    render(<TranscriptSection transcript={transcript} evidenceMap={{}} />);
+
+    // Exactly one 00:00 for the whole group, not one per utterance.
+    expect(screen.getAllByText('00:00')).toHaveLength(1);
+    // All three sentences still render.
+    expect(screen.getByText('One.')).toBeInTheDocument();
+    expect(screen.getByText('Two.')).toBeInTheDocument();
+    expect(screen.getByText('Three.')).toBeInTheDocument();
+  });
+
+  it('shows per-utterance timestamps only for groups with distinct times, single header otherwise', () => {
+    const transcript: TranscriptUtterance[] = [
+      // Group A (Tim): distinct times → per-utterance timestamps.
+      { utterance_id: 'a1', speaker_name: 'Tim', text: 'Alpha.', start_ms: 5000, end_ms: 6000 },
+      { utterance_id: 'a2', speaker_name: 'Tim', text: 'Beta.', start_ms: 20000, end_ms: 21000 },
+      // Group B (Sara): identical times → one header timestamp.
+      { utterance_id: 'b1', speaker_name: 'Sara', text: 'Gamma.', start_ms: 30000, end_ms: 30000 },
+      { utterance_id: 'b2', speaker_name: 'Sara', text: 'Delta.', start_ms: 30000, end_ms: 30000 },
+    ];
+
+    render(<TranscriptSection transcript={transcript} evidenceMap={{}} />);
+
+    // Group A: both distinct timestamps present.
+    expect(screen.getByText('00:05')).toBeInTheDocument();
+    expect(screen.getByText('00:20')).toBeInTheDocument();
+    // Group B: single header timestamp (only one 00:30, not two).
+    expect(screen.getAllByText('00:30')).toHaveLength(1);
+  });
 });

@@ -1405,7 +1405,12 @@ export function FeedbackView() {
       if (evIds.includes(evidenceId)) uttIds.add(uid);
     }
     if (uttIds.size === 0) {
-      for (const u of report.transcript) {
+      // Match against the raw (un-cleaned) transcript when available: evidence
+      // quotes come from the original punctuation-free text, so the cleaned
+      // display text (added punctuation / dropped fillers) would lower the
+      // substring hit rate.
+      const searchSource = report.rawTranscript ?? report.transcript;
+      for (const u of searchSource) {
         if (u.text && ev.text && u.text.includes(ev.text.slice(0, 30))) {
           uttIds.add(u.utterance_id);
         }

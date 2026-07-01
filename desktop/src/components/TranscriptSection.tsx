@@ -43,6 +43,11 @@ const SPEAKER_BG = [
   'bg-cyan-50',
 ];
 
+/** Estimated row heights for the virtualizer's initial layout (re-measured after
+ *  render via `virtualizer.measureElement`). */
+const HEADER_PX = 28;
+const UTTERANCE_ROW_PX = 26;
+
 /** Merge consecutive utterances from the same speaker into groups. */
 type UtteranceGroup = {
   speaker: string;
@@ -51,6 +56,14 @@ type UtteranceGroup = {
   items: TranscriptUtterance[];
   hasEvidence: boolean;
   evidenceIds: string[];
+  /**
+   * True when the group's utterances carry distinct start times (P0-a spread
+   * real per-utterance timings), so each sentence shows its own timestamp.
+   * False when every utterance shares the same start_ms (e.g. all 0 in
+   * degraded / legacy reports) — then only a single header timestamp is shown
+   * to avoid a noisy column of identical stamps.
+   */
+  perUtteranceTimes: boolean;
 };
 
 export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClick, scrollToUtteranceId, highlightedUtteranceIds, fillHeight }: Props) {
@@ -109,18 +122,23 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
           items: [u],
           hasEvidence: evIds.length > 0,
           evidenceIds: [...evIds],
+          perUtteranceTimes: false,
         });
       }
+    }
+    // Per group: show per-utterance timestamps only when the utterances have
+    // distinct start times; otherwise fall back to a single header timestamp.
+    for (const g of result) {
+      g.perUtteranceTimes = g.items.length > 1 && new Set(g.items.map(u => u.start_ms)).size > 1;
     }
     return result;
   }, [transcript, activeSpeaker, searchQuery, evidenceMap, speakerColorMap]);
 
   // Estimate each group's height from its utterance count: a ~28px speaker
-  // header plus ~26px per per-utterance row (timestamp + text). Actual heights
-  // are re-measured after render via `virtualizer.measureElement`, so this only
-  // needs to be a reasonable initial estimate to avoid scroll jumps.
-  const HEADER_PX = 28;
-  const UTTERANCE_ROW_PX = 26;
+  // header plus ~26px per utterance row (text, with an inline timestamp when
+  // per-utterance times are shown). Actual heights are re-measured after render
+  // via `virtualizer.measureElement`, so this only needs to be a reasonable
+  // initial estimate to avoid scroll jumps.
   const estimateGroupSize = useCallback(
     (index: number) => {
       const g = groups[index];
@@ -237,9 +255,14 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                   isGroupHighlighted ? 'border-l-2 border-l-accent bg-accent/5' : ''
                 }`}
               >
-                {/* Speaker header: name + color dot identify the group; the
-                    per-utterance timestamps below give each sentence its own time. */}
+                {/* Speaker header: name + color dot identify the group. When the
+                    group's utterances share one start time we show a single
+                    header timestamp here; otherwise each utterance carries its
+                    own timestamp below. */}
                 <div className="flex items-center gap-2 mb-1">
+                  {!group.perUtteranceTimes && (
+                    <span className="text-xs text-ink-secondary font-mono tabular-nums">{formatSessionTime(group.startMs)}</span>
+                  )}
                   <span className={`w-2 h-2 rounded-full ${SPEAKER_BG[group.speakerIndex]} ${SPEAKER_COLORS[group.speakerIndex]} ring-1 ring-current`} />
                   <span className={`text-sm font-medium ${SPEAKER_COLORS[group.speakerIndex]}`}>
                     {group.speaker}
@@ -256,16 +279,23 @@ export function TranscriptSection({ transcript, evidenceMap, onEvidenceBadgeClic
                     </div>
                   )}
                 </div>
-                {/* Utterance rows: each sentence gets its own real timestamp. */}
+                {/* Utterance rows. When per-utterance times are available, each
+                    row shows its own real timestamp; otherwise just the text. */}
                 {group.items.map(u => (
-                  <div key={u.utterance_id} className="flex items-start gap-2 pl-4">
-                    <span className="text-xs text-ink-secondary font-mono shrink-0 pt-0.5 tabular-nums">
-                      {formatSessionTime(u.start_ms)}
-                    </span>
-                    <p className="text-sm text-ink leading-relaxed flex-1 min-w-0">
+                  group.perUtteranceTimes ? (
+                    <div key={u.utterance_id} className="flex items-start gap-2 pl-4">
+                      <span className="text-xs text-ink-secondary font-mono shrink-0 pt-0.5 tabular-nums">
+                        {formatSessionTime(u.start_ms)}
+                      </span>
+                      <p className="text-sm text-ink leading-relaxed flex-1 min-w-0">
+                        {highlightText(u.text)}
+                      </p>
+                    </div>
+                  ) : (
+                    <p key={u.utterance_id} className="text-sm text-ink leading-relaxed pl-6">
                       {highlightText(u.text)}
                     </p>
-                  </div>
+                  )
                 ))}
               </div>
             );

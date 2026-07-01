@@ -213,6 +213,56 @@ describe('normalizeApiReport', () => {
     expect(result.transcript.map((u) => u.start_ms)).toEqual([0, 5000]);
   });
 
+  it('computes communication metrics from RAW transcript, not cleaned_transcript', () => {
+    // cleaned_transcript strips fillers and drops a pure-filler utterance. Metrics
+    // MUST stay on the raw transcript so switching the display source leaves KPIs
+    // unchanged: fillerWordCount and turnCount must reflect the raw data.
+    const rawUtterances = [
+      { utterance_id: 'u1', speaker_name: 'Alice', text: 'Hi um hello.', start_ms: 0, end_ms: 3000 },
+      { utterance_id: 'u2', speaker_name: 'Bob', text: 'Thanks.', start_ms: 4000, end_ms: 6000 },
+      { utterance_id: 'u3', speaker_name: 'Alice', text: 'um', start_ms: 7000, end_ms: 9000 }, // pure filler
+    ];
+    const rawOnly: RawApiReport = {
+      persons: [{ display_name: 'Alice', dimensions: [], summary: {} }],
+      transcript: rawUtterances,
+    };
+    const withCleaned: RawApiReport = {
+      persons: [{ display_name: 'Alice', dimensions: [], summary: {} }],
+      transcript: rawUtterances,
+      cleaned_transcript: [
+        // Filler word removed, pure-filler utterance u3 dropped.
+        { utterance_id: 'u1', speaker_name: 'Alice', text: 'Hi, hello.', start_ms: 0, end_ms: 3000 },
+        { utterance_id: 'u2', speaker_name: 'Bob', text: 'Thanks.', start_ms: 4000, end_ms: 6000 },
+      ],
+    };
+
+    const metricsRaw = normalizeApiReport(rawOnly).persons[0].communicationMetrics!;
+    const metricsCleaned = normalizeApiReport(withCleaned).persons[0].communicationMetrics!;
+
+    // Metrics must be byte-for-byte identical regardless of cleaned_transcript.
+    expect(metricsCleaned).toEqual(metricsRaw);
+    // Sanity: raw-based metrics count the fillers and both Alice turns.
+    expect(metricsRaw.fillerWordCount).toBeGreaterThan(0);
+    expect(metricsRaw.turnCount).toBe(2);
+  });
+
+  it('exposes rawTranscript only when it differs from the cleaned display transcript', () => {
+    const withCleaned: RawApiReport = {
+      transcript: [{ utterance_id: 'u1', speaker_name: 'Alice', text: 'raw', start_ms: 0, end_ms: 1000 }],
+      cleaned_transcript: [{ utterance_id: 'u1', speaker_name: 'Alice', text: 'Raw.', start_ms: 0, end_ms: 1000 }],
+    };
+    const withCleanedResult = normalizeApiReport(withCleaned);
+    expect(withCleanedResult.transcript[0].text).toBe('Raw.');
+    expect(withCleanedResult.rawTranscript).toBeDefined();
+    expect(withCleanedResult.rawTranscript![0].text).toBe('raw');
+
+    // No cleaned_transcript → display is raw, so rawTranscript is omitted.
+    const rawOnly: RawApiReport = {
+      transcript: [{ utterance_id: 'u1', speaker_name: 'Alice', text: 'raw', start_ms: 0, end_ms: 1000 }],
+    };
+    expect(normalizeApiReport(rawOnly).rawTranscript).toBeUndefined();
+  });
+
   it('builds utteranceEvidenceMap from evidence utterance_ids', () => {
     const raw: RawApiReport = {
       evidence: [

@@ -150,7 +150,15 @@ export type FeedbackReport = {
   overall: OverallFeedback;
   persons: PersonFeedback[];
   evidence: EvidenceRef[];
+  /** Display transcript: punctuated cleaned_transcript when available, else raw. */
   transcript: TranscriptUtterance[];
+  /**
+   * Un-cleaned transcript. Kept alongside `transcript` so evidence-jump
+   * substring matching can search the original (punctuation-free, filler-bearing)
+   * text even when `transcript` is the cleaned display array. Omitted when it
+   * would be identical to `transcript`.
+   */
+  rawTranscript?: TranscriptUtterance[];
   utteranceEvidenceMap: UtteranceEvidenceMap;
   captionSource?: string;
   interviewType?: string;
