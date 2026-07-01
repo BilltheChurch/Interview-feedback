@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { isInferenceEnabled, resolveInferencePrimaryBaseUrl, type Env } from "../src/config";
-import { invokeInferenceAnalysisEvents, type InferenceCallContext } from "../src/inference-helpers";
+import {
+  invokeInferenceAnalysisEvents,
+  invokeInferenceAnalysisReport,
+  type InferenceCallContext,
+} from "../src/inference-helpers";
 import type { InferenceFailoverClient } from "../src/inference_client";
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
@@ -115,5 +119,68 @@ describe("invokeInferenceAnalysisEvents — inference disabled", () => {
     expect(result.backend_used).toBe("local");
     expect(result.fallback_reason).toBe("inference_disabled");
     expect(result.warnings.join(" ")).toMatch(/inference disabled/i);
+  });
+});
+
+describe("invokeInferenceAnalysisReport — inference disabled (R3)", () => {
+  it("short-circuits WITHOUT calling the inference client and returns a degraded empty result", async () => {
+    // R3: retired inference origin returns Cloudflare 530 / error 1016 (Origin DNS error).
+    // When INFERENCE_ENABLED is false, analysis/report must not issue any HTTP request.
+    const callJson = vi.fn(() => {
+      throw new Error("inference client must NOT be called when inference is disabled");
+    });
+    const ctx: InferenceCallContext = {
+      env: makeEnv({ INFERENCE_ENABLED: "false", INFERENCE_BASE_URL: "https://dead.frontierace.ai" }),
+      inferenceClient: { callJson, snapshot: () => ({}) } as unknown as InferenceFailoverClient,
+      storeDependencyHealth: async () => {},
+    };
+
+    const result = await invokeInferenceAnalysisReport(ctx, {
+      session_id: "s1",
+      transcript: [],
+      memos: [],
+      stats: [],
+      evidence: [],
+      events: [],
+    });
+
+    // No HTTP attempt at all — this is what eliminates the 530 retry noise.
+    expect(callJson).not.toHaveBeenCalled();
+    // Degraded shape lets callers fall back to memo_first: empty per_person + degraded flag.
+    expect(result.backend_used).toBe("disabled");
+    expect(result.degraded).toBe(true);
+    expect(Array.isArray((result.data as { per_person?: unknown[] }).per_person)).toBe(true);
+    expect(((result.data as { per_person: unknown[] }).per_person).length).toBe(0);
+    expect(result.timeline).toEqual([]);
+    expect(result.warnings.join(" ")).toMatch(/inference disabled/i);
+  });
+
+  it("does not short-circuit when inference is enabled — still goes through failover", async () => {
+    const callJson = vi.fn(async () => ({
+      data: { per_person: [{ name: "A" }], overall: {} },
+      backend: "primary" as const,
+      degraded: false,
+      warnings: [] as string[],
+      timeline: [],
+      health: {},
+    }));
+    const ctx: InferenceCallContext = {
+      env: makeEnv({ INFERENCE_ENABLED: "true", INFERENCE_BASE_URL: "https://live.example" }),
+      inferenceClient: { callJson, snapshot: () => ({}) } as unknown as InferenceFailoverClient,
+      storeDependencyHealth: async () => {},
+    };
+
+    const result = await invokeInferenceAnalysisReport(ctx, {
+      session_id: "s1",
+      transcript: [],
+      memos: [],
+      stats: [],
+      evidence: [],
+      events: [],
+    });
+
+    expect(callJson).toHaveBeenCalledTimes(1);
+    expect(result.backend_used).toBe("primary");
+    expect((result.data as { per_person: unknown[] }).per_person).toHaveLength(1);
   });
 });

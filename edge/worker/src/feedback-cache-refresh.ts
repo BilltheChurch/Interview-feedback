@@ -79,7 +79,7 @@ export interface FeedbackCacheRefreshContext {
   }>;
   invokeInferenceAnalysisReport: (payload: Record<string, unknown>) => Promise<{
     data: Record<string, unknown>;
-    backend_used: "primary" | "secondary";
+    backend_used: "primary" | "secondary" | "disabled";
     degraded: boolean;
     warnings: string[];
     timeline: InferenceBackendTimelineItem[];

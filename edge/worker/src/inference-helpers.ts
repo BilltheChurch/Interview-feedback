@@ -248,11 +248,26 @@ export async function invokeInferenceAnalysisReport(
   payload: Record<string, unknown>
 ): Promise<{
   data: Record<string, unknown>;
-  backend_used: "primary" | "secondary";
+  backend_used: "primary" | "secondary" | "disabled";
   degraded: boolean;
   warnings: string[];
   timeline: InferenceBackendTimelineItem[];
 }> {
+  // All-cloud mode: skip the inference HTTP attempt entirely. Hitting the retired
+  // inference origin yields Cloudflare 530 / error 1016 (Origin DNS error), which is
+  // then retried by the failover client (primary #1/#2/#3) — pure noise. Return a
+  // degraded empty result so callers fall back to memo_first (their `per_person`
+  // empty-array branch) without any zombie network call.
+  if (!isInferenceEnabled(ctx.env)) {
+    return {
+      data: { per_person: [] },
+      backend_used: "disabled",
+      degraded: true,
+      warnings: ["analysis/report: inference disabled — falling back to memo_first"],
+      timeline: [],
+    };
+  }
+
   const path = ctx.env.INFERENCE_REPORT_PATH ?? "/analysis/report";
   const timeoutMs = parseTimeoutMs(ctx.env.INFERENCE_TIMEOUT_MS ?? "15000");
   const response = await callInferenceWithFailover<Record<string, unknown>>(ctx, {
