@@ -98,6 +98,7 @@ export interface RawApiReport {
     interview_quality?: FeedbackReport['overall']['interviewQuality'];
     interview_type?: string;
     position_title?: string;
+    notice?: string;
     [key: string]: unknown;
   };
   per_person?: RawPerson[];
@@ -461,6 +462,7 @@ export function normalizeApiReport(
       recommendation,
       questionAnalysis: questionAnalysis && questionAnalysis.length > 0 ? questionAnalysis : undefined,
       interviewQuality,
+      notice: typeof raw.overall?.notice === 'string' ? raw.overall.notice : undefined,
     },
     persons,
     evidence,

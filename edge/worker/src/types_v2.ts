@@ -202,7 +202,8 @@ export interface ReportQualityMeta {
   invalid_claim_count: number;
   needs_evidence_count: number;
   report_source?: "memo_first" | "llm_enhanced" | "llm_failed"
-    | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback";
+    | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback"
+    | "degraded_no_participants";
   report_model?: string | null;
   report_degraded?: boolean;
   report_error?: string | null;
@@ -240,6 +241,9 @@ export interface OverallFeedback {
     highlights: string[];
     risks: string[];
   };
+  /** R2: user-facing notice for degraded overview-only reports (e.g. when no
+   *  student speech was captured). English; surfaced in the desktop UI. */
+  notice?: string;
 }
 
 export interface ResultV2 {
@@ -313,7 +317,8 @@ export interface ResultV2 {
     report_pipeline?: {
       mode: "memo_first_with_llm_polish" | "llm_core_synthesis";
       source: "memo_first" | "llm_enhanced" | "llm_failed"
-        | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback";
+        | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback"
+        | "degraded_no_participants";
       llm_attempted: boolean;
       llm_success: boolean;
       llm_elapsed_ms: number | null;

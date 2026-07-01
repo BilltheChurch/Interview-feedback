@@ -1729,7 +1729,8 @@ export function buildResultV2(params: {
   reportPipeline?: {
     mode: "memo_first_with_llm_polish" | "llm_core_synthesis";
     source: "memo_first" | "llm_enhanced" | "llm_failed"
-      | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback";
+      | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback"
+      | "degraded_no_participants";
     llm_attempted: boolean;
     llm_success: boolean;
     llm_elapsed_ms: number | null;

@@ -1480,6 +1480,18 @@ export function FeedbackView() {
                   animate="visible"
                   className="flex-1 min-w-0 overflow-y-auto scroll-smooth"
                 >
+                  {report.overall.notice && (
+                    <motion.div variants={fadeInUp} custom={0.5} className="pt-6">
+                      <div
+                        role="status"
+                        className="flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+                      >
+                        <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-amber-500" />
+                        <span className="leading-relaxed">{report.overall.notice}</span>
+                      </div>
+                    </motion.div>
+                  )}
+
                   <section id="overview" data-section className="pb-4 pt-6">
                     <SectionStickyHeader icon={Activity} title="Overview" />
                     <motion.div variants={fadeInUp} custom={1}>

@@ -169,6 +169,42 @@ export function evaluateFeedbackQualityGates(params: {
   return { passed: failures.length === 0, failures };
 }
 
+// ── R2: degraded overview-only report (no student speech) ────────────
+
+/**
+ * User-facing notice (English — surfaced in the desktop UI) shown when a
+ * session produced no eligible student speech and only an overview is
+ * available.
+ */
+export const NO_STUDENT_SPEECH_NOTICE =
+  "No student speech detected — overview only. This report shows session overview and the interviewer's notes; no per-student feedback could be generated because no student speech was captured.";
+
+/**
+ * R2 fork: distinguish the two kinds of "the LLM produced no real per_person".
+ *
+ *   1. No eligible student speech (`eligibleActiveStudentCount === 0`) → a
+ *      LEGITIMATE "interviewer monologue / silent student side" session. The
+ *      only per_person present are memo-first PLACEHOLDER cards
+ *      (buildMemoFirstReport always emits ≥1 person — a synthetic "unknown" or a
+ *      zero-turn roster entry), NOT real scored feedback. Emit a clean
+ *      overview-only degraded report instead of a hard block.
+ *   2. Eligible students exist (`> 0`) but synthesis still returned nothing →
+ *      genuine LLM failure; NOT degraded, keep the existing blocking path.
+ *
+ * `eligibleActiveStudentCount` MUST come from the shared eligibility oracle
+ * (`computeEligibleSpeakers` in llm-synthesizer.ts) so this decision can never
+ * diverge from what the synthesizer actually did. Do NOT pass `studentStats.length`
+ * or a naive turns/talk-time count — those over-count relative to the synthesizer's
+ * three-layer filter (which also excludes the interviewer by name and drops
+ * unnamed/unmentioned clusters), which would wrongly keep the red bar.
+ */
+export function resolveNoStudentSpeechDegradation(
+  eligibleActiveStudentCount: number
+): { degraded: boolean; eligibleStudentCount: number; notice: string } {
+  const degraded = eligibleActiveStudentCount === 0;
+  return { degraded, eligibleStudentCount: eligibleActiveStudentCount, notice: NO_STUDENT_SPEECH_NOTICE };
+}
+
 // ── Stats helpers ───────────────────────────────────────────────────
 
 export function mergeStatsWithRoster(stats: SpeakerStatItem[], state: SessionState): SpeakerStatItem[] {

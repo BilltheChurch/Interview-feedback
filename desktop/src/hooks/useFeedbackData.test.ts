@@ -48,6 +48,24 @@ describe('normalizeApiReport', () => {
     expect(result.overall.team_summary).toBe('Great session overall.');
   });
 
+  it('R2: plumbs overall.notice through for degraded overview-only reports', () => {
+    const raw: RawApiReport = {
+      overall: { team_summary: 'Overview only.', notice: 'No student speech detected — overview only.' },
+      per_person: [],
+    };
+    const result = normalizeApiReport(raw);
+    expect(result.overall.notice).toBe('No student speech detected — overview only.');
+    expect(result.persons).toEqual([]);
+  });
+
+  it('R2: leaves notice undefined for normal reports', () => {
+    const raw: RawApiReport = {
+      overall: { team_summary: 'Normal report.' },
+    };
+    const result = normalizeApiReport(raw);
+    expect(result.overall.notice).toBeUndefined();
+  });
+
   it('normalizes team_summary from summary_sections bullets', () => {
     const raw: RawApiReport = {
       overall: {

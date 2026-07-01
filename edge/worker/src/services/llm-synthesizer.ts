@@ -383,6 +383,31 @@ function filterEligibleSpeakers(
   return { active, zeroTurn };
 }
 
+/**
+ * Shared eligibility oracle (R2). Runs the EXACT same three-layer filter the
+ * synthesis prompt uses to decide which speakers become `interviewee_stats`
+ * (and therefore whether the LLM can produce any per_person items):
+ *   ① exclude interviewer keys (teacher-stream speaker names + interviewer_name)
+ *   ② drop clusters that are neither named nor mentioned in memos
+ *   ③ require turns > 0 && talk_time_ms > 0 to count as "active"
+ *
+ * The finalize orchestrator calls this so its "no eligible student speech"
+ * decision can never diverge from what the synthesizer actually did. Returns
+ * both the active (spoke) and zeroTurn (mentioned-but-silent) speakers plus the
+ * interviewer/memo key sets for reuse.
+ */
+export function computeEligibleSpeakers(payload: SynthesizeRequestPayload): {
+  active: SpeakerStatItem[];
+  zeroTurn: SpeakerStatItem[];
+  interviewerKeys: Set<string>;
+  memoKeys: Set<string>;
+} {
+  const interviewerKeys = identifyInterviewerKeys(payload);
+  const memoKeys = extractMemoMentionedKeys(payload);
+  const { active, zeroTurn } = filterEligibleSpeakers(payload.stats, interviewerKeys, memoKeys);
+  return { active, zeroTurn, interviewerKeys, memoKeys };
+}
+
 // ── Evidence speaker_key accessor ───────────────────────────────────────────
 // `buildSynthesizePayload` (finalize_v2.ts) attaches a normalized `speaker_key`
 // onto each evidence item via `{ ...e, speaker_key }`. The base EvidenceItem

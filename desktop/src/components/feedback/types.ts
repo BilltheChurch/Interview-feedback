@@ -101,6 +101,9 @@ export type OverallFeedback = {
     structure_score: number;
     suggestions: string;
   };
+  /** R2: user-facing notice for degraded overview-only reports (e.g. no student
+   *  speech detected). English; surfaced as a banner in the feedback view. */
+  notice?: string;
 };
 
 export type ClaimBeforeAfter = {

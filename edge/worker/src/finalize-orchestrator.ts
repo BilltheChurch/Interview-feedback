@@ -28,6 +28,8 @@ import {
   validatePersonFeedbackEvidence
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
+import { resolveNoStudentSpeechDegradation } from "./feedback-helpers";
+import { computeEligibleSpeakers } from "./services/llm-synthesizer";
 import { emptySpeakerLogs, mergeSpeakerLogs } from "./speaker_logs";
 import type { InferenceBackendTimelineItem } from "./inference_client";
 import { buildReconciledTranscript, resolveStudentBinding } from "./reconcile";
@@ -429,12 +431,44 @@ export async function runFinalizeV2Job(
 
         const audioDurationMs = calcTranscriptDurationMs(transcript);
         const statsObservations = generateStatsObservations(studentStats, audioDurationMs);
+
+        // ── R2: eligible-student signal (shared oracle) — same as full pipeline ──
+        const roEligibilityConfig = (state.config ?? {}) as Record<string, unknown>;
+        const roEligibilityContext = collectEnrichedContext({
+          sessionConfig: {
+            mode: roEligibilityConfig.mode as "1v1" | "group" | undefined,
+            interviewer_name: roEligibilityConfig.interviewer_name as string | undefined,
+            position_title: roEligibilityConfig.position_title as string | undefined,
+            company_name: roEligibilityConfig.company_name as string | undefined,
+            stages: configStages,
+            free_form_notes: roEligibilityConfig.free_form_notes as string | undefined,
+            rubric: roEligibilityConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
+          },
+        });
+        const roEligibilityPayload = buildSynthesizePayload({
+          sessionId,
+          transcript,
+          memos: enrichedMemos,
+          evidence,
+          stats: studentStats,
+          events: [],
+          bindings: memoBindings,
+          rubric: roEligibilityContext.rubric,
+          sessionContext: roEligibilityContext.sessionContext,
+          freeFormNotes: roEligibilityContext.freeFormNotes,
+          historical: [],
+          stages: roEligibilityContext.stages.length > 0 ? roEligibilityContext.stages : configStages,
+          locale,
+          nameAliases: (roEligibilityConfig.name_aliases ?? {}) as Record<string, string[]>,
+        });
+        const eligibleActiveStudentCount = computeEligibleSpeakers(roEligibilityPayload).active.length;
+
         const memoFirstReport = buildMemoFirstReport({ transcript, memos: memosWithEvidence, evidence: legacyEvidence, stats: studentStats });
         let finalOverall = memoFirstReport.overall;
         let finalPerPerson = memoFirstReport.per_person;
         let finalSummary: string | undefined;
         let finalPersonalizedMemo: string | undefined;
-        let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
+        let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" | "degraded_no_participants" = "memo_first";
         let reportModel: string | null = null;
         let reportError: string | null = null;
         let reportBlockingReason: string | null = null;
@@ -516,11 +550,31 @@ export async function runFinalizeV2Job(
               reportSource = "memo_first_fallback";
               reportBlockingReason = validation.failures[0] || "invalid evidence refs";
             }
+          } else {
+            // Empty synthesis (no per_person) — mark as fallback so the R2 degraded
+            // fork below can distinguish "no student speech" from a real LLM failure.
+            reportSource = "memo_first_fallback";
+            reportBlockingReason = "analysis/synthesize returned empty per_person";
           }
         } catch (synthErr) {
           reportSource = "memo_first_fallback";
           reportError = getErrorMessage(synthErr);
           finalizeWarnings.push(`report-only synthesis failed: ${getErrorMessage(synthErr)}`);
+        }
+
+        // ── R2: degraded overview-only report (no student speech) ──
+        // Same fork as the full pipeline, keyed on the shared eligibility oracle
+        // (NOT finalPerPerson.length — memo-first always emits ≥1 placeholder card).
+        if (reportSource === "memo_first_fallback") {
+          const degradation = resolveNoStudentSpeechDegradation(eligibleActiveStudentCount);
+          if (degradation.degraded) {
+            reportSource = "degraded_no_participants";
+            reportBlockingReason = null;
+            finalPerPerson = [];
+            finalOverall = { ...(finalOverall as Record<string, unknown>), notice: degradation.notice };
+            finalizeWarnings.push("degraded_no_student_speech");
+            finalizeDegraded = true;
+          }
         }
 
         if (!ACCEPTED_REPORT_SOURCES.has(reportSource)) {
@@ -620,7 +674,13 @@ export async function runFinalizeV2Job(
         cache.blocking_reason = reportBlockingReason;
         cache.quality_gate_passed = ACCEPTED_REPORT_SOURCES.has(reportSource)
           && finalStrictValidation.needsEvidenceCount === 0;
-        cache.ready = cache.quality_gate_passed && !tentative;
+        // R2: a degraded overview-only report is inherently deliverable — the
+        // tentative flag may still be set (all-teacher transcript can trip the
+        // unknown-ratio / p95 gates) but must NOT block delivery. Other sources
+        // keep the stricter `&& !tentative` requirement.
+        cache.ready = reportSource === "degraded_no_participants"
+          ? cache.quality_gate_passed
+          : cache.quality_gate_passed && !tentative;
         await ctx.storeFeedbackCache(cache);
 
         await ctx.updateFinalizeV2Status(jobId, {
@@ -1109,6 +1169,41 @@ export async function runFinalizeV2Job(
     const audioDurationMs = calcTranscriptDurationMs(transcript);
     const statsObservations = generateStatsObservations(studentStats, audioDurationMs);
 
+    // ── R2: eligible-student signal (shared oracle) ──
+    // Run the SAME three-layer filter the synthesizer uses (computeEligibleSpeakers)
+    // so the "no student speech" decision below can never diverge from whether the
+    // LLM could actually produce any per_person. Built from the same inputs as the
+    // real synthesis payload.
+    const eligibilityConfig = (state.config ?? {}) as Record<string, unknown>;
+    const eligibilityContext = collectEnrichedContext({
+      sessionConfig: {
+        mode: eligibilityConfig.mode as "1v1" | "group" | undefined,
+        interviewer_name: eligibilityConfig.interviewer_name as string | undefined,
+        position_title: eligibilityConfig.position_title as string | undefined,
+        company_name: eligibilityConfig.company_name as string | undefined,
+        stages: configStages,
+        free_form_notes: eligibilityConfig.free_form_notes as string | undefined,
+        rubric: eligibilityConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
+      },
+    });
+    const eligibilityPayload = buildSynthesizePayload({
+      sessionId,
+      transcript,
+      memos: enrichedMemos,
+      evidence,
+      stats: studentStats,
+      events: [],
+      bindings: memoBindings,
+      rubric: eligibilityContext.rubric,
+      sessionContext: eligibilityContext.sessionContext,
+      freeFormNotes: eligibilityContext.freeFormNotes,
+      historical: [],
+      stages: eligibilityContext.stages.length > 0 ? eligibilityContext.stages : configStages,
+      locale,
+      nameAliases: (eligibilityConfig.name_aliases ?? {}) as Record<string, string[]>,
+    });
+    const eligibleActiveStudentCount = computeEligibleSpeakers(eligibilityPayload).active.length;
+
     // Keep legacy evidence + memo-first as fallback baseline
     const legacyEvidence = buildEvidence({ memos, transcript });
     const memosWithEvidence = attachEvidenceToMemos(memos, legacyEvidence);
@@ -1186,7 +1281,8 @@ export async function runFinalizeV2Job(
     let finalSummary: string | undefined;
     let finalPersonalizedMemo: string | undefined;
     let reportSource: "memo_first" | "llm_enhanced" | "llm_failed"
-      | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback" = "memo_first";
+      | "llm_synthesized" | "llm_synthesized_truncated" | "memo_first_fallback"
+      | "degraded_no_participants" = "memo_first";
     let reportModel: string | null = null;
     let reportError: string | null = null;
     let reportBlockingReason: string | null = null;
@@ -1397,10 +1493,34 @@ export async function runFinalizeV2Job(
     const reportMs = Date.now() - reportStart;
     backendTimeline.push(...reportTimeline);
 
+    // ── R2: degraded overview-only report (no student speech) ──
+    // We only reach memo_first_fallback with NO real per_person in two cases:
+    //   (a) no eligible student ever spoke (interviewer monologue / silent student
+    //       side) → LEGITIMATE overview-only session, emit a deliverable degraded
+    //       report with a user-facing notice instead of a hard block; and
+    //   (b) eligible students exist but synthesis still returned nothing → a real
+    //       LLM failure → keep blocking (reportSource stays memo_first_fallback).
+    // The signal is the shared eligibility oracle (eligibleActiveStudentCount), NOT
+    // finalPerPerson.length — buildMemoFirstReport always emits ≥1 PLACEHOLDER card,
+    // so per_person is never actually empty here.
+    if (reportSource === "memo_first_fallback") {
+      const degradation = resolveNoStudentSpeechDegradation(eligibleActiveStudentCount);
+      if (degradation.degraded) {
+        reportSource = "degraded_no_participants";
+        reportBlockingReason = null;
+        // Overview-only: drop the memo-first placeholder person cards so the UI
+        // shows just the overview + notice, no phantom "unknown" student.
+        finalPerPerson = [];
+        finalOverall = { ...(finalOverall as Record<string, unknown>), notice: degradation.notice };
+        finalizeWarnings.push("degraded_no_student_speech");
+        finalizeDegraded = true;
+      }
+    }
+
     // ── Evidence namespace alignment ──
     // When report comes from legacy or memo_first fallback, the claim evidence_refs
     // reference legacy evidence IDs. Switch the evidence pack to match.
-    if (reportSource === 'memo_first_fallback' || reportSource === 'memo_first' || reportSource === 'llm_enhanced' || reportSource === 'llm_failed') {
+    if (reportSource === 'memo_first_fallback' || reportSource === 'memo_first' || reportSource === 'llm_enhanced' || reportSource === 'llm_failed' || reportSource === 'degraded_no_participants') {
       evidence = legacyEvidence;
     }
 

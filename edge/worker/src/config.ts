@@ -812,11 +812,16 @@ export const MAX_CONSECUTIVE_FAILURES = 5;
  * llm_enhanced       — legacy polish pipeline (inference /analysis/report)
  * llm_synthesized    — new synthesis pipeline (inference /analysis/synthesize)
  * llm_synthesized_truncated — synthesis succeeded but input was truncated
+ * degraded_no_participants — R2: no eligible student speech was captured, so
+ *   only an overview (interviewer notes + session summary) is available. This
+ *   is a legitimate deliverable — NOT a hard failure — so the report is
+ *   delivered with a user-facing notice instead of a red bar.
  */
 export const ACCEPTED_REPORT_SOURCES: ReadonlySet<string> = new Set([
   "llm_enhanced",
   "llm_synthesized",
-  "llm_synthesized_truncated"
+  "llm_synthesized_truncated",
+  "degraded_no_participants"
 ]);
 
 // ── Pure utility functions ──────────────────────────────────────────
