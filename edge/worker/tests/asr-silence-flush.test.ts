@@ -167,11 +167,14 @@ describe("silence-timeout flush", () => {
     // A raw utterance was persisted.
     expect(raw.students).toHaveLength(1);
     expect(raw.students[0].text).toBe("hello there");
-    // R-E: start/end derive from the SESSION ingest chunk seq, not Speechmatics relative ms.
+    // start_seq/end_seq remain the SESSION ingest chunk seq (finalize cutoff/ordering key).
     expect(raw.students[0].start_seq).toBe(5);
     expect(raw.students[0].end_seq).toBe(12);
-    expect(raw.students[0].start_ms).toBe((5 - 1) * 1000);
-    expect(raw.students[0].end_ms).toBe(12 * 1000);
+    // P0-a: start_ms/end_ms are the Speechmatics word times shifted onto the session timeline
+    // by this connection's session base (default 0 here): 1.0s→1000, 1.8s→1800. They reflect
+    // the real speaking time, not the emit-boundary seq span.
+    expect(raw.students[0].start_ms).toBe(1000);
+    expect(raw.students[0].end_ms).toBe(1800);
   });
 
   it("does not flush before the silence window elapses", async () => {

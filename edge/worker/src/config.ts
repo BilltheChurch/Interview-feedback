@@ -657,6 +657,15 @@ export interface AsrRealtimeRuntime {
    *  Backpressure lag = lastSentToSpeechmaticsSeq - lastAckedSeq; when lag exceeds
    *  BACKPRESSURE_WINDOW the drain loop skips the current pass to let acks catch up. */
   lastAckedSeq: number;
+  /** P0-a: session-time offset (ms) for the CURRENT Speechmatics WS connection.
+   *  Speechmatics reports word-level times relative to each StartRecognition (its timeline
+   *  restarts at ~0 on every reconnect). This base = the session ms already ingested when
+   *  this connection's StartRecognition fired (≈ lastSentSeq × 1000 at connect time). An
+   *  utterance's session start_ms = connectionSessionBaseMs + speechmatics-relative start_ms,
+   *  so timestamps spread across the real session timeline (no 00:00 collapse) and stay
+   *  monotonic across reconnects (the base only grows with the session). First connection
+   *  base = 0. DISTINCT from the seq cursors, which remain the finalize cutoff/ordering key. */
+  connectionSessionBaseMs: number;
 }
 
 export interface AudioChunkFrame {

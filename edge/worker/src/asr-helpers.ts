@@ -280,7 +280,8 @@ export function buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime
     silenceFlushTimer: null,       // silence-timeout flush handle (armed on buffer, cleared on flush/close)
     lastAudioSentAt: 0,            // epoch sentinel: never sent → keepalive eligible immediately
     lastSentToSpeechmaticsSeq: 0,  // per-connection send counter (resets on each WS connect)
-    lastAckedSeq: 0                // per-connection ack counter (resets on each WS connect)
+    lastAckedSeq: 0,               // per-connection ack counter (resets on each WS connect)
+    connectionSessionBaseMs: 0     // P0-a: session-time offset for the current Speechmatics connection (0 = first)
   };
 }
 

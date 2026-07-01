@@ -137,7 +137,9 @@ describe("R-E: transcript order survives a mid-session Speechmatics reconnect", 
 
     // ── Utterance 1: happens LATE in the session. The drain loop (session clock) has
     // already advanced the seq cursors to ~200s of audio for this window. Speechmatics
-    // reports its own connection-relative time (200s) for this first connection.
+    // reports its own connection-relative time (200s) for this FIRST connection, whose
+    // session base is 0 (nothing ingested before the very first StartRecognition).
+    runtime.connectionSessionBaseMs = 0;
     runtime.currentStartSeq = 201; // drain loop: session chunk seq for window start
     runtime.lastSentSeq = 210;     // drain loop: latest session chunk seq sent
     await handleSpeechmaticsMessage(
@@ -149,8 +151,10 @@ describe("R-E: transcript order survives a mid-session Speechmatics reconnect", 
     await handleSpeechmaticsMessage("sess", "students", END_OF_TRANSCRIPT, ctx);
 
     // ── Speechmatics WS RECONNECTS. A fresh StartRecognition resets its timeline to ~0.
-    // The drain loop keeps counting session chunk seq (it never resets), so the NEXT
-    // window's session cursors are even higher.
+    // connectSpeechmaticsRealtime captures the session ms already ingested as this
+    // connection's session base (~215s). The drain loop keeps counting session chunk seq
+    // (it never resets), so the NEXT window's session cursors are even higher.
+    runtime.connectionSessionBaseMs = 215_000; // set at StartRecognition = session ms ingested
     runtime.currentStartSeq = 215; // session chunk seq — strictly after utterance 1
     runtime.lastSentSeq = 224;
     // Utterance 2 arrives with Speechmatics-relative time ≈ 0 (post-reconnect timeline).
@@ -168,8 +172,12 @@ describe("R-E: transcript order survives a mid-session Speechmatics reconnect", 
     expect(u1.text).toBe("first spoken");
     expect(u2.text).toBe("second spoken");
 
-    // The post-reconnect utterance must sort AFTER the first by BOTH keys. With the bug,
-    // buf.startMs≈500ms overwrites the cursors → u2.start_ms≈0 < u1.start_ms → inverted.
+    // The post-reconnect utterance must sort AFTER the first by BOTH keys. With the OLD bug
+    // (seq-derived start_ms, no session base), the reconnect timeline collapsed u2 onto a
+    // small start; now start_ms = connectionSessionBaseMs + speechmatics-relative time:
+    //   u1 = 0 + 200000 = 200000,  u2 = 215000 + 500 = 215500 → monotonic, no inversion.
+    expect(u1.start_ms).toBe(200_000);
+    expect(u2.start_ms).toBe(215_500);
     expect(u2.start_seq).toBeGreaterThan(u1.start_seq);
     expect(u2.start_ms).toBeGreaterThan(u1.start_ms);
 

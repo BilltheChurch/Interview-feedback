@@ -208,6 +208,8 @@ export async function closeRealtimeAsrSession(
     // restarts at 1 each StartRecognition); reset on full teardown too.
     runtime.lastSentToSpeechmaticsSeq = 0;
     runtime.lastAckedSeq = 0;
+    // P0-a: full teardown resets the session clock, so the connection offset resets too.
+    runtime.connectionSessionBaseMs = 0;
   }
 
   if (ws) {
@@ -574,7 +576,8 @@ export async function emitRealtimeUtterance(
   streamRole: StreamRole,
   text: string,
   ctx: RealtimeAsrContext,
-  speakerOverride: string | null = null
+  speakerOverride: string | null = null,
+  timingOverride: { startMs: number; endMs: number } | null = null
 ): Promise<void> {
   const runtime = ctx.asrRealtimeByStream[streamRole];
   const endSeq = Math.max(runtime.lastSentSeq, runtime.currentStartSeq ?? runtime.lastSentSeq);
@@ -584,8 +587,17 @@ export async function emitRealtimeUtterance(
   const createdAt = new Date().toISOString();
   const endIngestAtMs = runtime.sentChunkTsBySeq.get(endSeq) ?? Date.now();
   const latencyMs = Math.max(0, Date.now() - endIngestAtMs);
-  const startMs = (startSeq - 1) * 1000;
-  const endMs = endSeq * 1000;
+  // P0-a: prefer the connection-session-based timing (Speechmatics word time + per-connection
+  // session offset) when the caller supplies it — this spreads utterances across the real
+  // session timeline instead of collapsing them onto emit-boundary seq spans. The seq cursors
+  // (start_seq/end_seq below) stay authoritative for finalize cutoff/ordering. When no override
+  // is given (DashScope realtime path), fall back to the seq-derived span, unchanged.
+  const startMs = timingOverride
+    ? Math.max(0, Math.round(timingOverride.startMs))
+    : (startSeq - 1) * 1000;
+  const endMs = timingOverride
+    ? Math.max(startMs, Math.round(timingOverride.endMs))
+    : endSeq * 1000;
 
   const [asrByStream, utterancesByStream, ingestByStream] = await Promise.all([
     ctx.loadAsrByStream(),
@@ -945,6 +957,16 @@ async function connectSpeechmaticsRealtime(
     ctx.doCtx.waitUntil(refreshAsrStreamMetrics(sessionId, streamRole, ctx));
   });
 
+  // P0-a: capture the session-time offset for THIS connection's Speechmatics timeline.
+  // Speechmatics numbers word times from ~0 on every StartRecognition (its timeline resets
+  // per connection). The session ms already ingested when this connection starts is the
+  // offset that maps this connection's relative word times back onto the session timeline.
+  // lastSentSeq is the session-monotonic ingest chunk seq (chunks ≈ 1s), preserved across a
+  // reconnect (clearQueue=false) and 0 on the first connect — so the first connection's base
+  // is 0 (relative times pass through) and a reconnect's base = session time already elapsed
+  // (post-reconnect utterances land AFTER the pre-reconnect ones — monotonic, no collapse).
+  runtime.connectionSessionBaseMs = Math.max(0, runtime.lastSentSeq) * 1000;
+
   // teacher = single speaker → diarization off (§9.3.4); students → diarization on.
   // maxSpeakers is only applied for the students stream (diarization must be true).
   const language = (ctx.env.SPEECHMATICS_LANGUAGE ?? "cmn_en").trim() || "cmn_en";
@@ -1133,17 +1155,21 @@ export async function maybeForwardPartial(
 /**
  * Emit the accumulated sentence-level utterance (endpointing), then clear the buffer.
  *
- * R-E: the ordering clock is the SESSION-MONOTONIC ingest chunk seq maintained by the
- * drain loop (runtime.currentStartSeq / runtime.lastSentSeq), which counts real ingested
- * chunks and never resets. emitRealtimeUtterance derives start_ms/end_ms from those
- * cursors. We deliberately do NOT re-derive the cursors from buf.startMs/buf.endMs:
- * those are Speechmatics CONNECTION-relative times that restart at ~0 on every WS
- * reconnect (each StartRecognition renumbers its timeline). Overwriting the session
- * cursors with them collapsed post-reconnect utterances back to small start values,
- * inverting their order against pre-reconnect utterances in the finalize transcript
- * (which sorts by start_ms). buf.startMs/buf.endMs remain used ONLY for the intra-
- * connection endpointing gap check in handleSpeechmaticsMessage, where both operands
- * share the same connection origin and the comparison is safe.
+ * P0-a — utterance timestamps: start_ms/end_ms are placed on the SESSION timeline as
+ *   session_ms = connectionSessionBaseMs + speechmatics-relative word ms (buf.startMs/endMs).
+ * buf.startMs/buf.endMs are Speechmatics CONNECTION-relative times that restart at ~0 on
+ * every WS reconnect (each StartRecognition renumbers its timeline). connectionSessionBaseMs
+ * (captured at StartRecognition = the session ms already ingested then) shifts them back onto
+ * the real session clock. This spreads utterances across true speaking time (no 00:00
+ * collapse) AND stays monotonic across a reconnect: the base only grows with the session, so a
+ * post-reconnect utterance's ~0 relative time still lands AFTER every pre-reconnect utterance.
+ *
+ * R-E preserved: the ordering/cutoff INTEGER remains the SESSION-MONOTONIC ingest chunk seq
+ * (runtime.currentStartSeq / runtime.lastSentSeq), which never resets — emitRealtimeUtterance
+ * keeps start_seq/end_seq on those cursors. We still do NOT overwrite the seq cursors from
+ * buf.startMs/buf.endMs (that would invert order post-reconnect); the connection-session base
+ * is a SEPARATE, session-monotonic offset applied only to the timestamps. finalize sorts by
+ * start_ms (reconcile.ts), which is now correct because the base is monotonic.
  */
 /**
  * Cancel a pending silence-timeout flush timer (idempotent). Called whenever the buffer is
@@ -1195,7 +1221,14 @@ async function flushSttBuffer(
   // CJK/punctuation boundary, single space between Latin words).
   const text = joinTranscriptPieces(buf.texts);
   if (!text) return;
-  await emitRealtimeUtterance(sessionId, streamRole, text, ctx, buf.speaker);
+  // P0-a: shift the Speechmatics connection-relative word times onto the session timeline via
+  // this connection's session base. buf.startMs/buf.endMs already share the same connection
+  // origin as connectionSessionBaseMs, so the sum is a correct absolute session timestamp.
+  const base = runtime.connectionSessionBaseMs;
+  await emitRealtimeUtterance(sessionId, streamRole, text, ctx, buf.speaker, {
+    startMs: base + buf.startMs,
+    endMs: base + buf.endMs,
+  });
 }
 
 // ── ensureRealtimeAsrConnected ─────────────────────────────────────────────
