@@ -29,7 +29,11 @@ import {
   type ParticipantStatus,
   type IncrementalBadgeStatus,
 } from '../components/sidecar/types';
-import { isSpeechActive } from '../components/sidecar/speechActivity';
+import {
+  isSpeechActive,
+  MIC_ACTIVITY_LEVEL_THRESHOLD,
+  SYSTEM_ACTIVITY_LEVEL_THRESHOLD,
+} from '../components/sidecar/speechActivity';
 import type { SystemAudioFailureReason } from '../stores/sessionStore';
 
 /* ─── System audio warning copy ──────────────── */
@@ -191,9 +195,12 @@ export function SidecarView() {
   const enrollTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Audio activity indicator — audioLevels are 0–100 (see readRmsLevel), so we
-  // reuse the same silence gate as talk-time accumulation instead of an
-  // out-of-scale 0–1 threshold that treated the noise floor as "active".
-  const audioActive = isSpeechActive(audioLevels.mic) || isSpeechActive(audioLevels.system);
+  // reuse the same per-stream silence gates as talk-time accumulation instead of
+  // an out-of-scale 0–1 threshold that treated the noise floor as "active". The
+  // mic uses the lower gate (noise-suppressed soft speech), system the R7 gate.
+  const audioActive =
+    isSpeechActive(audioLevels.mic, MIC_ACTIVITY_LEVEL_THRESHOLD) ||
+    isSpeechActive(audioLevels.system, SYSTEM_ACTIVITY_LEVEL_THRESHOLD);
 
   // Cleanup enrollment timers on unmount
   useEffect(() => {
@@ -224,11 +231,13 @@ export function SidecarView() {
     const interval = setInterval(() => {
       const store = useSessionStore.getState();
       const levels = store.audioLevels;
-      // Silence gate on the 0–100 readRmsLevel scale — see isSpeechActive.
-      // The old literal `1` sat below the noise floor and slowly credited
-      // silent students (R7).
-      if (isSpeechActive(levels.mic)) micTimeRef.current++;
-      if (isSpeechActive(levels.system)) sysTimeRef.current++;
+      // Per-stream silence gate on the 0–100 readRmsLevel scale — see
+      // isSpeechActive. The mic uses the lower MIC gate because noise suppression
+      // drops soft/gapped interviewer speech below the system gate (R-C: else the
+      // interviewer showed 0%); the system keeps the R7 gate so a silent loopback
+      // never credits idle students.
+      if (isSpeechActive(levels.mic, MIC_ACTIVITY_LEVEL_THRESHOLD)) micTimeRef.current++;
+      if (isSpeechActive(levels.system, SYSTEM_ACTIVITY_LEVEL_THRESHOLD)) sysTimeRef.current++;
 
       store.setMicActiveSeconds(micTimeRef.current);
       store.setSysActiveSeconds(sysTimeRef.current);

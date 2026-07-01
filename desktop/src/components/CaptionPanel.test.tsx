@@ -4,10 +4,16 @@ import { CaptionPanel } from './CaptionPanel';
 import type { TranscriptSegment, PartialTranscript } from '../stores/sessionStore';
 
 /**
- * R1 defense-in-depth: a teacher-role transcript segment is, by architecture,
- * the interviewer (diarization is off on the teacher stream). The panel must
- * therefore always label it "Interviewer" and ignore whatever `speaker` value
- * the Worker put on it — even if the Worker mislabelled it as a student.
+ * R-A: a teacher-role transcript segment is the interviewer. The Worker's
+ * `resolveTeacherIdentity` now returns the configured interviewer name (e.g.
+ * "Tim") when setup provided one, so the panel must SHOW that real name.
+ *
+ * The R1 defense-in-depth still holds at the source: the Worker only ever emits
+ * a configured interviewer name (never a student name) on teacher frames — R1
+ * removed the single-entry-roster → student-name branch. So displaying the real
+ * teacher name is safe. The panel only falls back to the generic "Interviewer"
+ * label when the speaker is a placeholder (empty / "teacher" / literal
+ * "Interviewer").
  */
 
 function seg(partial: Partial<TranscriptSegment> & { id: string }): TranscriptSegment {
@@ -23,17 +29,45 @@ function seg(partial: Partial<TranscriptSegment> & { id: string }): TranscriptSe
   };
 }
 
-describe('CaptionPanel — teacher/student labelling (R1)', () => {
-  it('labels a teacher segment "Interviewer" even when speaker is a student name', () => {
+describe('CaptionPanel — teacher/student labelling (R-A)', () => {
+  it('shows the real interviewer name the Worker attached to a teacher segment', () => {
     const segments: TranscriptSegment[] = [
-      seg({ id: 't1', role: 'teacher', speaker: '122', text: 'How was your week?' }),
+      seg({ id: 't1', role: 'teacher', speaker: 'Tim', text: 'How was your week?' }),
+    ];
+    render(
+      <CaptionPanel captions={[]} acsStatus="off" transcriptSegments={segments} />
+    );
+    expect(screen.getByText('Tim')).toBeInTheDocument();
+    expect(screen.queryByText('Interviewer')).not.toBeInTheDocument();
+    expect(screen.getByText('How was your week?')).toBeInTheDocument();
+  });
+
+  it('falls back to "Interviewer" when the teacher speaker is a placeholder', () => {
+    // The Worker sends the generic "teacher" / empty / undefined placeholder when
+    // setup provided no interviewer name — these must render as "Interviewer".
+    for (const placeholder of ['teacher', '', null] as const) {
+      const { unmount } = render(
+        <CaptionPanel
+          captions={[]}
+          acsStatus="off"
+          transcriptSegments={[
+            seg({ id: 't1', role: 'teacher', speaker: placeholder, text: 'How was your week?' }),
+          ]}
+        />
+      );
+      expect(screen.getByText('Interviewer')).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('keeps the literal "Interviewer" label as-is (not a real name)', () => {
+    const segments: TranscriptSegment[] = [
+      seg({ id: 't1', role: 'teacher', speaker: 'Interviewer', text: 'How was your week?' }),
     ];
     render(
       <CaptionPanel captions={[]} acsStatus="off" transcriptSegments={segments} />
     );
     expect(screen.getByText('Interviewer')).toBeInTheDocument();
-    expect(screen.queryByText('122')).not.toBeInTheDocument();
-    expect(screen.getByText('How was your week?')).toBeInTheDocument();
   });
 
   it('shows the student speaker name for a students segment', () => {
@@ -74,9 +108,29 @@ describe('CaptionPanel — live partial captions (R4)', () => {
     expect(partialRow.textContent).toContain('…');
   });
 
-  it('labels a teacher partial "Interviewer" even when speaker is a student name', () => {
+  it('shows the real interviewer name on a teacher partial line', () => {
+    // The Worker attaches the configured interviewer name to teacher partials too;
+    // the partial path must surface it (same rule as settled captions).
     const partials: Record<string, PartialTranscript> = {
-      teacher: { role: 'teacher', speaker: '122', text: 'so tell me about' },
+      teacher: { role: 'teacher', speaker: 'Tim', text: 'so tell me about' },
+    };
+    render(
+      <CaptionPanel
+        captions={[]}
+        acsStatus="off"
+        transcriptSegments={[]}
+        partialTranscripts={partials}
+      />
+    );
+    expect(screen.getByText('Tim')).toBeInTheDocument();
+    expect(screen.queryByText('Interviewer')).not.toBeInTheDocument();
+    const partialRow = screen.getByTestId('partial-teacher');
+    expect(partialRow.textContent).toContain('so tell me about');
+  });
+
+  it('falls back to "Interviewer" on a teacher partial with a placeholder speaker', () => {
+    const partials: Record<string, PartialTranscript> = {
+      teacher: { role: 'teacher', speaker: 'teacher', text: 'so tell me about' },
     };
     render(
       <CaptionPanel
@@ -87,9 +141,6 @@ describe('CaptionPanel — live partial captions (R4)', () => {
       />
     );
     expect(screen.getByText('Interviewer')).toBeInTheDocument();
-    expect(screen.queryByText('122')).not.toBeInTheDocument();
-    const partialRow = screen.getByTestId('partial-teacher');
-    expect(partialRow.textContent).toContain('so tell me about');
   });
 
   it('renders a partial-only panel (no finals yet) instead of returning null', () => {

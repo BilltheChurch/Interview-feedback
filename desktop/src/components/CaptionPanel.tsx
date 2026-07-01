@@ -8,11 +8,23 @@ import type {
   PartialTranscript,
 } from '../stores/sessionStore';
 
-/** Map a stream role + raw speaker to the display label. teacher is, by architecture, the
- *  interviewer (diarization off) — always show "Interviewer" and ignore any speaker the
- *  Worker attached (R1 defense-in-depth). Students trust the diarization label. */
+/** Map a stream role + raw speaker to the display label.
+ *
+ *  teacher is, by architecture, the interviewer (diarization off). The Worker's
+ *  `resolveTeacherIdentity` returns the configured interviewer name (e.g. "Tim")
+ *  when setup provided one, so we show that real name (R-A). We only fall back to
+ *  the generic "Interviewer" label when the Worker sent a placeholder — empty,
+ *  the literal "teacher" stream tag, or "Interviewer" itself.
+ *
+ *  This stays safe because R1 removed the single-entry-roster → student-name
+ *  branch on the Worker side: a non-placeholder teacher speaker can only be the
+ *  configured interviewer name, never a student's. Students trust the
+ *  diarization label. */
 function speakerLabel(role: 'teacher' | 'students', speaker: string | null): string {
-  return role === 'teacher' ? 'Interviewer' : speaker ?? 'Candidate';
+  if (role !== 'teacher') return speaker ?? 'Candidate';
+  const s = (speaker ?? '').trim();
+  if (s === '' || s.toLowerCase() === 'teacher' || s === 'Interviewer') return 'Interviewer';
+  return s;
 }
 
 /* ── Speaker color palette (6 colors, cycling) ── */
@@ -87,10 +99,9 @@ export function CaptionPanel({
     if (usingAcs) return acsCaptions;
     return transcriptSegments.map((seg) => ({
       id: seg.id,
-      // The teacher stream has diarization off and is, by definition, the
-      // interviewer — so force "Interviewer" and ignore seg.speaker (which the
-      // Worker may have mislabelled as a student, e.g. a single-entry roster).
-      // Only student segments trust the diarization-derived speaker label.
+      // teacher → show the Worker-supplied interviewer name (real name if setup
+      // provided one, else the generic "Interviewer" placeholder); students →
+      // the diarization-derived speaker label. See speakerLabel.
       speaker: speakerLabel(seg.role, seg.speaker),
       text: seg.text,
       timestamp: seg.tsMs,
