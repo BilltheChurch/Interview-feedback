@@ -29,6 +29,7 @@ import {
   type ParticipantStatus,
   type IncrementalBadgeStatus,
 } from '../components/sidecar/types';
+import { isSpeechActive } from '../components/sidecar/speechActivity';
 import type { SystemAudioFailureReason } from '../stores/sessionStore';
 
 /* ─── System audio warning copy ──────────────── */
@@ -189,8 +190,10 @@ export function SidecarView() {
   const quickMarkButtonRefs = useRef<Map<MemoType, HTMLElement>>(new Map());
   const enrollTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Audio activity indicator
-  const audioActive = audioLevels.mic > 0.05 || audioLevels.system > 0.05;
+  // Audio activity indicator — audioLevels are 0–100 (see readRmsLevel), so we
+  // reuse the same silence gate as talk-time accumulation instead of an
+  // out-of-scale 0–1 threshold that treated the noise floor as "active".
+  const audioActive = isSpeechActive(audioLevels.mic) || isSpeechActive(audioLevels.system);
 
   // Cleanup enrollment timers on unmount
   useEffect(() => {
@@ -218,13 +221,14 @@ export function SidecarView() {
       return;
     }
 
-    const THRESHOLD = 1;
-
     const interval = setInterval(() => {
       const store = useSessionStore.getState();
       const levels = store.audioLevels;
-      if (levels.mic > THRESHOLD) micTimeRef.current++;
-      if (levels.system > THRESHOLD) sysTimeRef.current++;
+      // Silence gate on the 0–100 readRmsLevel scale — see isSpeechActive.
+      // The old literal `1` sat below the noise floor and slowly credited
+      // silent students (R7).
+      if (isSpeechActive(levels.mic)) micTimeRef.current++;
+      if (isSpeechActive(levels.system)) sysTimeRef.current++;
 
       store.setMicActiveSeconds(micTimeRef.current);
       store.setSysActiveSeconds(sysTimeRef.current);
