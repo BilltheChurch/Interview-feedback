@@ -692,13 +692,14 @@ function OverallCard({
   const [eventsOpen, setEventsOpen] = useState((report.overall?.interaction_events?.length ?? 0) > 0);
 
   const overallEvidenceMap = useMemo(() => {
-    const map = new Map<string, { evidence_id: string; speaker?: { display_name?: string }; time_range_ms?: [number, number]; quote?: string }>();
+    const map = new Map<string, { evidence_id: string; speaker?: { display_name?: string }; time_range_ms?: [number, number]; quote?: string; confidence: number }>();
     for (const ev of report.evidence) {
       map.set(ev.id, {
         evidence_id: ev.id,
         speaker: { display_name: ev.speaker },
         time_range_ms: [ev.timestamp_ms, ev.timestamp_ms],
         quote: ev.text,
+        confidence: ev.confidence,   // 携带真实置信度，避免 UI 层硬编码 0.8
       });
     }
     return map;
@@ -764,7 +765,7 @@ function OverallCard({
                   quote={evData.quote ?? ''}
                   speaker={evData.speaker?.display_name ?? '?'}
                   timestamp={ts}
-                  confidence={0.8}
+                  confidence={evData.confidence ?? 0.8}
                   onViewContext={() => onFootnoteClick?.(expandedOverallRef)}
                 />
               );
