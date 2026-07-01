@@ -83,6 +83,37 @@ export function resolveMaxSpeakers(env: Pick<Env, "ASR_MAX_SPEAKERS">): number |
   return value;
 }
 
+/**
+ * Resolve the Speechmatics operating_point (accuracy tier) from the environment (R5).
+ * Defaults to "enhanced" — materially more accurate than the Speechmatics default
+ * ("standard"), especially for accented / code-switched cmn_en interview speech.
+ * Any unrecognized value also falls back to "enhanced".
+ */
+export function resolveSpeechmaticsOperatingPoint(
+  env: Pick<Env, "SPEECHMATICS_OPERATING_POINT">
+): "standard" | "enhanced" {
+  const raw = (env.SPEECHMATICS_OPERATING_POINT ?? "").trim().toLowerCase();
+  return raw === "standard" ? "standard" : "enhanced";
+}
+
+/** Speechmatics max_delay bounds (seconds). Requests outside this range are rejected. */
+export const SPEECHMATICS_MAX_DELAY_MIN = 0.7;
+export const SPEECHMATICS_MAX_DELAY_MAX = 4;
+export const SPEECHMATICS_MAX_DELAY_DEFAULT = 1.0;
+
+/**
+ * Resolve the Speechmatics max_delay (final-transcript latency budget, seconds) from the
+ * environment (R6). Defaults to 1.0 (down from the previous 2.0) to cut ~1s of final lag.
+ * Non-numeric input falls back to the default; in-range values are clamped to [0.7, 4].
+ */
+export function resolveSpeechmaticsMaxDelay(env: Pick<Env, "SPEECHMATICS_MAX_DELAY">): number {
+  const raw = (env.SPEECHMATICS_MAX_DELAY ?? "").trim();
+  if (!raw) return SPEECHMATICS_MAX_DELAY_DEFAULT;
+  const value = parseFloat(raw);
+  if (!Number.isFinite(value)) return SPEECHMATICS_MAX_DELAY_DEFAULT;
+  return Math.min(SPEECHMATICS_MAX_DELAY_MAX, Math.max(SPEECHMATICS_MAX_DELAY_MIN, value));
+}
+
 // ── Stream roles ────────────────────────────────────────────────────
 export type StreamRole = "mixed" | "teacher" | "students";
 export const STREAM_ROLES: StreamRole[] = ["mixed", "teacher", "students"];
@@ -558,6 +589,12 @@ export interface Env {
   SPEECHMATICS_API_KEY?: string;
   SPEECHMATICS_WS_URL?: string;
   SPEECHMATICS_LANGUAGE?: string;
+  /** R5: Speechmatics accuracy tier — "standard" | "enhanced". Parsed by
+   *  resolveSpeechmaticsOperatingPoint(); defaults to "enhanced". */
+  SPEECHMATICS_OPERATING_POINT?: string;
+  /** R6: Speechmatics final-transcript latency budget in seconds. Parsed by
+   *  resolveSpeechmaticsMaxDelay(); clamped to [0.7, 4]; defaults to 1.0. */
+  SPEECHMATICS_MAX_DELAY?: string;
   /** Maximum number of speakers for Speechmatics diarization (students stream only).
    *  Parsed by resolveMaxSpeakers(); values < 2 or non-integer are treated as unset
    *  (Speechmatics enforces a minimum of 2; undefined lets it auto-detect). Default: "6". */

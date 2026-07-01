@@ -30,7 +30,18 @@
     "LLM_MODEL": "qwen3.7-plus",
     "ASR_PROVIDER": "speechmatics",
     "ASR_MAX_SPEAKERS": "6",
+    // Speechmatics realtime config (active provider). R5: operating_point=enhanced for
+    // higher accuracy; R6: max_delay=1.0s to cut final-transcript lag. language stays
+    // bilingual cmn_en (interview speech is Chinese/English code-switched) but is now
+    // explicit + tunable. See resolveSpeechmatics* in src/config.ts.
+    "SPEECHMATICS_OPERATING_POINT": "enhanced",
+    "SPEECHMATICS_MAX_DELAY": "1.0",
+    "SPEECHMATICS_LANGUAGE": "cmn_en",
     "ASR_ENDPOINT": "",
+    // NOTE: ASR_LANGUAGE / ASR_MODEL / ASR_WS_URL are legacy DashScope/Whisper vars —
+    // they have NO effect on the Speechmatics realtime path (ASR_PROVIDER=speechmatics).
+    // Kept because the DashScope + local-whisper fallback code paths still read them
+    // (dashscope-asr.ts, asr-helpers.ts, realtime-asr-processor.ts). Do not delete.
     "ASR_LANGUAGE": "auto",
     "ASR_ENABLED": "true",
     "ASR_MODEL": "large-v3",

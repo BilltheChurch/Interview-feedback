@@ -12,7 +12,13 @@ describe("buildStartRecognition", () => {
     expect(msg).toEqual({
       message: "StartRecognition",
       audio_format: { type: "raw", encoding: "pcm_s16le", sample_rate: 16000 },
-      transcription_config: { language: "cmn_en", enable_partials: true, max_delay: 2.0, diarization: "speaker" },
+      transcription_config: {
+        language: "cmn_en",
+        enable_partials: true,
+        max_delay: 1.0,
+        operating_point: "enhanced",
+        diarization: "speaker",
+      },
     });
   });
 
@@ -21,6 +27,45 @@ describe("buildStartRecognition", () => {
     const tc = (msg.transcription_config as Record<string, unknown>);
     expect(tc.diarization).toBeUndefined();
     expect(tc.language).toBe("en");
+  });
+
+  // R5: operating_point drives Speechmatics accuracy — enhanced is materially more
+  // accurate than the server-side default (standard), especially for accented /
+  // code-switched cmn_en interview speech.
+  it("R5: defaults operating_point to enhanced", () => {
+    const msg = buildStartRecognition({ ...DEFAULT_SPEECHMATICS_CONFIG, language: "cmn_en", diarization: true });
+    const tc = msg.transcription_config as Record<string, unknown>;
+    expect(tc.operating_point).toBe("enhanced");
+  });
+
+  it("R5: honours an explicit standard operating_point override", () => {
+    const msg = buildStartRecognition({
+      ...DEFAULT_SPEECHMATICS_CONFIG,
+      language: "cmn_en",
+      diarization: false,
+      operatingPoint: "standard",
+    });
+    const tc = msg.transcription_config as Record<string, unknown>;
+    expect(tc.operating_point).toBe("standard");
+  });
+
+  it("omits operating_point when explicitly unset", () => {
+    const msg = buildStartRecognition({
+      ...DEFAULT_SPEECHMATICS_CONFIG,
+      language: "en",
+      diarization: false,
+      operatingPoint: undefined,
+    });
+    const tc = msg.transcription_config as Record<string, unknown>;
+    expect("operating_point" in tc).toBe(false);
+  });
+
+  // R6: max_delay is the final-transcript latency budget. Lower default (1.0s) trims
+  // ~1s of lag versus the previous 2.0s.
+  it("R6: defaults max_delay to 1.0", () => {
+    const msg = buildStartRecognition({ ...DEFAULT_SPEECHMATICS_CONFIG, language: "cmn_en", diarization: true });
+    const tc = msg.transcription_config as Record<string, unknown>;
+    expect(tc.max_delay).toBe(1.0);
   });
 });
 

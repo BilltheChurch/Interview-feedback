@@ -32,6 +32,10 @@ export interface SpeechmaticsConfig {
   enablePartials: boolean;
   /** Final-transcript latency budget in seconds (0.7–4). */
   maxDelaySeconds: number;
+  /** Accuracy tier. "enhanced" is materially more accurate than Speechmatics' server-side
+   *  default ("standard"), especially for accented / code-switched cmn_en speech (R5).
+   *  Omitted from the request when undefined (falls back to the Speechmatics default). */
+  operatingPoint?: "standard" | "enhanced";
   /** Audio sample rate (16000 for our pipeline). */
   sampleRate: number;
   /** Maximum number of speakers for diarization. Speechmatics enforces a minimum of 2;
@@ -41,7 +45,10 @@ export interface SpeechmaticsConfig {
 
 export const DEFAULT_SPEECHMATICS_CONFIG: Omit<SpeechmaticsConfig, "language" | "diarization"> = {
   enablePartials: true,
-  maxDelaySeconds: 2.0,
+  // R6: 1.0s trims ~1s of final-transcript lag versus the previous 2.0s default.
+  maxDelaySeconds: 1.0,
+  // R5: default to the higher-accuracy tier; env can roll back to "standard".
+  operatingPoint: "enhanced",
   sampleRate: 16000,
 };
 
@@ -52,6 +59,11 @@ export function buildStartRecognition(cfg: SpeechmaticsConfig): Record<string, u
     enable_partials: cfg.enablePartials,
     max_delay: cfg.maxDelaySeconds,
   };
+  // operating_point selects the Speechmatics accuracy tier (R5). Only sent when set —
+  // omitting it lets Speechmatics apply its own default ("standard").
+  if (cfg.operatingPoint !== undefined) {
+    transcription_config.operating_point = cfg.operatingPoint;
+  }
   // Only request diarization when wanted — the teacher channel is single-speaker and
   // enabling it there would split the interviewer into phantom S1/S2 (§9.3.4).
   if (cfg.diarization) {

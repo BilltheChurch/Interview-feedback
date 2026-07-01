@@ -54,6 +54,8 @@ import {
   mergeUtterances,
   buildDefaultEnrollmentState,
   resolveMaxSpeakers,
+  resolveSpeechmaticsOperatingPoint,
+  resolveSpeechmaticsMaxDelay,
 } from "./config";
 import type {
   Env,
@@ -939,6 +941,9 @@ async function connectSpeechmaticsRealtime(
     ...DEFAULT_SPEECHMATICS_CONFIG,
     language,
     diarization: isDiarization,
+    // R5: accuracy tier (default "enhanced"); R6: final-transcript latency budget (default 1.0s).
+    operatingPoint: resolveSpeechmaticsOperatingPoint(ctx.env),
+    maxDelaySeconds: resolveSpeechmaticsMaxDelay(ctx.env),
     sampleRate: TARGET_SAMPLE_RATE,
     maxSpeakers: isDiarization ? resolveMaxSpeakers(ctx.env) : undefined,
   })));
