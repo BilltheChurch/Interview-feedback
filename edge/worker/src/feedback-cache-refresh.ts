@@ -10,10 +10,13 @@ import {
   buildEvidence,
   buildMemoFirstReport,
   buildResultV2,
+  buildSynthesizePayload,
+  collectEnrichedContext,
   computeSpeakerStats,
   validatePersonFeedbackEvidence,
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
+import { computeEligibleSpeakers } from "./services/llm-synthesizer";
 import { buildReconciledTranscript } from "./reconcile";
 import {
   normalizeSessionState,
@@ -29,6 +32,7 @@ import {
   FEEDBACK_VALIDATE_BUDGET_MS,
   FEEDBACK_PERSIST_FETCH_BUDGET_MS,
   DASHSCOPE_DEFAULT_MODEL,
+  ACCEPTED_REPORT_SOURCES,
 } from "./config";
 import type { Env, StreamRole, SessionState, CaptureState, AsrState } from "./config";
 import type { UtteranceRaw, SpeakerEvent } from "./config";
@@ -48,7 +52,9 @@ import {
   buildQualityMetrics,
   evaluateFeedbackQualityGates,
   mergeStatsWithRoster,
+  resolveNoStudentSpeechDegradation,
   validateClaimEvidenceRefs,
+  NO_STUDENT_SPEECH_NOTICE,
 } from "./feedback-helpers";
 
 // ── Context interface ──────────────────────────────────────────────────────
@@ -156,6 +162,43 @@ export async function maybeRefreshFeedbackCache(
   const assembleMs = Date.now() - assembleStart;
 
   const locale = getSessionLocale(state, ctx.env);
+
+  // ── R2/R-B: eligible-student signal (shared oracle) ──
+  // Run the SAME three-layer filter the synthesizer uses (computeEligibleSpeakers)
+  // so the "no student speech" decision below can never diverge from whether the
+  // LLM could actually produce any per_person. Built via buildSynthesizePayload /
+  // collectEnrichedContext exactly like finalize-orchestrator, so the history-reload
+  // path (this file) and the finalize path stay in lock-step.
+  const eligibilityConfig = (state.config ?? {}) as Record<string, unknown>;
+  const eligibilityContext = collectEnrichedContext({
+    sessionConfig: {
+      mode: eligibilityConfig.mode as "1v1" | "group" | undefined,
+      interviewer_name: eligibilityConfig.interviewer_name as string | undefined,
+      position_title: eligibilityConfig.position_title as string | undefined,
+      company_name: eligibilityConfig.company_name as string | undefined,
+      stages: (eligibilityConfig.stages as string[]) ?? [],
+      free_form_notes: eligibilityConfig.free_form_notes as string | undefined,
+      rubric: eligibilityConfig.rubric as Parameters<typeof collectEnrichedContext>[0]["sessionConfig"]["rubric"],
+    },
+  });
+  const eligibilityPayload = buildSynthesizePayload({
+    sessionId,
+    transcript,
+    memos: memosWithEvidence,
+    evidence,
+    stats: studentStats,
+    events: [],
+    bindings: [],
+    rubric: eligibilityContext.rubric,
+    sessionContext: eligibilityContext.sessionContext,
+    freeFormNotes: eligibilityContext.freeFormNotes,
+    historical: [],
+    stages: eligibilityContext.stages,
+    locale,
+    nameAliases: (eligibilityConfig.name_aliases ?? {}) as Record<string, string[]>,
+  });
+  const eligibleActiveStudentCount = computeEligibleSpeakers(eligibilityPayload).active.length;
+
   const eventsStart = Date.now();
   const eventsPayload = {
     session_id: sessionId,
@@ -168,7 +211,7 @@ export async function maybeRefreshFeedbackCache(
   const analysisEvents = Array.isArray(eventsResult.events) ? eventsResult.events : [];
   const eventsMs = Date.now() - eventsStart;
 
-  let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" = "memo_first";
+  let reportSource: "memo_first" | "llm_enhanced" | "llm_failed" | "degraded_no_participants" = "memo_first";
   let reportModel: string | null = null;
   let reportError: string | null = null;
   let reportBlockingReason: string | null = null;
@@ -223,6 +266,30 @@ export async function maybeRefreshFeedbackCache(
     reportError = String((error as Error)?.message ?? error);
     reportBlockingReason = `analysis/report failed: ${reportError}`;
   }
+
+  // ── R2/R-B: degraded overview-only report (no student speech) ──
+  // Ported from finalize-orchestrator so the HISTORY-RELOAD path degrades the same
+  // way the finalize path does. We only reach llm_failed with NO real per_person in
+  // two cases:
+  //   (a) no eligible student ever spoke (interviewer monologue / silent student
+  //       side) → LEGITIMATE overview-only session → emit a deliverable degraded
+  //       report with a user-facing notice instead of a hard red bar; and
+  //   (b) eligible students exist but analysis/report still returned nothing → a
+  //       genuine LLM failure → keep blocking (reportSource stays llm_failed).
+  // The signal is the shared eligibility oracle (eligibleActiveStudentCount), NOT
+  // finalPerPerson.length — buildMemoFirstReport always emits ≥1 PLACEHOLDER card,
+  // so per_person is never actually empty here.
+  if (reportSource === "llm_failed") {
+    const degradation = resolveNoStudentSpeechDegradation(eligibleActiveStudentCount);
+    if (degradation.degraded) {
+      reportSource = "degraded_no_participants";
+      reportBlockingReason = null;
+      // Overview-only: drop the memo-first placeholder person cards so the UI shows
+      // just the overview + notice, no phantom "unknown" student.
+      finalPerPerson = [];
+      finalOverall = { ...(finalOverall as Record<string, unknown>), notice: NO_STUDENT_SPEECH_NOTICE };
+    }
+  }
   const reportMs = Date.now() - reportStart;
 
   const validateStart = Date.now();
@@ -249,7 +316,10 @@ export async function maybeRefreshFeedbackCache(
       ? asrByStream.students.ingest_to_utterance_p95_ms
       : null;
   const gateSeedFailures = [...finalValidation.failures];
-  if (reportSource !== "llm_enhanced") {
+  // Accepted sources (incl. R2 degraded_no_participants) do NOT seed a gate
+  // failure — only genuinely-unavailable reports (llm_failed) do. Aligns with
+  // finalize-orchestrator's ACCEPTED_REPORT_SOURCES gate seeding.
+  if (!ACCEPTED_REPORT_SOURCES.has(reportSource)) {
     gateSeedFailures.push(reportBlockingReason || "llm enhanced report unavailable");
   }
   const gateEvaluation = evaluateFeedbackQualityGates({
@@ -269,7 +339,7 @@ export async function maybeRefreshFeedbackCache(
     needs_evidence_count: finalValidation.needsEvidenceCount,
     report_source: reportSource,
     report_model: reportModel,
-    report_degraded: reportSource !== "llm_enhanced",
+    report_degraded: !ACCEPTED_REPORT_SOURCES.has(reportSource),
     report_error: reportError,
   };
 
@@ -374,11 +444,19 @@ export async function maybeRefreshFeedbackCache(
   const budgetReason = meetsBudget
     ? null
     : `feedback budgets exceeded (total=${totalMs} assemble=${assembleMs} events=${eventsMs} report=${reportMs} validate=${validationMs} persist=${persistMs})`;
+  // ── R2/R-B: a degraded overview-only report is inherently deliverable ──
+  // Mirror finalize-orchestrator: an ACCEPTED degraded_no_participants report
+  // passes on the accepted-source + no-needs-evidence check alone, and is delivered
+  // even if the tentative/budget gates trip (an all-teacher transcript can fail the
+  // unknown-ratio / p95 gates). Other sources keep the stricter combined gate.
+  const isDegraded = reportSource === "degraded_no_participants";
+  const degradedGatePassed =
+    ACCEPTED_REPORT_SOURCES.has(reportSource) && finalValidation.needsEvidenceCount === 0;
   nextCache.timings.persist_ms = persistMs;
   nextCache.timings.total_ms = totalMs;
-  nextCache.ready = gatePassed;
-  nextCache.quality_gate_passed = gatePassed;
-  if (!meetsBudget && nextCache.report) {
+  nextCache.ready = isDegraded ? degradedGatePassed : gatePassed;
+  nextCache.quality_gate_passed = isDegraded ? degradedGatePassed : gatePassed;
+  if (!meetsBudget && !isDegraded && nextCache.report) {
     const failures = Array.isArray(nextCache.report.trace.quality_gate_failures)
       ? [...nextCache.report.trace.quality_gate_failures]
       : [];
@@ -387,11 +465,33 @@ export async function maybeRefreshFeedbackCache(
     );
     nextCache.report.trace.quality_gate_failures = failures;
   }
-  if (!nextCache.ready && !nextCache.blocking_reason) {
-    nextCache.blocking_reason = gateEvaluation.failures[0] || budgetReason || "feedback quality gate failed";
-  } else if (budgetReason) {
-    nextCache.blocking_reason = budgetReason;
+  // Degraded reports keep blocking_reason = null (they are deliverable).
+  if (!isDegraded) {
+    if (!nextCache.ready && !nextCache.blocking_reason) {
+      nextCache.blocking_reason = gateEvaluation.failures[0] || budgetReason || "feedback quality gate failed";
+    } else if (budgetReason) {
+      nextCache.blocking_reason = budgetReason;
+    }
   }
+
+  // ── R-B good-cache overwrite guard ──
+  // The freshness window forces a recompute on history re-entry (10s). If the prior
+  // cache already held an ACCEPTED (good) report but THIS recompute produced a
+  // NON-accepted source (e.g. a transient llm_failed from a flaky analysis/report
+  // call), do NOT persist over the good cache — a single bad refresh must never
+  // permanently poison a session that was previously deliverable.
+  const priorAccepted = ACCEPTED_REPORT_SOURCES.has(current.report_source);
+  const nextAccepted = ACCEPTED_REPORT_SOURCES.has(nextCache.report_source);
+  if (priorAccepted && !nextAccepted) {
+    const preserved: FeedbackCache = {
+      ...current,
+      updated_at: finalizedAt,
+      timings: nextCache.timings,
+    };
+    await ctx.storeFeedbackCache(preserved);
+    return preserved;
+  }
+
   await ctx.storeFeedbackCache(nextCache);
   return nextCache;
 }
