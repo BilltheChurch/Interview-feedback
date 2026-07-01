@@ -156,17 +156,26 @@ class WebSocketService {
           return;
         }
 
-        // A2: realtime transcript downlink from the Worker. Append every segment to
-        // the store immediately so it persists and survives reload/crash/PiP — works
-        // for any meeting (not just Teams/ACS).
+        // A2/R4: realtime transcript downlink from the Worker.
+        //  - is_final=false → an in-progress partial line (Speechmatics interim). Upsert it
+        //    into partialTranscripts so the caption panel renders a live "still typing" row.
+        //    Partials are UI-only transients: never appended, never persisted.
+        //  - is_final=true → a settled segment. Append it (persists, survives reload/PiP)
+        //    and the store drops the matching partial line so nothing shows twice.
         if (payload.type === 'transcript') {
           const text = String(payload.text ?? '').trim();
           if (!text) return;
+          const role = (payload.role === 'students' ? 'students' : 'teacher') as StreamRole;
+          const speaker = payload.speaker == null ? null : String(payload.speaker);
+          if (payload.is_final === false) {
+            useSessionStore.getState().updatePartialTranscript({ role, speaker, text });
+            return;
+          }
           useSessionStore.getState().appendTranscriptSegment({
-            role: (payload.role === 'students' ? 'students' : 'teacher') as StreamRole,
-            speaker: payload.speaker == null ? null : String(payload.speaker),
+            role,
+            speaker,
             text,
-            isFinal: payload.is_final !== false,
+            isFinal: true,
             tsMs: Number(payload.ts_ms ?? 0),
             startMs: Number(payload.start_ms ?? 0),
           });

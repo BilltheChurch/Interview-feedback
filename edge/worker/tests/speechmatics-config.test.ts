@@ -4,6 +4,8 @@ import {
   resolveMaxSpeakers,
   resolveSpeechmaticsOperatingPoint,
   resolveSpeechmaticsMaxDelay,
+  resolveSttUtteranceGapMs,
+  STT_UTTERANCE_GAP_MS_DEFAULT,
 } from "../src/config";
 
 // ── buildStartRecognition — maxSpeakers / speaker_diarization_config ──────────
@@ -132,5 +134,31 @@ describe("resolveSpeechmaticsMaxDelay", () => {
 
   it("falls back to 1.0 for non-numeric input", () => {
     expect(resolveSpeechmaticsMaxDelay(makeEnv("abc"))).toBe(1.0);
+  });
+});
+
+// ── resolveSttUtteranceGapMs — R4/R6 final-flush gap ──────────────────────────
+
+describe("resolveSttUtteranceGapMs", () => {
+  function makeEnv(val: string | undefined): { STT_UTTERANCE_GAP_MS?: string } {
+    return val !== undefined ? { STT_UTTERANCE_GAP_MS: val } : {};
+  }
+
+  it("defaults to 500 when unset (R6 lowered from 800)", () => {
+    expect(STT_UTTERANCE_GAP_MS_DEFAULT).toBe(500);
+    expect(resolveSttUtteranceGapMs(makeEnv(undefined))).toBe(500);
+    expect(resolveSttUtteranceGapMs(makeEnv(""))).toBe(500);
+  });
+
+  it("honours a valid positive integer override", () => {
+    expect(resolveSttUtteranceGapMs(makeEnv("300"))).toBe(300);
+    expect(resolveSttUtteranceGapMs(makeEnv("800"))).toBe(800);
+  });
+
+  it("falls back to the default for non-positive or non-integer input", () => {
+    expect(resolveSttUtteranceGapMs(makeEnv("0"))).toBe(500);
+    expect(resolveSttUtteranceGapMs(makeEnv("-100"))).toBe(500);
+    expect(resolveSttUtteranceGapMs(makeEnv("1.5"))).toBe(500);
+    expect(resolveSttUtteranceGapMs(makeEnv("abc"))).toBe(500);
   });
 });

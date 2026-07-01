@@ -1,7 +1,19 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageSquareText, ChevronLeft, ChevronRight, ArrowDown } from 'lucide-react';
-import type { CaptionEntry, AcsStatus, TranscriptSegment } from '../stores/sessionStore';
+import type {
+  CaptionEntry,
+  AcsStatus,
+  TranscriptSegment,
+  PartialTranscript,
+} from '../stores/sessionStore';
+
+/** Map a stream role + raw speaker to the display label. teacher is, by architecture, the
+ *  interviewer (diarization off) — always show "Interviewer" and ignore any speaker the
+ *  Worker attached (R1 defense-in-depth). Students trust the diarization label. */
+function speakerLabel(role: 'teacher' | 'students', speaker: string | null): string {
+  return role === 'teacher' ? 'Interviewer' : speaker ?? 'Candidate';
+}
 
 /* ── Speaker color palette (6 colors, cycling) ── */
 
@@ -45,14 +57,23 @@ function groupCaptions(captions: CaptionEntry[]): CaptionGroup[] {
 
 /* ── CaptionPanel ── */
 
+/** R4: a live, unfinalized caption row derived from a partial transcript. */
+type PartialRow = {
+  key: string;
+  speaker: string;
+  text: string;
+};
+
 export function CaptionPanel({
   captions: acsCaptions,
   acsStatus,
   transcriptSegments = [],
+  partialTranscripts = {},
 }: {
   captions: CaptionEntry[];
   acsStatus: AcsStatus;
   transcriptSegments?: TranscriptSegment[];
+  partialTranscripts?: Record<string, PartialTranscript>;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -61,42 +82,61 @@ export function CaptionPanel({
   // Unified caption source: prefer ACS/Teams captions; otherwise render the universal
   // realtime transcript segments (Speechmatics/DashScope downlink, A2/B5) as captions so
   // non-Teams meetings still get live captions.
+  const usingAcs = acsCaptions.length > 0;
   const captions = useMemo<CaptionEntry[]>(() => {
-    if (acsCaptions.length > 0) return acsCaptions;
+    if (usingAcs) return acsCaptions;
     return transcriptSegments.map((seg) => ({
       id: seg.id,
       // The teacher stream has diarization off and is, by definition, the
       // interviewer — so force "Interviewer" and ignore seg.speaker (which the
       // Worker may have mislabelled as a student, e.g. a single-entry roster).
       // Only student segments trust the diarization-derived speaker label.
-      speaker: seg.role === 'teacher' ? 'Interviewer' : (seg.speaker ?? 'Candidate'),
+      speaker: speakerLabel(seg.role, seg.speaker),
       text: seg.text,
       timestamp: seg.tsMs,
       language: '',
     }));
-  }, [acsCaptions, transcriptSegments]);
+  }, [usingAcs, acsCaptions, transcriptSegments]);
 
-  // Build stable speaker → color index map
+  // R4: live partial rows (unfinalized). Only shown on the universal transcript path — ACS
+  // has no partial concept. Rendered after the settled captions, visually distinct, so the
+  // interviewer sees words appear in real time before the line settles into a final.
+  const partialRows = useMemo<PartialRow[]>(() => {
+    if (usingAcs) return [];
+    return Object.entries(partialTranscripts)
+      .filter(([, p]) => p.text.trim().length > 0)
+      .map(([key, p]) => ({
+        key,
+        speaker: speakerLabel(p.role, p.speaker),
+        text: p.text,
+      }));
+  }, [usingAcs, partialTranscripts]);
+
+  // Build stable speaker → color index map (settled + partial speakers share the palette)
   const speakerColorMap = useMemo(() => {
     const map = new Map<string, number>();
     let idx = 0;
-    for (const cap of captions) {
-      if (!map.has(cap.speaker)) {
-        map.set(cap.speaker, idx % SPEAKER_COLORS.length);
+    const register = (speaker: string) => {
+      if (!map.has(speaker)) {
+        map.set(speaker, idx % SPEAKER_COLORS.length);
         idx++;
       }
-    }
+    };
+    for (const cap of captions) register(cap.speaker);
+    for (const row of partialRows) register(row.speaker);
     return map;
-  }, [captions]);
+  }, [captions, partialRows]);
 
   const groups = useMemo(() => groupCaptions(captions), [captions]);
 
-  // Auto-scroll to bottom when new captions arrive (only if already at bottom)
+  // Auto-scroll to bottom when new captions OR partials arrive (only if already at bottom).
+  // Partials update in place very frequently, so their text (not just count) is a dep.
+  const partialSignature = partialRows.map((r) => `${r.key}:${r.text}`).join('|');
   useEffect(() => {
     if (isAtBottom && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [captions.length, isAtBottom]);
+  }, [captions.length, partialSignature, isAtBottom]);
 
   // Track scroll position to detect manual scroll-up
   const handleScroll = () => {
@@ -113,8 +153,11 @@ export function CaptionPanel({
     }
   };
 
-  // Don't render only when there is nothing to show: ACS off AND no transcript segments.
-  if (acsStatus === 'off' && captions.length === 0) return null;
+  const hasContent = captions.length > 0 || partialRows.length > 0;
+
+  // Don't render only when there is nothing to show: ACS off AND no captions AND no
+  // in-progress partial line.
+  if (acsStatus === 'off' && !hasContent) return null;
 
   // Collapsed state — narrow icon bar
   if (collapsed) {
@@ -162,7 +205,7 @@ export function CaptionPanel({
         onScroll={handleScroll}
         className="flex-1 overflow-y-auto px-2 py-1.5 flex flex-col gap-1.5"
       >
-        {captions.length === 0 ? (
+        {!hasContent ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center px-3 py-6">
             <MessageSquareText className="w-6 h-6 text-ink-tertiary/40 mb-2" />
             <p className="text-xs text-ink-tertiary">
@@ -173,7 +216,8 @@ export function CaptionPanel({
             </p>
           </div>
         ) : (
-          groups.map((group, gi) => {
+          <>
+          {groups.map((group) => {
             const colorIdx = speakerColorMap.get(group.speaker) ?? 0;
             const dotColor = SPEAKER_DOT_COLORS[colorIdx];
             const textColor = SPEAKER_COLORS[colorIdx].split(' ')[0];
@@ -195,7 +239,34 @@ export function CaptionPanel({
                 ))}
               </div>
             );
-          })
+          })}
+
+          {/* R4: live partial (unfinalized) rows — visually distinct: muted, italic, with a
+              trailing ellipsis and a pulsing dot to signal "still being transcribed". */}
+          {partialRows.map((row) => {
+            const colorIdx = speakerColorMap.get(row.speaker) ?? 0;
+            const dotColor = SPEAKER_DOT_COLORS[colorIdx];
+            const textColor = SPEAKER_COLORS[colorIdx].split(' ')[0];
+            return (
+              <div
+                key={`partial-${row.key}`}
+                data-testid={`partial-${row.key}`}
+                className="flex flex-col gap-0.5 opacity-70"
+              >
+                <div className="flex items-center gap-1 mt-0.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${dotColor} shrink-0 animate-pulse`} />
+                  <span className={`text-xs font-medium ${textColor} truncate`}>
+                    {row.speaker}
+                  </span>
+                </div>
+                <p className="text-xs text-ink-tertiary italic leading-relaxed pl-3">
+                  {row.text}
+                  <span className="text-ink-tertiary">…</span>
+                </p>
+              </div>
+            );
+          })}
+          </>
         )}
       </div>
 

@@ -56,6 +56,8 @@ import {
   resolveMaxSpeakers,
   resolveSpeechmaticsOperatingPoint,
   resolveSpeechmaticsMaxDelay,
+  resolveSttUtteranceGapMs,
+  STT_PARTIAL_THROTTLE_MS,
 } from "./config";
 import type {
   Env,
@@ -191,6 +193,8 @@ export async function closeRealtimeAsrSession(
     runtime.sentChunkTsBySeq.clear();
     runtime.lastEmitAt = null;
     runtime.lastFinalTextNorm = "";
+    runtime.lastPartialTextNorm = "";
+    runtime.lastPartialSentAt = 0;
     runtime.sttBuffer = null;
     // Backpressure counters are per-connection (mirror Speechmatics seq_no which
     // restarts at 1 each StartRecognition); reset on full teardown too.
@@ -963,7 +967,7 @@ async function connectSpeechmaticsRealtime(
 }
 
 /** Handle a Speechmatics realtime message: ready signal, transcripts, errors. */
-async function handleSpeechmaticsMessage(
+export async function handleSpeechmaticsMessage(
   sessionId: string,
   streamRole: StreamRole,
   data: string | ArrayBuffer | ArrayBufferView,
@@ -1009,7 +1013,21 @@ async function handleSpeechmaticsMessage(
 
   if (msg.type !== "Transcript") return;       // Warning / Unknown
   const t = msg.transcript;
-  if (t.is_partial) return;                     // MVP: emit on finals only
+
+  // students → carry the Speechmatics diarization label (S1/S2…); teacher → resolved
+  // via the interviewer identity. Partial and final take the SAME speaker path so the
+  // in-place partial line and its final never disagree on who is speaking.
+  const speaker = streamRole === "students" ? dominantSpeaker(t) : null;
+
+  // R4: Speechmatics AddPartialTranscript carries the CUMULATIVE full text of the
+  // in-progress utterance (it grows word-by-word and supersedes the prior partial —
+  // not incremental deltas). Forward it as a non-final frame so the Desktop can render
+  // a live, in-place "still typing" line. The final path (below) is unchanged.
+  if (t.is_partial) {
+    await maybeForwardPartial(sessionId, streamRole, t.text.trim(), speaker, ctx);
+    return;
+  }
+
   const text = t.text.trim();
   if (!text) return;
 
@@ -1017,14 +1035,19 @@ async function handleSpeechmaticsMessage(
   if (normalized && normalized === runtime.lastFinalTextNorm) return;
   runtime.lastFinalTextNorm = normalized;
 
-  // students → carry the Speechmatics diarization label (S1/S2…); teacher → resolved in emit.
-  const speaker = streamRole === "students" ? dominantSpeaker(t) : null;
+  // A final arrived → the current partial line is now superseded. Clear the dedupe
+  // marker AND reset the throttle timestamp to 0 ("never sent"), so the NEXT utterance's
+  // first partial forwards immediately instead of being swallowed by the throttle window
+  // (which would add up to STT_PARTIAL_THROTTLE_MS of cross-utterance first-word delay).
+  runtime.lastPartialTextNorm = "";
+  runtime.lastPartialSentAt = 0;
 
   // Endpointing: Speechmatics emits word-level finals, which fragment self-introductions
   // and evidence quotes. Accumulate finals into one sentence-level utterance, flushing
   // when a silence gap exceeds the threshold or the diarization speaker changes.
+  const gapMs = resolveSttUtteranceGapMs(ctx.env);
   const buf = runtime.sttBuffer;
-  if (buf && (t.start_ms - buf.endMs > STT_UTTERANCE_GAP_MS || speaker !== buf.speaker)) {
+  if (buf && (t.start_ms - buf.endMs > gapMs || speaker !== buf.speaker)) {
     await flushSttBuffer(sessionId, streamRole, ctx);
   }
   if (!runtime.sttBuffer) {
@@ -1035,8 +1058,61 @@ async function handleSpeechmaticsMessage(
   }
 }
 
-/** Silence gap (ms) between consecutive finals that ends the current utterance. */
-const STT_UTTERANCE_GAP_MS = 800;
+/**
+ * R4: forward a partial (interim) transcript as a non-final frame to the Desktop.
+ *
+ * Speechmatics emits AddPartialTranscript very frequently. To keep the downlink light we
+ * (a) drop empties, (b) drop partials whose normalized text is unchanged since the last
+ * forward, and (c) throttle to at most one frame per STT_PARTIAL_THROTTLE_MS per stream.
+ * The teacher speaker is resolved through resolveTeacherIdentity so the partial line
+ * matches the eventual final (never mislabelled as a student — R1). Partials are UI-only:
+ * they are NOT persisted to utterances and do NOT advance any seq cursor.
+ */
+export async function maybeForwardPartial(
+  sessionId: string,
+  streamRole: StreamRole,
+  text: string,
+  speaker: string | null,
+  ctx: RealtimeAsrContext
+): Promise<void> {
+  if (!text) return;
+  const runtime = ctx.asrRealtimeByStream[streamRole];
+
+  const normalized = normalizeTextForMerge(text);
+  // Dedupe: identical partial text to the last one we forwarded → skip.
+  if (normalized && normalized === runtime.lastPartialTextNorm) return;
+
+  // Throttle: at most one partial per stream per throttle window. A changed-text partial
+  // that arrives inside the window is dropped; the next one past the window carries the
+  // latest cumulative text anyway (partials are cumulative), so nothing is lost. The
+  // very first partial of an utterance (lastPartialSentAt === 0 after a reset/flush)
+  // always forwards so the live line appears immediately.
+  const now = Date.now();
+  if (runtime.lastPartialSentAt > 0 && now - runtime.lastPartialSentAt < STT_PARTIAL_THROTTLE_MS) {
+    return;
+  }
+
+  let broadcastSpeaker: string | null = speaker;
+  if (broadcastSpeaker === null && streamRole === "teacher") {
+    try {
+      const state = normalizeSessionState(
+        await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE)
+      );
+      broadcastSpeaker = resolveTeacherIdentityFn(state, text).speakerName;
+    } catch {
+      broadcastSpeaker = null;
+    }
+  }
+
+  runtime.lastPartialTextNorm = normalized;
+  runtime.lastPartialSentAt = now;
+
+  // Partial frames have no reliable seq mapping; reuse the current utterance span for
+  // start/end ms so the Desktop keys them consistently (isFinal=false marks them interim).
+  const startMs = Math.max(0, (runtime.currentStartSeq ?? 1) - 1) * 1000;
+  const endMs = Math.max(startMs, runtime.lastSentSeq * 1000);
+  ctx.broadcastTranscriptFrame(streamRole, broadcastSpeaker, text, false, startMs, endMs);
+}
 
 /**
  * Emit the accumulated sentence-level utterance (endpointing). Maps the buffered span to

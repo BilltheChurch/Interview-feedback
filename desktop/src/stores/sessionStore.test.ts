@@ -310,3 +310,129 @@ describe('sessionStore — A2 transcript downlink', () => {
     expect(segs[0].text).toBe('seg-50');
   });
 });
+
+describe('sessionStore — R4 live partial transcripts', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useSessionStore.setState({ transcriptSegments: [], partialTranscripts: {} });
+  });
+
+  it('updatePartialTranscript inserts a partial line keyed by role', () => {
+    useSessionStore.getState().updatePartialTranscript({
+      role: 'students',
+      speaker: 'S1',
+      text: 'it was',
+    });
+    const { partialTranscripts } = useSessionStore.getState();
+    expect(partialTranscripts.students).toEqual({ role: 'students', speaker: 'S1', text: 'it was' });
+  });
+
+  it('updatePartialTranscript upserts (replaces) the same role in place', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: 'it' });
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: 'it was good' });
+    const { partialTranscripts } = useSessionStore.getState();
+    expect(Object.keys(partialTranscripts)).toEqual(['students']);
+    expect(partialTranscripts.students.text).toBe('it was good');
+  });
+
+  it('keeps teacher and students partials independently (one per stream)', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'teacher', speaker: null, text: 'how are you' });
+    store.updatePartialTranscript({ role: 'students', speaker: 'S2', text: 'im great' });
+    const { partialTranscripts } = useSessionStore.getState();
+    expect(partialTranscripts.teacher.text).toBe('how are you');
+    expect(partialTranscripts.students.text).toBe('im great');
+  });
+
+  it('trims whitespace and drops the line for empty partial text', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: '  hi  ' });
+    expect(useSessionStore.getState().partialTranscripts.students.text).toBe('hi');
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: '   ' });
+    expect('students' in useSessionStore.getState().partialTranscripts).toBe(false);
+  });
+
+  it('appendTranscriptSegment (final) clears the matching partial line', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: 'it was goo' });
+    expect(useSessionStore.getState().partialTranscripts.students).toBeDefined();
+    store.appendTranscriptSegment({
+      role: 'students',
+      speaker: 'S1',
+      text: 'it was good',
+      isFinal: true,
+      tsMs: 2000,
+      startMs: 1000,
+    });
+    const state = useSessionStore.getState();
+    expect('students' in state.partialTranscripts).toBe(false);
+    // The final still lands as a persisted segment.
+    expect(state.transcriptSegments.at(-1)?.text).toBe('it was good');
+  });
+
+  it('a final on one stream does not clear a partial on the other stream', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'teacher', speaker: null, text: 'next question' });
+    store.appendTranscriptSegment({
+      role: 'students',
+      speaker: 'S1',
+      text: 'done',
+      isFinal: true,
+      tsMs: 1000,
+      startMs: 0,
+    });
+    expect(useSessionStore.getState().partialTranscripts.teacher.text).toBe('next question');
+  });
+
+  it('reset() clears partialTranscripts', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: 'lingering' });
+    store.reset();
+    expect(useSessionStore.getState().partialTranscripts).toEqual({});
+  });
+
+  it('startSession clears partialTranscripts (partials never carry into a new session)', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'students', speaker: 'S1', text: 'lingering' });
+    expect(useSessionStore.getState().partialTranscripts.students).toBeDefined();
+    store.startSession({
+      sessionId: 'sess_new',
+      sessionName: 'New Session',
+      mode: '1v1',
+      participants: [{ name: 'Alice' }],
+      stages: ['Intro'],
+      baseApiUrl: 'http://localhost:8787',
+    });
+    expect(useSessionStore.getState().partialTranscripts).toEqual({});
+  });
+
+  it('restoreSession clears partialTranscripts (partials are UI-only, never restored)', () => {
+    const store = useSessionStore.getState();
+    store.updatePartialTranscript({ role: 'teacher', speaker: null, text: 'lingering' });
+    expect(useSessionStore.getState().partialTranscripts.teacher).toBeDefined();
+    store.restoreSession({
+      sessionId: 'sess_restored',
+      sessionName: 'Restored',
+      mode: '1v1',
+      participants: [{ name: 'Dana' }],
+      stages: ['Intro'],
+      currentStage: 0,
+      startedAt: Date.now(),
+      elapsedSeconds: 42,
+      baseApiUrl: 'http://localhost:8787',
+      interviewerName: '',
+      teamsInterviewerName: '',
+      teamsJoinUrl: '',
+      templateId: '',
+      memos: [],
+      notes: '',
+      stageArchives: [],
+      micActiveSeconds: 0,
+      sysActiveSeconds: 0,
+      transcriptSegments: [],
+      savedAt: Date.now(),
+    });
+    expect(useSessionStore.getState().partialTranscripts).toEqual({});
+  });
+});

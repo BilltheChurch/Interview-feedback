@@ -72,6 +72,16 @@ export type TranscriptSegment = {
 
 const MAX_TRANSCRIPT_SEGMENTS = 1000;
 
+/** R4: an in-progress (unfinalized) transcript line for one stream. Speechmatics streams
+ *  partials as the cumulative text of the current utterance; we keep at most one per stream
+ *  (keyed by role) and replace it in place until the matching final lands. Purely a UI
+ *  transient — never persisted, never part of transcriptSegments, never exported. */
+export type PartialTranscript = {
+  role: StreamRole;
+  speaker: string | null;
+  text: string;
+};
+
 export type SessionStatus =
   | 'idle'
   | 'setup'
@@ -204,6 +214,10 @@ interface SessionStore {
   // A2: universal realtime transcript segments (Worker downlink)
   transcriptSegments: TranscriptSegment[];
 
+  // R4: in-progress (unfinalized) partial lines, keyed by stream role. A UI-only transient
+  // that is upserted from Speechmatics partials and cleared when the matching final lands.
+  partialTranscripts: Record<string, PartialTranscript>;
+
   // Finalization guard
   finalizeRequested: boolean;
 
@@ -238,6 +252,8 @@ interface SessionStore {
   incrementAcsCaptionCount: () => void;
   addCaption: (entry: Omit<CaptionEntry, 'id'>) => void;
   appendTranscriptSegment: (segment: Omit<TranscriptSegment, 'id' | 'createdAt'>) => void;
+  /** R4: upsert the in-progress partial line for a stream (keyed by role). */
+  updatePartialTranscript: (partial: PartialTranscript) => void;
   setFinalizeRequested: (value: boolean) => void;
   reset: () => void;
 }
@@ -278,6 +294,7 @@ const INITIAL_STATE = {
   acsCaptionCount: 0,
   captions: [] as CaptionEntry[],
   transcriptSegments: [] as TranscriptSegment[],
+  partialTranscripts: {} as Record<string, PartialTranscript>,
 
   finalizeRequested: false,
 
@@ -314,6 +331,7 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       memos: [],
       captions: [],
       transcriptSegments: [],
+      partialTranscripts: {},
       notes: '',
       stageArchives: [],
       micActiveSeconds: 0,
@@ -349,6 +367,8 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       micActiveSeconds: persisted.micActiveSeconds ?? 0,
       sysActiveSeconds: persisted.sysActiveSeconds ?? 0,
       transcriptSegments: persisted.transcriptSegments ?? [],
+      // Partials are UI-only transients and are never persisted; start clean on restore.
+      partialTranscripts: {},
     }),
 
   addMemo: (type, text) =>
@@ -421,9 +441,32 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
     set((s) => {
       const id = `ts_${segment.role}_${segment.tsMs}_${s.transcriptSegments.length}`;
       const next = [...s.transcriptSegments, { ...segment, id, createdAt: Date.now() }];
+      // A final for this stream supersedes its in-progress partial line — drop it so the
+      // Desktop never shows the partial and its final side by side (duplicate text).
+      const partialTranscripts = { ...s.partialTranscripts };
+      delete partialTranscripts[segment.role];
       return {
         transcriptSegments:
           next.length > MAX_TRANSCRIPT_SEGMENTS ? next.slice(-MAX_TRANSCRIPT_SEGMENTS) : next,
+        partialTranscripts,
+      };
+    }),
+
+  updatePartialTranscript: (partial) =>
+    set((s) => {
+      const text = partial.text.trim();
+      // Empty partial → clear the line rather than showing a blank row.
+      if (!text) {
+        if (!(partial.role in s.partialTranscripts)) return {};
+        const partialTranscripts = { ...s.partialTranscripts };
+        delete partialTranscripts[partial.role];
+        return { partialTranscripts };
+      }
+      return {
+        partialTranscripts: {
+          ...s.partialTranscripts,
+          [partial.role]: { ...partial, text },
+        },
       };
     }),
 

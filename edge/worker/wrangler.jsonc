@@ -37,6 +37,10 @@
     "SPEECHMATICS_OPERATING_POINT": "enhanced",
     "SPEECHMATICS_MAX_DELAY": "1.0",
     "SPEECHMATICS_LANGUAGE": "cmn_en",
+    // R4/R6: silence gap (ms) between consecutive finals that flushes the accumulated
+    // utterance. Lowered 800 → 500 so finals settle sooner; with live partial captions
+    // streaming (R4) a shorter final gap keeps the transcript snappy. resolveSttUtteranceGapMs.
+    "STT_UTTERANCE_GAP_MS": "500",
     "ASR_ENDPOINT": "",
     // NOTE: ASR_LANGUAGE / ASR_MODEL / ASR_WS_URL are legacy DashScope/Whisper vars —
     // they have NO effect on the Speechmatics realtime path (ASR_PROVIDER=speechmatics).

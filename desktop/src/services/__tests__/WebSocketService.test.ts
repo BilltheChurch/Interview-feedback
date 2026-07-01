@@ -206,4 +206,87 @@ describe('WebSocketService', () => {
     expect(enrollMsg).toBeDefined();
     expect(JSON.parse(enrollMsg!).participant_name).toBe('Alice');
   });
+
+  // ── R4: transcript downlink dispatch (partial vs final) ──────────────────────
+  describe('transcript frame dispatch (R4)', () => {
+    const appendTranscriptSegment = vi.fn();
+    const updatePartialTranscript = vi.fn();
+
+    beforeEach(async () => {
+      appendTranscriptSegment.mockReset();
+      updatePartialTranscript.mockReset();
+      const { useSessionStore } = await import('../../stores/sessionStore');
+      (useSessionStore.getState as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => ({
+        setWsStatus: vi.fn(),
+        setWsError: vi.fn(),
+        appendTranscriptSegment,
+        updatePartialTranscript,
+      }));
+    });
+
+    async function connectAndGetStudentsSocket() {
+      const { wsService } = await import('../WebSocketService');
+      const connectP = wsService.connect({ baseWsUrl: 'ws://localhost:8787', sessionId: 'sess_tx' });
+      await flushPromises();
+      sockets.forEach((ws) => ws._open());
+      await connectP;
+      return sockets.find((ws) => ws.url.includes('/students'))!;
+    }
+
+    it('routes is_final=false frames to updatePartialTranscript (not appended)', async () => {
+      const ws = await connectAndGetStudentsSocket();
+      ws._dispatch(
+        'message',
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            type: 'transcript',
+            role: 'students',
+            speaker: 'S1',
+            text: 'it was',
+            is_final: false,
+            ts_ms: 1500,
+            start_ms: 1000,
+          }),
+        })
+      );
+      expect(updatePartialTranscript).toHaveBeenCalledTimes(1);
+      expect(updatePartialTranscript).toHaveBeenCalledWith({ role: 'students', speaker: 'S1', text: 'it was' });
+      expect(appendTranscriptSegment).not.toHaveBeenCalled();
+    });
+
+    it('routes is_final=true frames to appendTranscriptSegment (not a partial)', async () => {
+      const ws = await connectAndGetStudentsSocket();
+      ws._dispatch(
+        'message',
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            type: 'transcript',
+            role: 'students',
+            speaker: 'S1',
+            text: 'it was good',
+            is_final: true,
+            ts_ms: 2000,
+            start_ms: 1000,
+          }),
+        })
+      );
+      expect(appendTranscriptSegment).toHaveBeenCalledTimes(1);
+      expect(appendTranscriptSegment).toHaveBeenCalledWith(
+        expect.objectContaining({ role: 'students', speaker: 'S1', text: 'it was good', isFinal: true })
+      );
+      expect(updatePartialTranscript).not.toHaveBeenCalled();
+    });
+
+    it('drops empty partial/final text frames', async () => {
+      const ws = await connectAndGetStudentsSocket();
+      ws._dispatch(
+        'message',
+        new MessageEvent('message', {
+          data: JSON.stringify({ type: 'transcript', role: 'students', text: '   ', is_final: false }),
+        })
+      );
+      expect(updatePartialTranscript).not.toHaveBeenCalled();
+      expect(appendTranscriptSegment).not.toHaveBeenCalled();
+    });
+  });
 });
