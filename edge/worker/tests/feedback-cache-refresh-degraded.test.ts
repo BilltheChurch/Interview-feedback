@@ -240,6 +240,74 @@ describe("maybeRefreshFeedbackCache — R-B degraded fork (history reload)", () 
     expect(getCache().report_source).toBe("degraded_no_participants");
   });
 
+  it("BRANCH A2 — degraded summary 反映本场实际内容（面试官发言 + notes），evidence 不盲挂头部", async () => {
+    // 只有面试官说话（teacher 流），且写了 session notes。降级 summary 必须重建，
+    // 不再是通用占位，也不盲挂 memo/evidence 数组头部（面试官开场白 quote）。
+    const { ctx, getCache } = makeHarness({
+      utterances: {
+        teacher: [
+          makeUtterance("t0", "teacher", "Mr. Lee", null, "早上好。", 0, 1000),
+          makeUtterance(
+            "t1",
+            "teacher",
+            "Mr. Lee",
+            null,
+            "我们今天主要围绕你在后端分布式系统上的项目经验展开，先请你做个自我介绍。",
+            1000,
+            10000
+          ),
+          makeUtterance(
+            "t2",
+            "teacher",
+            "Mr. Lee",
+            null,
+            "接下来聊聊你在团队协作里怎么推动一个大项目落地。",
+            10000,
+            18000
+          ),
+        ],
+        students: [],
+      },
+      stats: [makeStat({ speaker_key: "teacher", speaker_name: "Mr. Lee", turns: 6, talk_time_ms: 40000 })],
+      reportPerPerson: [],
+      sessionState: baseSessionState({
+        config: {
+          mode: "1v1",
+          interviewer_name: "Mr. Lee",
+          free_form_notes: "候选人来自 985 高校，重点考察系统设计能力与沟通表达。",
+        },
+      } as unknown as Partial<SessionState>),
+    });
+
+    const result = await maybeRefreshFeedbackCache(ctx, "sess-rb", true);
+
+    expect(result.report_source).toBe("degraded_no_participants");
+    const overall = result.overall_summary_cache as {
+      notice?: string;
+      summary_sections?: Array<{ topic: string; bullets: string[]; evidence_ids: string[] }>;
+    };
+    const sections = overall.summary_sections ?? [];
+    expect(sections.length).toBeGreaterThan(0);
+    const joined = sections.flatMap((s) => s.bullets).join(" ");
+
+    // 不是通用占位
+    expect(joined).not.toContain("本场记录已生成，建议结合个人维度反馈查看。");
+    // 面试官发言要点（过短的 "早上好。" 被过滤）
+    expect(joined).toContain("分布式系统");
+    expect(joined).toContain("团队协作");
+    expect(joined).not.toContain("早上好");
+    // session notes 摘要
+    expect(joined).toContain("系统设计");
+    // evidence_ids 全空 —— 不盲挂无关头部 evidence
+    for (const s of sections) {
+      expect(s.evidence_ids).toEqual([]);
+    }
+    // 持久化的 cache 一致
+    const persistedSections =
+      (getCache().overall_summary_cache as { summary_sections?: unknown[] }).summary_sections ?? [];
+    expect(persistedSections.length).toBeGreaterThan(0);
+  });
+
   it("BRANCH B — eligible student + empty synthesis → still llm_failed + blocking (not degraded)", async () => {
     const { ctx } = makeHarness({
       utterances: {

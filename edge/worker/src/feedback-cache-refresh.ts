@@ -48,6 +48,7 @@ import type {
 } from "./types_v2";
 import type { InferenceBackendTimelineItem } from "./inference_client";
 import {
+  buildDegradedSummarySections,
   buildEvidenceIndex,
   buildQualityMetrics,
   evaluateFeedbackQualityGates,
@@ -287,7 +288,18 @@ export async function maybeRefreshFeedbackCache(
       // Overview-only: drop the memo-first placeholder person cards so the UI shows
       // just the overview + notice, no phantom "unknown" student.
       finalPerPerson = [];
-      finalOverall = { ...(finalOverall as Record<string, unknown>), notice: NO_STUDENT_SPEECH_NOTICE };
+      // R2: 用确定性拼接重建 overview summary，反映本场实际内容（面试官发言 +
+      // notes），并置空 evidence_ids —— 不再沿用 memo-first 那句通用占位、也不盲
+      // 挂无关头部 evidence。与 finalize-orchestrator 两条降级 fork 行为一致。
+      finalOverall = {
+        ...(finalOverall as Record<string, unknown>),
+        notice: NO_STUDENT_SPEECH_NOTICE,
+        summary_sections: buildDegradedSummarySections({
+          transcript,
+          freeFormNotes: eligibilityContext.freeFormNotes,
+          notice: NO_STUDENT_SPEECH_NOTICE,
+        }),
+      };
     }
   }
   const reportMs = Date.now() - reportStart;

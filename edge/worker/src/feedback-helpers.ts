@@ -205,6 +205,89 @@ export function resolveNoStudentSpeechDegradation(
   return { degraded, eligibleStudentCount: eligibleActiveStudentCount, notice: NO_STUDENT_SPEECH_NOTICE };
 }
 
+// ── R2: 降级报告的 summary 重建（确定性拼接，无 LLM）─────────────────────
+
+/** 降级 summary 单条 bullet 的字符上限（避免整段转写灌进 overview）。 */
+const DEGRADED_BULLET_MAX_CHARS = 140;
+/** 降级 summary 里面试官发言要点的最大条数。 */
+const DEGRADED_TEACHER_BULLET_MAX = 4;
+/** 一条发言要作为"有信息量的要点"至少需要的字符数（滤掉"早上好。"这类开场白）。 */
+const DEGRADED_MIN_UTTERANCE_CHARS = 12;
+/** session notes 摘要的字符上限。 */
+const DEGRADED_NOTES_MAX_CHARS = 400;
+
+/** 折叠空白 + 截断到 maxChars（超出加省略号）。 */
+function clampText(text: string, maxChars: number): string {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars).trimEnd()}…`;
+}
+
+/**
+ * R2 降级 fork 专用 —— 用确定性拼接（不调用 LLM）重建 overview 的
+ * `summary_sections`，让"只有面试官说话 / 无候选人发言"的场次也有一份能反映
+ * 本场实际内容的概述，而不是那句通用占位。
+ *
+ * 组装内容：
+ *   1. 首段：no-student-speech notice —— 明确告知本场未检测到候选人发言、
+ *      无法生成个人维度评估（复用现有 notice 语义）。
+ *   2. （若有）面试官/记录者发言要点：从 teacher 流挑若干条较长/有信息量的
+ *      发言（按时间序，滤掉过短开场白），每条截断到合理长度。
+ *   3. （若有）session notes 摘要：free-form notes 折叠成一段。
+ *
+ * evidence_ids 一律为空 `[]` —— 降级 summary 不挂 footnote，杜绝旧代码"按
+ * evidence 数组顺序盲取头 4 个"把面试官开场白 quote 误挂成 summary 证据的问题。
+ * 这些 bullet 是从 transcript/notes 直接派生的概述，没有对应的语义 evidence。
+ *
+ * 纯函数、无副作用。三条降级 fork（feedback-cache-refresh 的 history-reload
+ * 路径、finalize-orchestrator 的 full 与 report-only 路径）共用它，保证行为一致。
+ */
+export function buildDegradedSummarySections(params: {
+  transcript: TranscriptItem[];
+  freeFormNotes: string | null;
+  notice: string;
+}): Array<{ topic: string; bullets: string[]; evidence_ids: string[] }> {
+  const sections: Array<{ topic: string; bullets: string[]; evidence_ids: string[] }> = [];
+
+  // 1. notice —— 本场未检测到候选人发言（中文，与产品一致）。
+  sections.push({
+    topic: "本场概述",
+    bullets: [
+      "本场未检测到候选人（学生）发言，无法生成个人维度评估。以下为本场面试官发言与记录要点。",
+    ],
+    evidence_ids: [],
+  });
+
+  // 2. 面试官/记录者发言要点（teacher 流，按时间序，滤掉过短开场白）。
+  const teacherBullets = params.transcript
+    .filter((item) => item.stream_role === "teacher")
+    .slice()
+    .sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms)
+    .map((item) => (typeof item.text === "string" ? item.text.trim() : ""))
+    .filter((text) => text.replace(/\s+/g, "").length >= DEGRADED_MIN_UTTERANCE_CHARS)
+    .slice(0, DEGRADED_TEACHER_BULLET_MAX)
+    .map((text) => clampText(text, DEGRADED_BULLET_MAX_CHARS));
+  if (teacherBullets.length > 0) {
+    sections.push({
+      topic: "面试官发言要点",
+      bullets: teacherBullets,
+      evidence_ids: [],
+    });
+  }
+
+  // 3. session notes 摘要（free-form notes）。
+  const notes = typeof params.freeFormNotes === "string" ? params.freeFormNotes.trim() : "";
+  if (notes.length > 0) {
+    sections.push({
+      topic: "面试记录（Notes）",
+      bullets: [clampText(notes, DEGRADED_NOTES_MAX_CHARS)],
+      evidence_ids: [],
+    });
+  }
+
+  return sections;
+}
+
 // ── Stats helpers ───────────────────────────────────────────────────
 
 export function mergeStatsWithRoster(stats: SpeakerStatItem[], state: SessionState): SpeakerStatItem[] {
