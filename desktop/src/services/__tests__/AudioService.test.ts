@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { rmsToLevel } from '../AudioService';
 
 // Mock the session store
 vi.mock('../../stores/sessionStore', () => ({
@@ -55,6 +56,45 @@ function makeMockAudioContext(closeFn = vi.fn()) {
 
   return MockAudioContext;
 }
+
+describe('rmsToLevel (P1-c louder meter mapping)', () => {
+  it('maps full-scale rms (1) to 100', () => {
+    expect(rmsToLevel(1)).toBe(100);
+  });
+
+  it('clamps above-unity rms to 100', () => {
+    expect(rmsToLevel(2)).toBe(100);
+  });
+
+  it('maps normal speech rms (0.1) to a clearly visible level (> 40)', () => {
+    // Regression guard: the old `rms * 200` mapping produced only 20 here,
+    // rendering a ~20% wide bar for a normal-volume speaker.
+    const level = rmsToLevel(0.1);
+    expect(level).toBeGreaterThan(40);
+    expect(level).toBeLessThanOrEqual(100);
+  });
+
+  it('keeps a quiet noise-floor rms (0.005) very low but non-negative', () => {
+    const level = rmsToLevel(0.005);
+    expect(level).toBeGreaterThanOrEqual(0);
+    expect(level).toBeLessThan(10);
+  });
+
+  it('gives a soft speaker (rms 0.05) a visibly non-trivial reading', () => {
+    // Soft speech should still move the bar meaningfully (more than the old
+    // mapping's 10) so users see it react.
+    expect(rmsToLevel(0.05)).toBeGreaterThan(10);
+  });
+
+  it('is monotonic — louder rms never yields a lower level', () => {
+    expect(rmsToLevel(0.2)).toBeGreaterThan(rmsToLevel(0.1));
+    expect(rmsToLevel(0.5)).toBeGreaterThanOrEqual(rmsToLevel(0.2));
+  });
+
+  it('returns 0 for silence (rms 0)', () => {
+    expect(rmsToLevel(0)).toBe(0);
+  });
+});
 
 describe('AudioService', () => {
   beforeEach(() => {

@@ -647,6 +647,9 @@ export function SetupView() {
   const [mode, setMode] = useState<SessionMode>(locationState?.mode || '1v1');
   const [sessionName, setSessionName] = useState(locationState?.sessionName || '');
   const [interviewerName, setInterviewerName] = useState('');
+  // 1v1 mode has a single interviewee — captured here rather than via the
+  // group-only Participants editor, so the 1v1 roster is never empty.
+  const [candidateName, setCandidateName] = useState('');
   // Evaluation rubric state — the interview type drives which preset dimensions
   // seed the editor. Preserve the prior default interview type ("academic").
   const DEFAULT_INTERVIEW_TYPE = 'academic';
@@ -691,14 +694,22 @@ export function SetupView() {
     const sessionId = `sess_${Date.now()}`;
     const displayName = sessionName || 'Untitled Session';
 
+    // Resolve the roster. In 1v1 mode the interviewee comes from the dedicated
+    // Candidate field (falling back to a placeholder so the roster is never
+    // empty); group mode uses the Participants editor.
+    const rosterNames =
+      mode === '1v1'
+        ? [candidateName.trim() || 'Candidate']
+        : participants.map((p) => p.name);
+
     // Save to localStorage for History (deduplicate by session ID)
     const sessionRecord = {
       id: sessionId,
       name: displayName,
       date: new Date().toISOString().slice(0, 10),
       mode,
-      participantCount: participants.length,
-      participants: participants.map(p => p.name),
+      participantCount: rosterNames.length,
+      participants: rosterNames,
       interviewType,
       status: 'in_progress',
     };
@@ -724,7 +735,7 @@ export function SetupView() {
         sessionId,
         sessionName: displayName,
         mode,
-        participants: participants.map(p => p.name),
+        participants: rosterNames,
         interviewType,
         teamsUrl,
         stages,
@@ -748,7 +759,7 @@ export function SetupView() {
       sessionId,
       sessionName: displayName,
       mode,
-      participants: participants.map(p => ({ name: p.name })),
+      participants: rosterNames.map((name) => ({ name })),
       stages,
       baseApiUrl,
       interviewerName: interviewerName.trim() || undefined,
@@ -756,7 +767,7 @@ export function SetupView() {
       interviewType,
       dimensionPresets,
     });
-  }, [sessionName, mode, interviewerName, participants, interviewType, dimensionPresets, stages, teamsUrl, startSession, navigate]);
+  }, [sessionName, mode, interviewerName, candidateName, participants, interviewType, dimensionPresets, stages, teamsUrl, startSession, navigate]);
 
   const handleStartWithConsent = useCallback(() => {
     if (!hasConsented.current) {
@@ -881,14 +892,25 @@ export function SetupView() {
                   />
                 </Card>
 
-                <Card className="p-4">
-                  <ParticipantEditor
-                    participants={participants}
-                    onAdd={addParticipant}
-                    onRemove={removeParticipant}
-                    onImport={importParticipants}
-                  />
-                </Card>
+                {mode === '1v1' ? (
+                  <Card className="p-4">
+                    <TextField
+                      label="Candidate name"
+                      placeholder="Candidate — the person being interviewed"
+                      value={candidateName}
+                      onChange={(e) => setCandidateName(e.target.value)}
+                    />
+                  </Card>
+                ) : (
+                  <Card className="p-4">
+                    <ParticipantEditor
+                      participants={participants}
+                      onAdd={addParticipant}
+                      onRemove={removeParticipant}
+                      onImport={importParticipants}
+                    />
+                  </Card>
+                )}
 
                 <Card className="p-4">
                   <MeetingConnector
@@ -961,7 +983,11 @@ export function SetupView() {
                   sessionName={sessionName}
                   rubricLabel={getRubricLabel()}
                   dimensionCount={dimensionPresets.length}
-                  participants={participants}
+                  participants={
+                    mode === '1v1'
+                      ? [{ id: 'candidate', name: candidateName.trim() || 'Candidate' }]
+                      : participants
+                  }
                   teamsUrl={teamsUrl}
                   stages={stages}
                 />

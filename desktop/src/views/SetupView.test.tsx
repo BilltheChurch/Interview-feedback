@@ -150,6 +150,70 @@ describe('SetupView Step 2 — Evaluation Rubric consolidation', () => {
     expect(reviewCard.textContent ?? '').not.toMatch(/[一-鿿]/);
   });
 
+  it('1v1: filling the Candidate name field seeds a non-empty participant to startSession', async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    // Default mode is 1v1. A dedicated "Candidate" field must exist so 1v1
+    // users have a place to name the interviewee (Participants editor is
+    // group-only).
+    const candidateInput = screen.getByPlaceholderText(/candidate/i);
+    await user.type(candidateInput, 'Alice Zhang');
+
+    await goToStep2(user);
+    await user.click(screen.getByRole('button', { name: /continue/i }));
+    await user.click(screen.getByRole('button', { name: /join & start session/i }));
+
+    expect(startMock).toHaveBeenCalledTimes(1);
+    const cfg = startMock.mock.calls[0][0];
+    expect(Array.isArray(cfg.participants)).toBe(true);
+    expect(cfg.participants.length).toBeGreaterThanOrEqual(1);
+    expect(cfg.participants.map((p: { name: string }) => p.name)).toContain('Alice Zhang');
+  });
+
+  it('1v1: an empty Candidate name still yields a non-empty participant (placeholder)', async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    // Do not fill the candidate name — 1v1 roster must never be empty.
+    await goToStep2(user);
+    await user.click(screen.getByRole('button', { name: /continue/i }));
+    await user.click(screen.getByRole('button', { name: /join & start session/i }));
+
+    expect(startMock).toHaveBeenCalledTimes(1);
+    const cfg = startMock.mock.calls[0][0];
+    expect(Array.isArray(cfg.participants)).toBe(true);
+    expect(cfg.participants.length).toBeGreaterThanOrEqual(1);
+    expect(cfg.participants[0].name.trim().length).toBeGreaterThan(0);
+  });
+
+  it('group mode: the Participants editor still drives the roster (no regression)', async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    // Switch to group mode. The 1v1 Candidate field must disappear and the
+    // Participants editor must be the source of the roster.
+    await user.click(screen.getByRole('button', { name: /group/i }));
+    expect(screen.queryByPlaceholderText(/candidate/i)).not.toBeInTheDocument();
+
+    // Add two participants via the Participants editor.
+    const nameInput = screen.getByPlaceholderText(/participant name/i);
+    await user.type(nameInput, 'Bob');
+    await user.keyboard('{Enter}');
+    await user.type(nameInput, 'Carol');
+    await user.keyboard('{Enter}');
+
+    await goToStep2(user);
+    await user.click(screen.getByRole('button', { name: /continue/i }));
+    await user.click(screen.getByRole('button', { name: /join & start session/i }));
+
+    expect(startMock).toHaveBeenCalledTimes(1);
+    const cfg = startMock.mock.calls[0][0];
+    const names = cfg.participants.map((p: { name: string }) => p.name);
+    expect(names).toContain('Bob');
+    expect(names).toContain('Carol');
+  });
+
   it('switching to the Technical pill flows interviewType + matching dimensions to startSession', async () => {
     const user = userEvent.setup();
     renderSetup();

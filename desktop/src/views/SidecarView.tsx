@@ -214,10 +214,11 @@ export function SidecarView() {
   const quickMarkButtonRefs = useRef<Map<MemoType, HTMLElement>>(new Map());
   const enrollTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Audio activity indicator — audioLevels are 0–100 (see readRmsLevel), so we
-  // reuse the same per-stream silence gates as talk-time accumulation instead of
-  // an out-of-scale 0–1 threshold that treated the noise floor as "active". The
-  // mic uses the lower gate (noise-suppressed soft speech), system the R7 gate.
+  // Audio activity indicator — audioLevels are 0–100 (see readRmsLevel /
+  // rmsToLevel), so we reuse the per-stream silence gates from speechActivity
+  // instead of an out-of-scale 0–1 threshold that treated the noise floor as
+  // "active". The mic uses the lower gate (noise-suppressed soft speech), the
+  // system stream the higher R7 gate.
   const audioActive =
     isSpeechActive(audioLevels.mic, MIC_ACTIVITY_LEVEL_THRESHOLD) ||
     isSpeechActive(audioLevels.system, SYSTEM_ACTIVITY_LEVEL_THRESHOLD);

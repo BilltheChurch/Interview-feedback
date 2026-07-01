@@ -15,6 +15,25 @@ const WORKLET_URL = '/audio-worklet-processor.js';
 
 /* ── Audio conversion helpers ─────────────── */
 
+/**
+ * Maps a linear RMS amplitude (0–1) to a 0–100 meter level.
+ *
+ * The previous mapping (`rms * 200`) was far too quiet: normal speech sits
+ * around rms 0.05–0.2, which produced levels of only ~10–40 — so a loud
+ * speaker barely filled a third of the bar. We scale by 500 so normal speech
+ * lands in the visible/green-to-amber range while the idle noise floor
+ * (rms ≈ 0.005 → level ≈ 3) stays low and quiet talkers (rms ≈ 0.05 → ~25)
+ * still produce a clearly reacting bar.
+ *
+ * This only drives the AUDIO meter display; talk-time / speaker-activity is
+ * computed from transcript segments, not from this level, so the scale factor
+ * has no effect on scoring.
+ */
+export function rmsToLevel(rms: number): number {
+  if (!(rms > 0)) return 0;
+  return Math.min(100, Math.round(rms * 500));
+}
+
 function readRmsLevel(analyser: AnalyserNode, buf: Float32Array<ArrayBuffer>): number {
   analyser.getFloatTimeDomainData(buf);
   let sum = 0;
@@ -22,7 +41,7 @@ function readRmsLevel(analyser: AnalyserNode, buf: Float32Array<ArrayBuffer>): n
     sum += buf[i] * buf[i];
   }
   const rms = Math.sqrt(sum / buf.length);
-  return Math.min(100, Math.round(rms * 200));
+  return rmsToLevel(rms);
 }
 
 function downsampleBuffer(input: Float32Array, inputRate: number, outputRate: number): Float32Array {

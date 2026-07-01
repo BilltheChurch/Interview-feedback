@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { rmsToLevel } from '../services/AudioService';
 
 /* ── Types ─────────────────────────────────── */
 
@@ -35,8 +36,9 @@ function readRmsLevel(analyser: AnalyserNode, buf: Float32Array<ArrayBuffer>): n
     sum += buf[i] * buf[i];
   }
   const rms = Math.sqrt(sum / buf.length);
-  // Map RMS 0..0.5 → 0..100 with clamp
-  return Math.min(100, Math.round(rms * 200));
+  // Shared mapping with AudioService so the Settings audio preview meters match
+  // the in-session AUDIO bars (louder, perceptually visible).
+  return rmsToLevel(rms);
 }
 
 /* ── Hook ──────────────────────────────────── */
