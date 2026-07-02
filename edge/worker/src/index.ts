@@ -324,6 +324,7 @@ import {
   extractNumberByKeys,
   extractNameFromText,
   parseRosterEntries,
+  extractNameAliases,
   normalizeTextForMerge,
   tokenizeForMerge,
   tokenOverlapSuffixPrefix,
@@ -957,7 +958,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
       speakerLogs: speakerLogsStored,
       state,
       diarizationBackend,
-      roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])])
+      roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
+      rosterEntries: state.roster ?? []
     });
   }
 
@@ -1871,6 +1873,13 @@ export class MeetingSessionDO extends DurableObject<Env> {
     const roster = parseRosterEntries(message.teams_participants);
     if (roster.length > 0) {
       currentState.roster = roster;
+      // R6-roster: extract alias -> primary mappings for the LLM (name_aliases). The
+      // POST /config path has always done this; the hello path (the one the real
+      // desktop app uses) previously dropped aliases silently.
+      const nameAliases = extractNameAliases(roster);
+      if (Object.keys(nameAliases).length > 0) {
+        config.name_aliases = nameAliases;
+      }
     }
 
     currentState.config = config;
@@ -2057,13 +2066,8 @@ export class MeetingSessionDO extends DurableObject<Env> {
         const roster = parseRosterEntries(payload.participants ?? payload.teams_participants);
         if (roster.length > 0) {
           state.roster = roster;
-          // Extract name_aliases from roster entries that have aliases
-          const nameAliases: Record<string, string[]> = {};
-          for (const entry of roster) {
-            if (entry.aliases && entry.aliases.length > 0) {
-              nameAliases[entry.name] = entry.aliases;
-            }
-          }
+          // Extract name_aliases from roster entries that have aliases (shared with hello).
+          const nameAliases = extractNameAliases(roster);
           if (Object.keys(nameAliases).length > 0) {
             config.name_aliases = nameAliases;
           }

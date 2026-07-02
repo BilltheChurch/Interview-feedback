@@ -1087,6 +1087,7 @@ export async function runFinalizeV2Job(
         state,
         diarizationBackend,
         roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
+        rosterEntries: state.roster ?? [],
         globalClusterResult,
         clusterRosterMapping,
         cachedEmbeddings: ctx.embeddingCache.getAllEmbeddings()

@@ -23,6 +23,10 @@ export type Memo = {
 
 export type Participant = {
   name: string;
+  /** R6-roster: known aliases (e.g. legal name vs. preferred name). Parsed from the
+   *  "Name (alias)" Setup syntax; forwarded verbatim in the hello frame so the worker
+   *  can bias the STT vocab and normalize alias self-intros to this primary name. */
+  aliases?: string[];
   speakerId?: string;
   status?: 'pending' | 'active' | 'left';
 };

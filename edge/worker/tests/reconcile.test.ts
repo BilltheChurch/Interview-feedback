@@ -1357,3 +1357,138 @@ describe("buildReconciledTranscript: teacher-stream interviewer labeling (P0-b)"
     expect(studentRow?.decision).toBe("confirm");
   });
 });
+
+// ── R6-roster: 1v1 sole-candidate roster priority + alias → primary normalization ──
+
+describe("R6-roster: roster priority and alias normalization", () => {
+  const logs: SpeakerLogs = {
+    source: "cloud",
+    turns: [],
+    clusters: [],
+    speaker_map: [],
+    updated_at: "2026-07-02T00:00:00Z",
+  };
+  const emptyState: ReconcileSessionState = { bindings: {}, cluster_binding_meta: {} };
+
+  function studentsIntro(text: string): {
+    utterances: ReconcileUtterance[];
+    events: ReconcileSpeakerEvent[];
+  } {
+    return {
+      utterances: [
+        { utterance_id: "u1", stream_role: "students", text, start_ms: 0, end_ms: 5000, duration_ms: 5000 },
+      ],
+      events: [{ stream_role: "students", utterance_id: "u1", cluster_id: "S1" }],
+    };
+  }
+
+  it("1v1: formal self-intro that misses the sole roster name binds to the roster name (Kenny Tan → Tina)", () => {
+    const { utterances, events } = studentsIntro("My name is Kenny Tan and I studied at Imperial.");
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina"],
+      rosterEntries: [{ name: "Tina" }],
+    });
+    expect(result[0].speaker_name).toBe("Tina");
+  });
+
+  it("group (≥2 primary names): an unmatched raw name is kept — never force-bound to a roster entry", () => {
+    const { utterances, events } = studentsIntro("My name is Kenny Tan and I studied at Imperial.");
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina", "Daisy"],
+      rosterEntries: [{ name: "Tina" }, { name: "Daisy" }],
+    });
+    expect(result[0].speaker_name).toBe("Kenny Tan");
+  });
+
+  it("legacy callers without rosterEntries keep the old raw-name behavior (regression lock)", () => {
+    const { utterances, events } = studentsIntro("My name is Kenny Tan and I studied at Imperial.");
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina"],
+    });
+    expect(result[0].speaker_name).toBe("Kenny Tan");
+  });
+
+  it("preferred name still beats the sole roster name ('call me Rice' + roster [Tina] → Rice)", () => {
+    const { utterances, events } = studentsIntro("My name is Hong, please call me Rice.");
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina"],
+      rosterEntries: [{ name: "Tina" }],
+    });
+    expect(result[0].speaker_name).toBe("Rice");
+  });
+
+  it("alias hit normalizes to the PRIMARY roster name (Kenny Tan listed as Tina's alias)", () => {
+    const { utterances, events } = studentsIntro("My name is Kenny Tan and I studied at Imperial.");
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina", "Kenny Tan"], // flattened [name, ...aliases]
+      rosterEntries: [{ name: "Tina", aliases: ["Kenny Tan"] }],
+    });
+    expect(result[0].speaker_name).toBe("Tina");
+  });
+
+  it("1v1 with aliases: the sole-candidate fallback still fires (flattened roster >1 must not disable it)", () => {
+    // No self-intro at all — the utterance stays unresolved until the sole-candidate
+    // fallback. The flattened roster has 2 strings (name + alias) which used to make
+    // the session look like a group and skip the fallback entirely.
+    const utterances: ReconcileUtterance[] = [
+      { utterance_id: "u1", stream_role: "students", text: "I would optimize the database first.", start_ms: 0, end_ms: 4000, duration_ms: 4000 },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events: [],
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina", "Kenny Tan"],
+      rosterEntries: [{ name: "Tina", aliases: ["Kenny Tan"] }],
+    });
+    expect(result[0].speaker_name).toBe("Tina");
+  });
+
+  it("1v1: no more identity split — intro and later unresolved utterances land on the SAME person", () => {
+    const utterances: ReconcileUtterance[] = [
+      { utterance_id: "u1", stream_role: "students", text: "My name is Kenny Tan.", start_ms: 0, end_ms: 3000, duration_ms: 3000 },
+      { utterance_id: "u2", stream_role: "students", text: "I would optimize the database first.", start_ms: 4000, end_ms: 8000, duration_ms: 4000 },
+    ];
+    const events: ReconcileSpeakerEvent[] = [
+      { stream_role: "students", utterance_id: "u1", cluster_id: "S1" },
+      { stream_role: "students", utterance_id: "u2", cluster_id: "S1" },
+    ];
+    const result = buildReconciledTranscript({
+      utterances,
+      events,
+      speakerLogs: logs,
+      state: emptyState,
+      diarizationBackend: "cloud",
+      roster: ["Tina"],
+      rosterEntries: [{ name: "Tina" }],
+    });
+    const names = new Set(result.map((r) => r.speaker_name));
+    expect([...names]).toEqual(["Tina"]);
+  });
+});

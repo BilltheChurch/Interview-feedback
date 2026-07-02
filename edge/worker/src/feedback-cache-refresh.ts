@@ -148,6 +148,7 @@ export async function maybeRefreshFeedbackCache(
     state,
     diarizationBackend,
     roster: (state.roster ?? []).flatMap((r) => [r.name, ...(r.aliases ?? [])]),
+    rosterEntries: state.roster ?? [],
   });
   const stats = mergeStatsWithRoster(computeSpeakerStats(transcript), state);
   // Exclude the teacher / interviewer from per-person scoring. The teacher stream

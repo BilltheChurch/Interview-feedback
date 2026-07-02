@@ -26,6 +26,7 @@ import { ShimmerButton } from '../components/magicui/shimmer-button';
 import { EvaluationRubricEditor } from '../components/EvaluationRubricEditor';
 
 import { getPresetByType, getInterviewTypeLabelEn, type DimensionPresetItem } from '../lib/dimensionPresets';
+import { parseNameWithAliases } from '../lib/rosterAliases';
 import { ConsentDialog, hasValidConsent } from '../components/ConsentDialog';
 
 /* ─── Motion Variants ────────────────────────── */
@@ -697,10 +698,14 @@ export function SetupView() {
     // Resolve the roster. In 1v1 mode the interviewee comes from the dedicated
     // Candidate field (falling back to a placeholder so the roster is never
     // empty); group mode uses the Participants editor.
-    const rosterNames =
+    // R6-roster: "Name (alias1, alias2)" inline syntax attaches known aliases to a
+    // roster entry (e.g. legal name vs. preferred name). Aliases ride the hello frame
+    // to the worker for STT vocab biasing + alias->primary name normalization.
+    const rosterEntries =
       mode === '1v1'
-        ? [candidateName.trim() || 'Candidate']
-        : participants.map((p) => p.name);
+        ? [parseNameWithAliases(candidateName.trim() || 'Candidate')]
+        : participants.map((p) => parseNameWithAliases(p.name));
+    const rosterNames = rosterEntries.map((entry) => entry.name);
 
     // Save to localStorage for History (deduplicate by session ID)
     const sessionRecord = {
@@ -759,7 +764,11 @@ export function SetupView() {
       sessionId,
       sessionName: displayName,
       mode,
-      participants: rosterNames.map((name) => ({ name })),
+      participants: rosterEntries.map((entry) =>
+        entry.aliases && entry.aliases.length > 0
+          ? { name: entry.name, aliases: entry.aliases }
+          : { name: entry.name }
+      ),
       stages,
       baseApiUrl,
       interviewerName: interviewerName.trim() || undefined,
@@ -896,7 +905,7 @@ export function SetupView() {
                   <Card className="p-4">
                     <TextField
                       label="Candidate name"
-                      placeholder="Candidate — the person being interviewed"
+                      placeholder="Candidate name, alias in parens — e.g. Tina (Kenny Tan)"
                       value={candidateName}
                       onChange={(e) => setCandidateName(e.target.value)}
                     />

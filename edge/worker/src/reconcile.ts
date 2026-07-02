@@ -430,8 +430,15 @@ export function buildReconciledTranscript(options: {
   speakerLogs: SpeakerLogs;
   state: ReconcileSessionState;
   diarizationBackend: "cloud" | "edge";
-  /** Participant names from session config for roster matching. */
+  /** Participant names from session config for roster matching.
+   *  Flattened [name, ...aliases] — kept for backward compatibility; matching still
+   *  runs against every alias. */
   roster?: string[];
+  /** R6-roster: the STRUCTURED roster (primary name + aliases per entry). Enables
+   *  (a) alias hits displaying the PRIMARY name instead of the alias string, and
+   *  (b) the 1v1 sole-candidate decision counting primary names only (aliases would
+   *  otherwise make a 1v1 look like a group). Optional — omitted keeps old behavior. */
+  rosterEntries?: Array<{ name: string; aliases?: string[] }>;
   /** Optional seq cutoff per stream role (used by finalize to freeze at a point). */
   seqCutoff?: Record<string, number>;
   /** Global clustering result from embedding-based speaker identification. */
@@ -443,6 +450,23 @@ export function buildReconciledTranscript(options: {
 }): TranscriptItem[] {
   const { utterances, events, speakerLogs, state, diarizationBackend } = options;
   const roster = options.roster ?? [];
+
+  // R6-roster: alias → primary-name map + primary-name list from the structured roster.
+  // An alias hit must display the primary roster name; the sole-candidate rule must count
+  // primary names only. Both stay no-ops when rosterEntries is not provided.
+  const rosterEntries = options.rosterEntries ?? [];
+  const aliasToPrimary = new Map<string, string>();
+  const rosterPrimaryNames: string[] = [];
+  for (const entry of rosterEntries) {
+    const primary = typeof entry?.name === "string" ? entry.name.trim() : "";
+    if (!primary) continue;
+    rosterPrimaryNames.push(primary);
+    for (const alias of entry.aliases ?? []) {
+      const trimmed = typeof alias === "string" ? alias.trim() : "";
+      if (trimmed) aliasToPrimary.set(trimmed.toLowerCase(), primary);
+    }
+  }
+  const soleRosterPrimary = rosterPrimaryNames.length === 1 ? rosterPrimaryNames[0] : null;
   const globalClusters = options.globalClusterResult ?? null;
   const clusterMapping = options.clusterRosterMapping ?? null;
   const embeddings = options.cachedEmbeddings ?? [];
@@ -549,7 +573,12 @@ export function buildReconciledTranscript(options: {
 
           const charFraction = match.index / Math.max(1, text.length);
           const timeMs = item.start_ms + charFraction * (item.end_ms - item.start_ms);
-          const rosterName = matchToRoster(rawName, extendedRoster);
+          // R6-roster: an alias hit ("Kenny Tan" listed as Tina's alias) normalizes to the
+          // PRIMARY roster name so the transcript never displays the alias string itself.
+          const rosterHit = matchToRoster(rawName, extendedRoster);
+          const rosterName = rosterHit
+            ? aliasToPrimary.get(rosterHit.toLowerCase()) ?? rosterHit
+            : null;
 
           // Find the edge turn active at this time (±5s tolerance)
           let bestTurn: typeof introTurns[0] | null = null;
@@ -625,7 +654,16 @@ export function buildReconciledTranscript(options: {
       // (e.g. "go by Tim... actually call me Tom" → Tom). Only formal anchors are blocked here.
       const committedPreferred = new Set<string>(); // cluster IDs already bound by a preferred anchor
       for (const anchor of anchors) {
-        const name = anchor.rosterName || anchor.rawName;
+        // R6-roster: 1v1 sole-candidate roster priority. A FORMAL self-intro that failed
+        // roster matching ("my name is Kenny Tan" vs roster ["Tina"]) binds to the sole
+        // roster name: only one person can own students utterances in an unambiguous 1v1,
+        // so the mis-binding risk is zero — and this stops the same speaker splitting into
+        // two persons (name_extract "Kenny Tan" + sole-candidate fallback "Tina").
+        // Preferred anchors ("call me X") still win — explicit intent beats the roster.
+        // Group interviews (≥2 primary names) keep the raw-name fallback (mis-binding a
+        // real name onto the wrong roster entry is worse than showing the real name).
+        const soleFallback = !anchor.isPreferred && soleRosterPrimary ? soleRosterPrimary : null;
+        const name = anchor.rosterName || soleFallback || anchor.rawName;
         if (!anchor.edgeClusterId || !name) continue;
         // Never overwrite a preferred-name binding with a formal-name one
         if (!anchor.isPreferred && committedPreferred.has(anchor.edgeClusterId)) continue;
@@ -840,7 +878,9 @@ export function buildReconciledTranscript(options: {
   // person, so leaving it null (→ front-end "Unknown") is strictly wrong. We only
   // apply this in the unambiguous single-candidate case to avoid mis-attributing
   // group interviews.
-  const soleCandidate = resolveSoleRosterCandidate(roster, result);
+  // R6-roster: prefer the structured roster's sole PRIMARY name — a 1v1 entry with
+  // aliases flattens to >1 strings and would wrongly disable this fallback otherwise.
+  const soleCandidate = soleRosterPrimary ?? resolveSoleRosterCandidate(roster, result);
   if (soleCandidate) {
     for (const u of result) {
       if (u.stream_role === "students" && !u.speaker_name) {
