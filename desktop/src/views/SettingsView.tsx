@@ -24,7 +24,12 @@ import { useAudioCapture } from '../hooks/useAudioCapture';
 /* --- AudioSetup ---------------------------------------- */
 
 function AudioSetup() {
-  const { initMic, startCapture, stopCapture, levels, micReady, systemReady, error } = useAudioCapture();
+  const { initMic, startCapture, stopCapture, levels, isCapturing, micReady, systemReady, error } = useAudioCapture();
+
+  // A recording session owns the mic; the Settings preview reuses its state read-only.
+  // If that session's mic is unavailable (micReady=false while capturing), the preview
+  // can't self-test — say so instead of hanging on a misleading "Starting…".
+  const sessionMicUnavailable = isCapturing && !micReady;
 
   // Auto-init mic + start capturing when component mounts (like Zoom/Teams)
   useEffect(() => {
@@ -83,9 +88,9 @@ function AudioSetup() {
               Audio Monitor
             </h3>
             <div className="flex items-center gap-1.5">
-              <StatusDot status={micReady ? 'recording' : 'idle'} />
+              <StatusDot status={micReady ? 'recording' : sessionMicUnavailable ? 'reconnecting' : 'idle'} />
               <span className="text-xs text-ink-tertiary">
-                {micReady ? 'Live' : 'Starting...'}
+                {micReady ? 'Live' : sessionMicUnavailable ? 'Session mic unavailable' : 'Starting...'}
               </span>
             </div>
           </div>

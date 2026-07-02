@@ -150,6 +150,11 @@ function resetQueue(q: ChunkQueue): void {
 
 class AudioService {
   private audioCtx: AudioContext | null = null;
+  // R6-audio: bumped on every initMic start and on destroy(). A pending initMic whose
+  // getUserMedia resolves after the token moved on bails out (stopping its just-acquired
+  // stream) instead of mutating service state — this prevents a late Settings-preview
+  // continuation from stopping a live session's microphone or leaking a mic stream.
+  private micInitToken = 0;
   private micStream: MediaStream | null = null;
   private systemStream: MediaStream | null = null;
   private displayStream: MediaStream | null = null;
@@ -324,6 +329,9 @@ class AudioService {
 
   async initMic(preview = false): Promise<void> {
     const store = useSessionStore.getState();
+    // Capture a token for THIS init. Any teardown (destroy) or newer initMic bumps it;
+    // if it changed by the time our async getUserMedia resolves, we've been superseded.
+    const token = ++this.micInitToken;
     try {
       store.setAudioError(null);
       const ctx = this.ensureAudioGraph();
@@ -342,6 +350,14 @@ class AudioService {
         },
         video: false,
       });
+
+      // Superseded while the mic prompt was pending (Settings unmounted / session started
+      // its own capture). Release this now-orphaned stream and touch nothing — the winner
+      // owns micSource/micStream, so mutating them here would kill the live session.
+      if (token !== this.micInitToken) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
 
       const track = stream.getAudioTracks()[0];
       if (!track) {
@@ -553,6 +569,9 @@ class AudioService {
   /* ── Full teardown ───────────────────────── */
 
   destroy(): void {
+    // Invalidate any in-flight initMic so its pending getUserMedia continuation bails
+    // instead of resurrecting a torn-down graph or leaking the acquired mic stream.
+    this.micInitToken++;
     this.stopCapture();
 
     this.micSource?.disconnect();

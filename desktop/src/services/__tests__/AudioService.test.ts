@@ -239,6 +239,33 @@ describe('AudioService', () => {
     audioService.stopPreview();
   });
 
+  it('a superseded preview initMic (getUserMedia resolves after destroy) stops its stream and mutates nothing', async () => {
+    const mockStore = { ...makeMockStore(), isCapturing: false };
+    const { useSessionStore } = await import('../../stores/sessionStore');
+    vi.mocked(useSessionStore.getState).mockReturnValue(mockStore as unknown as ReturnType<typeof useSessionStore.getState>);
+
+    const closeFn = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('AudioContext', makeMockAudioContext(closeFn));
+
+    // getUserMedia stays pending until we release it, so we can interleave destroy().
+    const micStream = makeMockMicStream();
+    let releaseGum: (s: unknown) => void = () => {};
+    const gumPromise = new Promise((resolve) => { releaseGum = resolve; });
+    const getUserMedia = vi.fn().mockReturnValue(gumPromise);
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+
+    const { audioService } = await import('../AudioService');
+    const initPromise = audioService.initMic(true);   // preview init, GUM pending
+    audioService.destroy();                            // superseded mid-flight (bumps token)
+    releaseGum(micStream);                             // now the mic prompt resolves
+    await initPromise;
+
+    // The orphaned stream is stopped (no mic-indicator leak) and readiness was NOT flipped
+    // true by the stale continuation.
+    expect(micStream.track.stop).toHaveBeenCalled();
+    expect(mockStore.setAudioReady).not.toHaveBeenCalledWith('mic', true);
+  });
+
   it('stopPreview during a live session never tears down capture; when idle it releases everything', async () => {
     const mockStore = { ...makeMockStore(), isCapturing: true };
     const { useSessionStore } = await import('../../stores/sessionStore');
