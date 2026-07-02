@@ -51,10 +51,20 @@ function makeMockAudioContext(closeFn = vi.fn()) {
       connect: vi.fn(),
       disconnect: vi.fn(),
     });
+    createMediaStreamSource = vi.fn().mockReturnValue({ connect: vi.fn(), disconnect: vi.fn() });
     close = closeFn;
   }
 
   return MockAudioContext;
+}
+
+function makeMockMicStream() {
+  const track = { stop: vi.fn(), addEventListener: vi.fn() };
+  return {
+    getAudioTracks: () => [track],
+    getTracks: () => [track],
+    track,
+  };
 }
 
 describe('rmsToLevel (P1-c louder meter mapping)', () => {
@@ -185,5 +195,68 @@ describe('AudioService', () => {
     // Last call to setIsCapturing should be false
     const calls = mockStore.setIsCapturing.mock.calls;
     expect(calls[calls.length - 1][0]).toBe(false);
+  });
+
+  // ── R6-audio: Settings preview (single capture source) ──
+
+  it('startPreview during a live session is a no-op (never a second getUserMedia)', async () => {
+    const mockStore = { ...makeMockStore(), isCapturing: true };
+    const { useSessionStore } = await import('../../stores/sessionStore');
+    vi.mocked(useSessionStore.getState).mockReturnValue(mockStore as unknown as ReturnType<typeof useSessionStore.getState>);
+
+    vi.stubGlobal('AudioContext', makeMockAudioContext());
+    const getUserMedia = vi.fn().mockResolvedValue(makeMockMicStream());
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+
+    const { audioService } = await import('../AudioService');
+    await audioService.startPreview();
+
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(mockStore.setIsCapturing).not.toHaveBeenCalled();
+  });
+
+  it('startPreview (idle) opens the mic WITHOUT a PCM processor and never sets isCapturing', async () => {
+    const mockStore = { ...makeMockStore(), isCapturing: false };
+    const { useSessionStore } = await import('../../stores/sessionStore');
+    vi.mocked(useSessionStore.getState).mockReturnValue(mockStore as unknown as ReturnType<typeof useSessionStore.getState>);
+
+    const MockCtx = makeMockAudioContext();
+    vi.stubGlobal('AudioContext', MockCtx);
+    const getUserMedia = vi.fn().mockResolvedValue(makeMockMicStream());
+    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+
+    const { audioService } = await import('../AudioService');
+    await audioService.startPreview();
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(mockStore.setAudioReady).toHaveBeenCalledWith('mic', true);
+    // Preview never marks the session as capturing (PiP / warnings hang off it) and
+    // never creates the PCM processor (no chunks can reach the WS).
+    expect(mockStore.setIsCapturing).not.toHaveBeenCalledWith(true);
+    const { wsService } = await import('../WebSocketService');
+    expect(vi.mocked(wsService.sendAudioChunk)).not.toHaveBeenCalled();
+
+    audioService.stopPreview();
+  });
+
+  it('stopPreview during a live session never tears down capture; when idle it releases everything', async () => {
+    const mockStore = { ...makeMockStore(), isCapturing: true };
+    const { useSessionStore } = await import('../../stores/sessionStore');
+    vi.mocked(useSessionStore.getState).mockReturnValue(mockStore as unknown as ReturnType<typeof useSessionStore.getState>);
+
+    const closeFn = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('AudioContext', makeMockAudioContext(closeFn));
+
+    const { audioService } = await import('../AudioService');
+    audioService.ensureAudioGraph();
+
+    // Live session → stopPreview must not close the shared AudioContext.
+    audioService.stopPreview();
+    expect(closeFn).not.toHaveBeenCalled();
+
+    // Idle → stopPreview tears the graph down (mic released on leaving Settings).
+    (mockStore as { isCapturing: boolean }).isCapturing = false;
+    audioService.stopPreview();
+    expect(closeFn).toHaveBeenCalled();
   });
 });

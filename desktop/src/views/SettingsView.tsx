@@ -24,7 +24,7 @@ import { useAudioCapture } from '../hooks/useAudioCapture';
 /* --- AudioSetup ---------------------------------------- */
 
 function AudioSetup() {
-  const { initMic, initSystem, startCapture, stopCapture, levels, isCapturing, micReady, systemReady, error } = useAudioCapture();
+  const { initMic, startCapture, stopCapture, levels, micReady, systemReady, error } = useAudioCapture();
 
   // Auto-init mic + start capturing when component mounts (like Zoom/Teams)
   useEffect(() => {
@@ -83,29 +83,19 @@ function AudioSetup() {
               Audio Monitor
             </h3>
             <div className="flex items-center gap-1.5">
-              <StatusDot status={isCapturing ? 'recording' : 'idle'} />
+              <StatusDot status={micReady ? 'recording' : 'idle'} />
               <span className="text-xs text-ink-tertiary">
-                {isCapturing ? 'Live' : 'Starting...'}
+                {micReady ? 'Live' : 'Starting...'}
               </span>
             </div>
           </div>
+          {/* R6-audio: only the Mic meter — system audio is captured per-session
+              (getDisplayMedia picker), so a System/Mixed preview here was dead UI. */}
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-tertiary w-10">Mic</span>
               <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden">
                 <div className="h-full rounded-full bg-accent transition-all duration-100" style={{ width: `${levels.mic}%` }} />
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-ink-tertiary w-10">System</span>
-              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden">
-                <div className="h-full rounded-full bg-blue-500 transition-all duration-100" style={{ width: `${levels.system}%` }} />
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-ink-tertiary w-10">Mixed</span>
-              <div className="flex-1 h-2.5 rounded-full bg-border overflow-hidden">
-                <div className="h-full rounded-full bg-purple-500 transition-all duration-100" style={{ width: `${levels.mixed}%` }} />
               </div>
             </div>
           </div>

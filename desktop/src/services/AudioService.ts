@@ -322,7 +322,7 @@ class AudioService {
 
   /* ── Mic init ────────────────────────────── */
 
-  async initMic(): Promise<void> {
+  async initMic(preview = false): Promise<void> {
     const store = useSessionStore.getState();
     try {
       store.setAudioError(null);
@@ -354,18 +354,23 @@ class AudioService {
       if (this.micProcessor) this.micProcessor.disconnect();
       if (this.micStream) this.micStream.getTracks().forEach((t) => t.stop());
 
-      // Create processor: AudioWorkletNode preferred, ScriptProcessorNode fallback
-      const processor =
-        this._createWorkletNode(ctx, 'teacher') ??
-        this._createScriptProcessorNode(ctx, 'teacher');
-      this.micProcessor = processor;
-
       const source = ctx.createMediaStreamSource(stream);
       source.connect(this.micAnalyser!);
       source.connect(this.mixGain!);
-      source.connect(processor);
-      // Bug A fix: processor must also have a path to destination
-      processor.connect(this.silentGain!);
+
+      // R6-audio: the Settings preview meters levels only — no PCM processor, so no
+      // chunks can ever reach the queues / WS. A later real session calls initMic()
+      // again (full path) which replaces this source anyway.
+      if (!preview) {
+        // Create processor: AudioWorkletNode preferred, ScriptProcessorNode fallback
+        const processor =
+          this._createWorkletNode(ctx, 'teacher') ??
+          this._createScriptProcessorNode(ctx, 'teacher');
+        this.micProcessor = processor;
+        source.connect(processor);
+        // Bug A fix: processor must also have a path to destination
+        processor.connect(this.silentGain!);
+      }
 
       this.micSource = source;
       this.micStream = stream;
@@ -479,13 +484,7 @@ class AudioService {
 
   /* ── Capture (level polling + chunk recording) ── */
 
-  startCapture(): void {
-    useSessionStore.getState().setIsCapturing(true);
-
-    // Reset chunk queues for fresh recording
-    resetQueue(this.teacherQueue);
-    resetQueue(this.studentsQueue);
-
+  private startLevelPolling(): void {
     if (this.levelTimer) return;
 
     const micBuf = new Float32Array(FFT_SIZE);
@@ -499,6 +498,41 @@ class AudioService {
 
       useSessionStore.getState().setAudioLevels({ mic: micLvl, system: sysLvl, mixed: mixLvl });
     }, LEVEL_POLL_MS);
+  }
+
+  startCapture(): void {
+    useSessionStore.getState().setIsCapturing(true);
+
+    // Reset chunk queues for fresh recording
+    resetQueue(this.teacherQueue);
+    resetQueue(this.studentsQueue);
+
+    this.startLevelPolling();
+  }
+
+  /* ── Settings preview (R6-audio: single capture source) ── */
+
+  /**
+   * Mic test for the Settings page, reusing THIS service's graph. Replaces the old
+   * parallel hook-owned pipeline that double-opened the microphone (second AudioContext
+   * + second getUserMedia) when Settings was visited mid-recording. Preview never
+   * touches isCapturing (PiP visibility / system-audio warnings hang off it), never
+   * creates a PCM processor, and never sends WS chunks.
+   */
+  async startPreview(): Promise<void> {
+    // A recording session already owns the graph, the mic, and the level timer —
+    // reuse them as-is (no second getUserMedia, no duplicate polling).
+    if (useSessionStore.getState().isCapturing) return;
+    if (!this.micStream) {
+      await this.initMic(true);
+    }
+    this.startLevelPolling();
+  }
+
+  /** Tear down the preview — but never a live session's capture. */
+  stopPreview(): void {
+    if (useSessionStore.getState().isCapturing) return;
+    this.destroy();
   }
 
   stopCapture(): void {
