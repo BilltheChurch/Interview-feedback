@@ -6,6 +6,9 @@ import {
   resolveSpeechmaticsMaxDelay,
   resolveSttUtteranceGapMs,
   resolvePartialThrottleMs,
+  resolveSpeechmaticsVocabEnabled,
+  resolveExtraVocab,
+  SPEECHMATICS_ADDITIONAL_VOCAB_MAX,
   STT_UTTERANCE_GAP_MS_DEFAULT,
   STT_PARTIAL_THROTTLE_MS_DEFAULT,
 } from "../src/config";
@@ -188,5 +191,69 @@ describe("resolvePartialThrottleMs", () => {
     expect(resolvePartialThrottleMs(makeEnv("-100"))).toBe(100);
     expect(resolvePartialThrottleMs(makeEnv("1.5"))).toBe(100);
     expect(resolvePartialThrottleMs(makeEnv("abc"))).toBe(100);
+  });
+});
+
+// ── R6-vocab: resolveSpeechmaticsVocabEnabled / resolveExtraVocab ─────────────
+
+describe("resolveSpeechmaticsVocabEnabled", () => {
+  function makeEnv(val: string | undefined): { SPEECHMATICS_VOCAB?: string } {
+    return val === undefined ? {} : { SPEECHMATICS_VOCAB: val };
+  }
+
+  it("defaults to enabled when unset or empty", () => {
+    expect(resolveSpeechmaticsVocabEnabled(makeEnv(undefined))).toBe(true);
+    expect(resolveSpeechmaticsVocabEnabled(makeEnv(""))).toBe(true);
+    expect(resolveSpeechmaticsVocabEnabled(makeEnv("true"))).toBe(true);
+  });
+
+  it("disables on falsy values (one-flag rollback)", () => {
+    for (const v of ["false", "0", "off", "no", "FALSE", " Off "]) {
+      expect(resolveSpeechmaticsVocabEnabled(makeEnv(v))).toBe(false);
+    }
+  });
+});
+
+describe("resolveExtraVocab", () => {
+  function makeEnv(val: string | undefined): { ASR_EXTRA_VOCAB?: string } {
+    return val === undefined ? {} : { ASR_EXTRA_VOCAB: val };
+  }
+
+  it("returns [] when unset or blank", () => {
+    expect(resolveExtraVocab(makeEnv(undefined))).toEqual([]);
+    expect(resolveExtraVocab(makeEnv("   "))).toEqual([]);
+  });
+
+  it("parses a comma/newline-separated list into content-only entries", () => {
+    expect(resolveExtraVocab(makeEnv("Imperial College London, UCL\n帝国理工"))).toEqual([
+      { content: "Imperial College London" },
+      { content: "UCL" },
+      { content: "帝国理工" },
+    ]);
+  });
+
+  it("parses a JSON array of strings and {content, sounds_like} objects", () => {
+    const json = JSON.stringify([
+      "Imperial College London",
+      { content: "UCAS", sounds_like: ["you cass"] },
+      { content: "  " },              // blank content dropped
+      { sounds_like: ["orphan"] },     // missing content dropped
+      42,                              // non-string/non-object dropped
+    ]);
+    expect(resolveExtraVocab(makeEnv(json))).toEqual([
+      { content: "Imperial College London" },
+      { content: "UCAS", sounds_like: ["you cass"] },
+    ]);
+  });
+
+  it("returns [] on malformed JSON (a typo must never break StartRecognition)", () => {
+    expect(resolveExtraVocab(makeEnv("[not json"))).toEqual([]);
+    expect(resolveExtraVocab(makeEnv('{"content":"obj-not-array"}'))).toEqual([]);
+  });
+
+  it("dedupes case-insensitively and caps at the Speechmatics limit", () => {
+    expect(resolveExtraVocab(makeEnv("UCL,ucl, UCL "))).toEqual([{ content: "UCL" }]);
+    const many = Array.from({ length: SPEECHMATICS_ADDITIONAL_VOCAB_MAX + 50 }, (_, i) => `w${i}`).join(",");
+    expect(resolveExtraVocab(makeEnv(many))).toHaveLength(SPEECHMATICS_ADDITIONAL_VOCAB_MAX);
   });
 });

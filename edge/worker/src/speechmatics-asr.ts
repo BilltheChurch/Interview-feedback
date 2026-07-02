@@ -18,7 +18,7 @@
  *            EndOfTranscript, Error, Warning
  */
 
-import type { Env } from "./config";
+import type { Env, SpeechmaticsVocabEntry } from "./config";
 
 export const SPEECHMATICS_DEFAULT_WS_URL = "wss://eu.rt.speechmatics.com/v2/";
 
@@ -47,6 +47,11 @@ export interface SpeechmaticsConfig {
    *  still applies its own on-by-default punctuation, and StartRecognition can never be
    *  rejected over the field). Resolved from env via resolveSpeechmaticsPunctuation. */
   punctuationSensitivity?: number;
+  /** R6-vocab: custom dictionary (additional_vocab) — static env list merged with
+   *  per-session names (roster / interviewer) by buildSessionVocab. undefined or empty
+   *  → the field is omitted entirely (safe rollback, same pattern as punctuation).
+   *  NOT part of DEFAULT_SPEECHMATICS_CONFIG on purpose. */
+  additionalVocab?: SpeechmaticsVocabEntry[];
 }
 
 export const DEFAULT_SPEECHMATICS_CONFIG: Omit<SpeechmaticsConfig, "language" | "diarization"> = {
@@ -79,6 +84,13 @@ export function buildStartRecognition(cfg: SpeechmaticsConfig): Record<string, u
       permitted_marks: ["all"],
       sensitivity: cfg.punctuationSensitivity,
     };
+  }
+  // R6-vocab: custom dictionary biases recognition toward interview-domain proper nouns
+  // ("Imperial College London", roster names, …). Only sent when non-empty — omitting the
+  // field entirely keeps StartRecognition identical to the pre-vocab shape (safe rollback
+  // via SPEECHMATICS_VOCAB / an empty list).
+  if (cfg.additionalVocab && cfg.additionalVocab.length > 0) {
+    transcription_config.additional_vocab = cfg.additionalVocab;
   }
   // Only request diarization when wanted — the teacher channel is single-speaker and
   // enabling it there would split the interviewer into phantom S1/S2 (§9.3.4).

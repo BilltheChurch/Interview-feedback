@@ -57,6 +57,9 @@ import {
   resolveSpeechmaticsOperatingPoint,
   resolveSpeechmaticsMaxDelay,
   resolveSpeechmaticsPunctuation,
+  resolveSpeechmaticsVocabEnabled,
+  resolveExtraVocab,
+  SPEECHMATICS_ADDITIONAL_VOCAB_MAX,
   resolveSttUtteranceGapMs,
   resolveSttSilenceFlushMs,
   resolveSttMaxUtteranceSilenceMs,
@@ -80,6 +83,7 @@ import type {
   SpeakerEvent,
   AudioPayload,
   EnrollmentParticipantProgress,
+  SpeechmaticsVocabEntry,
 } from "./config";
 import { resolveTeacherIdentity as resolveTeacherIdentityFn } from "./speaker-helpers";
 import { LocalWhisperASRProvider } from "./providers/asr-local-whisper";
@@ -911,6 +915,64 @@ function dominantSpeaker(t: SpeechmaticsTranscript): string | null {
 }
 
 /**
+ * R6-vocab: merge the static env vocab with per-session names into one custom dictionary.
+ *
+ * Sources (defensively coerced — state.config is Record<string, unknown>):
+ *   - staticVocab (resolveExtraVocab: interview-domain proper nouns from ASR_EXTRA_VOCAB)
+ *   - state.roster[].name + state.roster[].aliases (the roster IS the highest-value vocab:
+ *     candidate names are exactly what diarization binding later matches against)
+ *   - config.interviewer_name / teams_interviewer_name / company_name / position_title
+ *     (the last two currently have no writer — forward-compatible no-ops today)
+ *
+ * Entries are deduped case-insensitively on content; single-code-point contents are
+ * dropped (one CJK char / one letter biases recognition without disambiguating anything);
+ * the result is capped at SPEECHMATICS_ADDITIONAL_VOCAB_MAX. Pure function for unit tests.
+ */
+export function buildSessionVocab(
+  state: SessionState,
+  staticVocab: SpeechmaticsVocabEntry[]
+): SpeechmaticsVocabEntry[] {
+  const out: SpeechmaticsVocabEntry[] = [];
+  const seen = new Set<string>();
+  const push = (entry: SpeechmaticsVocabEntry): void => {
+    const content = typeof entry.content === "string" ? entry.content.trim() : "";
+    if (Array.from(content).length < 2) return;
+    const key = content.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(
+      entry.sounds_like && entry.sounds_like.length > 0
+        ? { content, sounds_like: entry.sounds_like }
+        : { content }
+    );
+  };
+
+  for (const entry of staticVocab) push(entry);
+
+  const asString = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const config = (state.config ?? {}) as Record<string, unknown>;
+  for (const key of ["interviewer_name", "teams_interviewer_name", "company_name", "position_title"]) {
+    const value = asString(config[key]);
+    if (value) push({ content: value });
+  }
+
+  const roster = Array.isArray(state.roster) ? state.roster : [];
+  for (const entry of roster) {
+    const name = asString((entry as { name?: unknown })?.name);
+    if (name) push({ content: name });
+    const aliases = (entry as { aliases?: unknown })?.aliases;
+    if (Array.isArray(aliases)) {
+      for (const alias of aliases) {
+        const trimmed = asString(alias);
+        if (trimmed) push({ content: trimmed });
+      }
+    }
+  }
+
+  return out.slice(0, SPEECHMATICS_ADDITIONAL_VOCAB_MAX);
+}
+
+/**
  * Open + maintain a Speechmatics realtime connection for a stream (A1b). Mirrors the
  * DashScope connect flow: open WS → send StartRecognition → resolve readyPromise on
  * RecognitionStarted (in handleSpeechmaticsMessage) → replay any R2 gap. The shared
@@ -988,6 +1050,26 @@ async function connectSpeechmaticsRealtime(
   // maxSpeakers is only applied for the students stream (diarization must be true).
   const language = (ctx.env.SPEECHMATICS_LANGUAGE ?? "cmn_en").trim() || "cmn_en";
   const isDiarization = streamRole === "students";
+
+  // R6-vocab: custom dictionary = static env list + per-session names (roster names +
+  // aliases + interviewer). Injected on BOTH streams (the interviewer says "Imperial
+  // College London" too). Gated by SPEECHMATICS_VOCAB (one-flag rollback). Reading state
+  // must never break the connection — on failure we degrade to the static list. Sent once
+  // per StartRecognition; a mid-session roster change reaches the vocab on the next
+  // (re)connect only (Speechmatics has no mid-session config update).
+  let additionalVocab: SpeechmaticsVocabEntry[] = [];
+  if (resolveSpeechmaticsVocabEnabled(ctx.env)) {
+    additionalVocab = resolveExtraVocab(ctx.env);
+    try {
+      const state = normalizeSessionState(
+        await ctx.doCtx.storage.get<SessionState>(STORAGE_KEY_STATE)
+      );
+      additionalVocab = buildSessionVocab(state, additionalVocab);
+    } catch {
+      // keep static-only vocab
+    }
+  }
+
   ws.send(JSON.stringify(buildStartRecognition({
     ...DEFAULT_SPEECHMATICS_CONFIG,
     language,
@@ -1000,6 +1082,7 @@ async function connectSpeechmaticsRealtime(
     // R-H: request punctuation (。？！， for cmn/cmn_en). undefined when the env gate
     // disables it → punctuation_overrides omitted, never risking an invalid_config reject.
     punctuationSensitivity: resolveSpeechmaticsPunctuation(ctx.env),
+    additionalVocab: additionalVocab.length > 0 ? additionalVocab : undefined,
   })));
 
   const timeoutMs = parseTimeoutMs(ctx.env.ASR_TIMEOUT_MS ?? "45000");

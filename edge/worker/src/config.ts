@@ -150,6 +150,92 @@ export function resolveSpeechmaticsPunctuation(
   return value;
 }
 
+/** R6-vocab: a Speechmatics custom-dictionary entry (transcription_config.additional_vocab). */
+export interface SpeechmaticsVocabEntry {
+  content: string;
+  sounds_like?: string[];
+}
+
+/** Speechmatics documented custom-dictionary cap (up to 1000 words/phrases per session). */
+export const SPEECHMATICS_ADDITIONAL_VOCAB_MAX = 1000;
+
+/**
+ * R6-vocab: gate for the Speechmatics custom dictionary. Falsy ("false"/"0"/"off"/"no")
+ * omits additional_vocab entirely — the one-flag rollback if a language pack (e.g. a
+ * future non-cmn_en bilingual) rejects the field with invalid_config. Defaults to enabled.
+ */
+export function resolveSpeechmaticsVocabEnabled(env: Pick<Env, "SPEECHMATICS_VOCAB">): boolean {
+  const gate = (env.SPEECHMATICS_VOCAB ?? "").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(gate);
+}
+
+/**
+ * R6-vocab: parse the STATIC extra-vocab list from the environment.
+ *
+ * Two accepted formats:
+ *   - JSON array (starts with "["): elements are either plain strings or
+ *     { content, sounds_like? } objects. Malformed JSON / non-array → [] (safe rollback —
+ *     a typo in the env var must never break StartRecognition).
+ *   - Otherwise: comma / newline separated phrases (content-only entries).
+ *
+ * Entries are trimmed, deduped case-insensitively on content, and capped at
+ * SPEECHMATICS_ADDITIONAL_VOCAB_MAX. Per-session names (roster / interviewer) are merged
+ * in later by buildSessionVocab (realtime-asr-processor.ts).
+ */
+export function resolveExtraVocab(env: Pick<Env, "ASR_EXTRA_VOCAB">): SpeechmaticsVocabEntry[] {
+  const raw = (env.ASR_EXTRA_VOCAB ?? "").trim();
+  if (!raw) return [];
+
+  const collected: SpeechmaticsVocabEntry[] = [];
+  // Anything that LOOKS like JSON ("[" or "{") takes the JSON path — a pasted object or a
+  // typo must yield [] rather than becoming one giant garbage phrase entry.
+  if (raw.startsWith("[") || raw.startsWith("{")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(parsed)) return [];
+    for (const item of parsed) {
+      if (typeof item === "string") {
+        const content = item.trim();
+        if (content) collected.push({ content });
+        continue;
+      }
+      if (item && typeof item === "object") {
+        const content = typeof (item as { content?: unknown }).content === "string"
+          ? ((item as { content: string }).content).trim()
+          : "";
+        if (!content) continue;
+        const soundsRaw = (item as { sounds_like?: unknown }).sounds_like;
+        const sounds = Array.isArray(soundsRaw)
+          ? soundsRaw
+              .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+              .map((s) => s.trim())
+          : [];
+        collected.push(sounds.length > 0 ? { content, sounds_like: sounds } : { content });
+      }
+    }
+  } else {
+    for (const piece of raw.split(/[,\n]/)) {
+      const content = piece.trim();
+      if (content) collected.push({ content });
+    }
+  }
+
+  const seen = new Set<string>();
+  const out: SpeechmaticsVocabEntry[] = [];
+  for (const entry of collected) {
+    const key = entry.content.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+    if (out.length >= SPEECHMATICS_ADDITIONAL_VOCAB_MAX) break;
+  }
+  return out;
+}
+
 /** Default silence gap (ms) between consecutive finals that ends the current utterance.
  *  R-D: raised from 500 → 900. Now that the live partial line reveals words character-by-
  *  character (R-D typewriter), "fast to appear" no longer depends on a tight flush gap, so
@@ -783,6 +869,14 @@ export interface Env {
   /** R-H: Speechmatics punctuation sensitivity (0..1, higher → more marks). Parsed by
    *  resolveSpeechmaticsPunctuation(); out-of-range/non-numeric falls back to 0.5. */
   SPEECHMATICS_PUNCTUATION_SENSITIVITY?: string;
+  /** R6-vocab: gate for the Speechmatics custom dictionary (additional_vocab). Falsy
+   *  ("false"/"0"/"off"/"no") omits the field entirely — one-flag rollback. Parsed by
+   *  resolveSpeechmaticsVocabEnabled(); defaults to enabled. */
+  SPEECHMATICS_VOCAB?: string;
+  /** R6-vocab: static extra-vocab list — JSON array (string | {content, sounds_like})
+   *  or comma/newline-separated phrases. Parsed by resolveExtraVocab(); malformed JSON
+   *  → [] (safe). Merged with per-session roster/interviewer names at connect time. */
+  ASR_EXTRA_VOCAB?: string;
   /** R4/R-D: silence gap (ms) between consecutive finals that flushes the accumulated
    *  utterance. Parsed by resolveSttUtteranceGapMs(); defaults to 900. */
   STT_UTTERANCE_GAP_MS?: string;
@@ -1343,6 +1437,21 @@ export function parseRosterEntries(value: unknown): RosterEntry[] {
       ? (obj.aliases as unknown[]).filter((a): a is string => typeof a === "string" && a.trim().length > 0)
       : undefined;
     out.push({ name, email, aliases: aliases && aliases.length > 0 ? aliases : undefined });
+  }
+  return out;
+}
+
+/**
+ * R6-roster: alias -> primary-name mappings from a parsed roster, keyed by primary name.
+ * Consumed as config.name_aliases (the LLM merges alias mentions into the primary
+ * person). Shared by the hello frame and POST /config paths so they can never diverge.
+ */
+export function extractNameAliases(roster: RosterEntry[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const entry of roster) {
+    if (entry.aliases && entry.aliases.length > 0) {
+      out[entry.name] = entry.aliases;
+    }
   }
   return out;
 }

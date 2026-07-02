@@ -141,3 +141,35 @@ describe("parseSpeechmaticsMessage", () => {
     expect(u?.type).toBe("Unknown");
   });
 });
+
+// ── R6-vocab: additional_vocab (custom dictionary) ───────────────────────────
+
+describe("buildStartRecognition — additional_vocab (R6-vocab)", () => {
+  it("includes additional_vocab when a non-empty list is provided", () => {
+    const vocab = [
+      { content: "Imperial College London" },
+      { content: "UCAS", sounds_like: ["you cass"] },
+    ];
+    const msg = buildStartRecognition({
+      ...DEFAULT_SPEECHMATICS_CONFIG,
+      language: "cmn_en",
+      diarization: false,
+      additionalVocab: vocab,
+    });
+    const tc = (msg as { transcription_config: Record<string, unknown> }).transcription_config;
+    expect(tc.additional_vocab).toEqual(vocab);
+  });
+
+  it("omits the field entirely when undefined or empty (safe rollback shape)", () => {
+    for (const additionalVocab of [undefined, [] as Array<{ content: string }>]) {
+      const msg = buildStartRecognition({
+        ...DEFAULT_SPEECHMATICS_CONFIG,
+        language: "cmn_en",
+        diarization: false,
+        additionalVocab,
+      });
+      const tc = (msg as { transcription_config: Record<string, unknown> }).transcription_config;
+      expect("additional_vocab" in tc).toBe(false);
+    }
+  });
+});
