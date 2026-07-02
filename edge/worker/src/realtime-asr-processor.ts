@@ -1074,7 +1074,20 @@ export async function handleSpeechmaticsMessage(
   // not incremental deltas). Forward it as a non-final frame so the Desktop can render
   // a live, in-place "still typing" line. The final path (below) is unchanged.
   if (t.is_partial) {
-    await maybeForwardPartial(sessionId, streamRole, t.text.trim(), speaker, ctx);
+    const partialText = t.text.trim();
+    // Prefix continuity: Speechmatics closes a recognition segment every ~1s of continuous
+    // speech (max_delay), and each segment's partials restart from empty — while the
+    // endpointing buffer below keeps the earlier segment finals of the SAME UI-level
+    // utterance un-broadcast. Prepend the buffered text so the forwarded partial stays
+    // cumulative for the WHOLE utterance; the Desktop typewriter relies on that to keep
+    // already-shown words untouched instead of wiping the line at every segment boundary.
+    // Only a same-speaker buffer is joined (a speaker change flushes on the next final).
+    const buf = runtime.sttBuffer;
+    const cumulative =
+      partialText && buf && buf.speaker === speaker
+        ? joinTranscriptPieces([...buf.texts, partialText])
+        : partialText;
+    await maybeForwardPartial(sessionId, streamRole, cumulative, speaker, ctx);
     return;
   }
 

@@ -273,9 +273,11 @@ describe("handleSpeechmaticsMessage — partial vs final routing (R4)", () => {
     );
     expect(calls).toHaveLength(1); // final buffers, does not broadcast
 
-    // 3) The NEXT utterance's first partial arrives well inside the 100ms throttle window
+    // 3) The next segment's first partial arrives well inside the 100ms throttle window
     //    (fake time never advanced). It must still forward — the final's reset makes it
-    //    look like "never sent" so the throttle is skipped.
+    //    look like "never sent" so the throttle is skipped. Since the final above is still
+    //    sitting in the endpointing buffer (same UI-level utterance), the partial carries
+    //    the buffered prefix so the live line stays cumulative.
     await handleSpeechmaticsMessage(
       "sess",
       "students",
@@ -288,6 +290,109 @@ describe("handleSpeechmaticsMessage — partial vs final routing (R4)", () => {
     );
     expect(calls).toHaveLength(2);
     expect(calls[1].isFinal).toBe(false);
-    expect(calls[1].text).toBe("next");
+    expect(calls[1].text).toBe("hello world next");
+  });
+
+  it("prepends the buffered sentence prefix to the next segment's partial (same speaker)", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    const { ctx, calls } = makeCtx({ runtimes: { students: runtime } });
+
+    // Segment 1 final — buffered by endpointing, NOT broadcast (no sentence-final punct).
+    await handleSpeechmaticsMessage(
+      "sess",
+      "students",
+      transcriptFrame({
+        partial: false,
+        text: "so I studied at Imperial",
+        words: [
+          { content: "so", speaker: "S1", start: 1.0, end: 1.2 },
+          { content: "Imperial", speaker: "S1", start: 2.0, end: 2.4 },
+        ],
+      }),
+      ctx
+    );
+    expect(calls).toHaveLength(0);
+
+    // Segment 2 partial restarts from empty on the Speechmatics side — the forwarded
+    // frame must still carry the buffered prefix so the Desktop typewriter appends
+    // instead of wiping the already-shown words.
+    await handleSpeechmaticsMessage(
+      "sess",
+      "students",
+      transcriptFrame({
+        partial: true,
+        text: "College",
+        words: [{ content: "College", speaker: "S1", start: 2.5, end: 2.9 }],
+      }),
+      ctx
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].isFinal).toBe(false);
+    expect(calls[0].text).toBe("so I studied at Imperial College");
+  });
+
+  it("does not prepend the buffer across a speaker change", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    const { ctx, calls } = makeCtx({ runtimes: { students: runtime } });
+
+    await handleSpeechmaticsMessage(
+      "sess",
+      "students",
+      transcriptFrame({
+        partial: false,
+        text: "my question is",
+        words: [{ content: "question", speaker: "S1", start: 1.0, end: 1.4 }],
+      }),
+      ctx
+    );
+
+    // A different speaker starts talking — their partial must NOT inherit S1's buffer
+    // (the buffer flushes on the next final's speaker-change hard boundary).
+    await handleSpeechmaticsMessage(
+      "sess",
+      "students",
+      transcriptFrame({
+        partial: true,
+        text: "well I think",
+        words: [{ content: "well", speaker: "S2", start: 2.0, end: 2.3 }],
+      }),
+      ctx
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].speaker).toBe("S2");
+    expect(calls[0].text).toBe("well I think");
+  });
+
+  it("joins a CJK buffered prefix without a phantom space", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    const { ctx, calls } = makeCtx({ runtimes: { students: runtime } });
+
+    await handleSpeechmaticsMessage(
+      "sess",
+      "students",
+      transcriptFrame({
+        partial: false,
+        text: "我本科在帝国理工",
+        words: [{ content: "我本科在帝国理工", speaker: "S1", start: 1.0, end: 2.0 }],
+      }),
+      ctx
+    );
+
+    await handleSpeechmaticsMessage(
+      "sess",
+      "students",
+      transcriptFrame({
+        partial: true,
+        text: "读的计算机",
+        words: [{ content: "读的计算机", speaker: "S1", start: 2.2, end: 2.8 }],
+      }),
+      ctx
+    );
+    expect(calls).toHaveLength(1);
+    // CJK-aware join: no space injected between the buffered prefix and the new segment.
+    expect(calls[0].text).toBe("我本科在帝国理工读的计算机");
   });
 });
