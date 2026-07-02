@@ -28,8 +28,13 @@ import {
   validatePersonFeedbackEvidence
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
-import { resolveNoStudentSpeechDegradation, buildDegradedSummarySections } from "./feedback-helpers";
-import { computeEligibleSpeakers } from "./services/llm-synthesizer";
+import {
+  resolveNoStudentSpeechDegradation,
+  buildDegradedSummarySections,
+  collectInterviewerUtterances,
+  stripHtmlToText,
+} from "./feedback-helpers";
+import { computeEligibleSpeakers, synthesizeDegradedOverviewSummary } from "./services/llm-synthesizer";
 import { emptySpeakerLogs, mergeSpeakerLogs } from "./speaker_logs";
 import type { InferenceBackendTimelineItem } from "./inference_client";
 import { buildReconciledTranscript, resolveStudentBinding } from "./reconcile";
@@ -571,9 +576,21 @@ export async function runFinalizeV2Job(
             reportSource = "degraded_no_participants";
             reportBlockingReason = null;
             finalPerPerson = [];
-            // R2: 用确定性拼接重建 overview summary，反映本场实际内容（面试官
-            // 发言 + notes），并置空 evidence_ids —— 不再沿用 memo-first 那句通用
-            // 占位、也不盲挂无关头部 evidence。三条降级 fork 行为一致。
+            // R5: 先尝试轻量 LLM 把面试官发言 + notes 概括成真正的"内容小结"
+            // （round-5 反馈：原样拼接 caption 不是总结）；失败/超时/欠费 →
+            // llmBullets=null，buildDegradedSummarySections 回退确定性拼接。
+            let degradedLlmBullets: string[] | null = null;
+            try {
+              degradedLlmBullets = await synthesizeDegradedOverviewSummary(ctx.env, {
+                interviewerUtterances: collectInterviewerUtterances(transcript),
+                notesText: stripHtmlToText(roEligibilityContext.freeFormNotes ?? ""),
+              });
+            } catch (llmErr) {
+              finalizeWarnings.push(`degraded summary LLM fallback: ${getErrorMessage(llmErr)}`);
+            }
+            // R2: 重建 overview summary，反映本场实际内容（面试官发言 + notes），
+            // 并置空 evidence_ids —— 不再沿用 memo-first 那句通用占位、也不盲挂
+            // 无关头部 evidence。三条降级 fork 行为一致。
             finalOverall = {
               ...(finalOverall as Record<string, unknown>),
               notice: degradation.notice,
@@ -581,6 +598,7 @@ export async function runFinalizeV2Job(
                 transcript,
                 freeFormNotes: roEligibilityContext.freeFormNotes,
                 notice: degradation.notice,
+                llmBullets: degradedLlmBullets,
               }),
             };
             finalizeWarnings.push("degraded_no_student_speech");
@@ -1522,9 +1540,19 @@ export async function runFinalizeV2Job(
         // Overview-only: drop the memo-first placeholder person cards so the UI
         // shows just the overview + notice, no phantom "unknown" student.
         finalPerPerson = [];
-        // R2: 用确定性拼接重建 overview summary，反映本场实际内容（面试官发言 +
-        // notes），并置空 evidence_ids —— 不再沿用 memo-first 那句通用占位、也不
-        // 盲挂无关头部 evidence。三条降级 fork 行为一致。
+        // R5: 先尝试轻量 LLM 内容小结（失败回退确定性拼接），与 report-only 路径一致。
+        let degradedLlmBullets: string[] | null = null;
+        try {
+          degradedLlmBullets = await synthesizeDegradedOverviewSummary(ctx.env, {
+            interviewerUtterances: collectInterviewerUtterances(transcript),
+            notesText: stripHtmlToText(eligibilityContext.freeFormNotes ?? ""),
+          });
+        } catch (llmErr) {
+          finalizeWarnings.push(`degraded summary LLM fallback: ${getErrorMessage(llmErr)}`);
+        }
+        // R2: 重建 overview summary，反映本场实际内容（面试官发言 + notes），并置空
+        // evidence_ids —— 不再沿用 memo-first 那句通用占位、也不盲挂无关头部
+        // evidence。三条降级 fork 行为一致。
         finalOverall = {
           ...(finalOverall as Record<string, unknown>),
           notice: degradation.notice,
@@ -1532,6 +1560,7 @@ export async function runFinalizeV2Job(
             transcript,
             freeFormNotes: eligibilityContext.freeFormNotes,
             notice: degradation.notice,
+            llmBullets: degradedLlmBullets,
           }),
         };
         finalizeWarnings.push("degraded_no_student_speech");

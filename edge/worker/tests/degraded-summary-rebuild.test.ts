@@ -24,6 +24,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   buildDegradedSummarySections,
+  stripHtmlToText,
   NO_STUDENT_SPEECH_NOTICE,
 } from "../src/feedback-helpers";
 import { runFinalizeV2Job, type FinalizeJobContext } from "../src/finalize-orchestrator";
@@ -487,5 +488,107 @@ describe("degraded summary rebuild — orchestrator report-only integration", ()
     // 正常路径 overall 由 synthesis 提供，不带 notice
     expect((getStoredResultV2()!.overall as { notice?: string }).notice).toBeUndefined();
     expect(getStoredResultV2()!.per_person.length).toBe(1);
+  });
+});
+
+// ── R5: round-5 真人反馈修复（notice 截断 / HTML 泄漏 / LLM 内容小结） ─────────
+
+describe("stripHtmlToText (R5)", () => {
+  it("剥掉 TipTap notes 的富文本标签（含 memo <mark> 标记）", () => {
+    const html =
+      '<p><mark data-memo-type="highlight" data-memo-id="memo-1782960444888-ofk0n5" ' +
+      'class="memo-mark memo-mark--highlight" data-label="Highlight">这次的caption还比较不错。' +
+      "至少说实现了我想要的打字机的流式输出效果。</mark></p>";
+    expect(stripHtmlToText(html)).toBe(
+      "这次的caption还比较不错。至少说实现了我想要的打字机的流式输出效果。"
+    );
+  });
+
+  it("解码常见 HTML entity 并折叠空白", () => {
+    expect(stripHtmlToText("<p>A &amp; B&nbsp;&nbsp;&lt;ok&gt;</p>\n<p>next</p>")).toBe(
+      "A & B <ok> next"
+    );
+  });
+
+  it("纯文本（含孤立 <）原样保留", () => {
+    expect(stripHtmlToText("score < 10 and time > 5")).toBe("score < 10 and time > 5");
+    expect(stripHtmlToText("普通中文笔记")).toBe("普通中文笔记");
+  });
+
+  it("空输入 / 非字符串安全返回空串", () => {
+    expect(stripHtmlToText("")).toBe("");
+    expect(stripHtmlToText(undefined as unknown as string)).toBe("");
+  });
+});
+
+describe("buildDegradedSummarySections — R5 修复", () => {
+  const longSpeech = [
+    tItem("t1", "teacher", "My name is Tim, and I work for the Department of Computing at Imperial College London.", 0, 8000),
+    tItem("t2", "teacher", "Just treat this as a normal conversation to better understand our application criteria.", 9000, 16000),
+  ];
+
+  it("notice 完整保留，不再被截成 '…could be…'（原 140 字符上限拦腰截断）", () => {
+    const sections = buildDegradedSummarySections({
+      transcript: longSpeech,
+      freeFormNotes: null,
+      notice: NO_STUDENT_SPEECH_NOTICE,
+    });
+    // NO_STUDENT_SPEECH_NOTICE 约 200 字符——首条 bullet 必须一字不差含完整文案。
+    expect(sections[0].bullets[0]).toBe(NO_STUDENT_SPEECH_NOTICE);
+    expect(sections[0].bullets[0]).toContain("no student speech was captured");
+    expect(sections[0].bullets[0].endsWith("…")).toBe(false);
+  });
+
+  it("notes 的富文本 HTML 被剥成纯文本再进 summary（不再泄漏 <mark>/<p>）", () => {
+    const sections = buildDegradedSummarySections({
+      transcript: longSpeech,
+      freeFormNotes:
+        '<p><mark data-memo-type="highlight" data-memo-id="memo-1">这次的caption还比较不错。</mark></p>',
+      notice: NO_STUDENT_SPEECH_NOTICE,
+    });
+    const notesSection = sections.find((s) => s.topic === "面试记录（Notes）");
+    expect(notesSection).toBeDefined();
+    expect(notesSection!.bullets[0]).toBe("这次的caption还比较不错。");
+    expect(JSON.stringify(sections)).not.toContain("<mark");
+    expect(JSON.stringify(sections)).not.toContain("data-memo-id");
+  });
+
+  it("llmBullets 非空 → 用'内容小结'段替代原样拼接与 notes 段", () => {
+    const sections = buildDegradedSummarySections({
+      transcript: longSpeech,
+      freeFormNotes: "<p>笔记内容</p>",
+      notice: NO_STUDENT_SPEECH_NOTICE,
+      llmBullets: ["面试官 Tim 来自帝国理工计算机系。", "他说明了申请标准并让候选人放松。"],
+    });
+    expect(sections.map((s) => s.topic)).toEqual(["本场概述", "内容小结"]);
+    expect(sections[1].bullets).toHaveLength(2);
+    expect(sections[1].evidence_ids).toEqual([]);
+    // 原样拼接的发言与 notes 段不再出现（LLM 输入已涵盖两者，避免重复）。
+    expect(sections.some((s) => s.topic === "面试官发言要点")).toBe(false);
+    expect(sections.some((s) => s.topic === "面试记录（Notes）")).toBe(false);
+  });
+
+  it("llmBullets 为空数组/null → 回退确定性拼接（原行为）", () => {
+    for (const llmBullets of [[], null, undefined]) {
+      const sections = buildDegradedSummarySections({
+        transcript: longSpeech,
+        freeFormNotes: "plain notes",
+        notice: NO_STUDENT_SPEECH_NOTICE,
+        llmBullets: llmBullets as string[] | null | undefined,
+      });
+      expect(sections.some((s) => s.topic === "面试官发言要点")).toBe(true);
+      expect(sections.some((s) => s.topic === "面试记录（Notes）")).toBe(true);
+    }
+  });
+
+  it("llmBullets 里的空串/非字符串被过滤，超过 5 条被截断", () => {
+    const sections = buildDegradedSummarySections({
+      transcript: longSpeech,
+      freeFormNotes: null,
+      notice: NO_STUDENT_SPEECH_NOTICE,
+      llmBullets: ["一", "", "  ", "二", "三", "四", "五", "六"],
+    });
+    const digest = sections.find((s) => s.topic === "内容小结");
+    expect(digest!.bullets).toEqual(["一", "二", "三", "四", "五"]);
   });
 });

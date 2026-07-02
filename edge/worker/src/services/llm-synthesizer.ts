@@ -1208,3 +1208,68 @@ export async function synthesizeReportInWorker(
     warnings,
   };
 }
+
+// ── R5: degraded overview-only summary（无候选人发言场次的内容小结） ─────────
+
+/** 降级小结：面试官发言输入上限（字符）——防长独白撑爆 prompt。 */
+const DEGRADED_SUMMARY_SPEECH_MAX_CHARS = 8000;
+/** 降级小结：notes 输入上限（字符）。 */
+const DEGRADED_SUMMARY_NOTES_MAX_CHARS = 2000;
+/** 降级小结：最多返回的要点条数。 */
+const DEGRADED_SUMMARY_MAX_BULLETS = 5;
+
+/**
+ * R5：用一次轻量 LLM 调用把"只有面试官说话"场次的发言 + notes 概括成 2-5 条
+ * 中文要点，供 `buildDegradedSummarySections` 作"内容小结"段。
+ *
+ * 背景（round-5 真人反馈）：降级 summary 的确定性拼接只能原样搬运 caption 文本，
+ * 用户明确要"总结出说话的核心内容"——这只有 LLM 能做。此调用刻意与主报告合成
+ * 解耦：prompt 极小（无 per-person/evidence 契约），失败/超时/欠费时抛
+ * `SynthesizerError`，调用方 catch 后回退确定性拼接——降级报告永不因此变空。
+ *
+ * 入参约定：`notesText` 必须是已剥好 HTML 的纯文本（调用方过 `stripHtmlToText`）；
+ * `interviewerUtterances` 用 `collectInterviewerUtterances` 取，保证与确定性
+ * 拼接路径看到同一份发言。两者皆空时不发起网络调用，直接返回 []。
+ */
+export async function synthesizeDegradedOverviewSummary(
+  env: Env,
+  params: { interviewerUtterances: string[]; notesText: string }
+): Promise<string[]> {
+  const speech = params.interviewerUtterances
+    .map((text) => (typeof text === "string" ? text.trim() : ""))
+    .filter((text) => text.length > 0)
+    .join("\n");
+  const notes = typeof params.notesText === "string" ? params.notesText.trim() : "";
+  if (!speech && !notes) return [];
+
+  const apiKey = env.ALIYUN_DASHSCOPE_API_KEY ?? "";
+  const model = (env as Env & { LLM_MODEL?: string }).LLM_MODEL ?? DEFAULT_LLM_MODEL;
+  const timeoutMs = parseTimeoutMs(env.INFERENCE_TIMEOUT_MS);
+
+  const clip = (text: string, max: number): string =>
+    text.length <= max ? text : `${text.slice(0, max)}…`;
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content:
+        "你是面试记录助手。本场面试未检测到候选人发言，只有面试官的讲话和面试官写的笔记。" +
+        "请用中文把面试官实际讲的核心内容概括为 2-5 条要点，每条一句完整的话，按需覆盖：" +
+        "面试官的身份与来历、说明的面试流程或选拔标准、提出的问题或话题、笔记里的关键记录。" +
+        '不要逐句复述原文，不要虚构未提及的内容，不要输出评价或建议。只返回 JSON：{"bullets": ["要点", "…"]}',
+    },
+    {
+      role: "user",
+      content:
+        `【面试官发言（按时间序）】\n${clip(speech, DEGRADED_SUMMARY_SPEECH_MAX_CHARS) || "（无）"}\n\n` +
+        `【面试官笔记】\n${clip(notes, DEGRADED_SUMMARY_NOTES_MAX_CHARS) || "（无）"}`,
+    },
+  ];
+
+  const raw = await callDashScope(apiKey, model, messages, timeoutMs);
+  const parsed = extractJsonObject(raw);
+  return asStringArray(parsed?.["bullets"])
+    .map((bullet) => bullet.trim())
+    .filter((bullet) => bullet.length > 0)
+    .slice(0, DEGRADED_SUMMARY_MAX_BULLETS);
+}

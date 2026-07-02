@@ -217,6 +217,12 @@ const DEGRADED_MIN_UTTERANCE_CHARS = 12;
 const DEGRADED_TEACHER_FALLBACK_MAX = 2;
 /** session notes 摘要的字符上限。 */
 const DEGRADED_NOTES_MAX_CHARS = 400;
+/** notice 首段的字符上限——notice 是完整的用户告知文案（约 200 字符），绝不能拦腰
+ *  截断成 "…could be…"；此上限远大于文案长度，仅防御异常超长输入。 */
+const DEGRADED_NOTICE_MAX_CHARS = 400;
+/** LLM 内容小结的最大条数 / 单条字符上限（R5）。 */
+const DEGRADED_LLM_BULLET_MAX = 5;
+const DEGRADED_LLM_BULLET_MAX_CHARS = 280;
 
 /** 折叠空白 + 截断到 maxChars（超出加省略号）。 */
 function clampText(text: string, maxChars: number): string {
@@ -226,14 +232,46 @@ function clampText(text: string, maxChars: number): string {
 }
 
 /**
+ * 把富文本 HTML（TipTap notes / memo `<mark>` 标记）剥成纯文本（R5）。
+ *
+ * 降级 summary 曾把 notes 原样拼进 bullet，用户在报告里看到
+ * `<p><mark data-memo-type="highlight" …>` 这类结构性泄漏。Worker 无 DOM，
+ * 用保守正则处理：仅当输入确实像标记语言时才剥 tag（纯文本里孤立的 "<" 不受
+ * 影响），随后解码常见 entity、折叠空白。
+ */
+export function stripHtmlToText(input: string): string {
+  if (typeof input !== "string" || input.length === 0) return "";
+  let text = input;
+  if (/<[a-z!/]/i.test(text)) {
+    text = text
+      .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+      .replace(/<br\s*\/?>/gi, " ")
+      .replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, " ")
+      .replace(/<[^>]+>/g, " ");
+  }
+  return text
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * 从降级场景的 transcript 里挑出"面试官候选发言"。
  *
  * 优先取 `stream_role === "teacher"` 的发言；但降级场景（无候选人发言）里，若
  * 转写完全没有标为 teacher 的 utterance（stream_role 缺失 / mixed / 未来数据变化），
  * 就把所有非空 utterance 视为面试官候选 —— 反正学生一侧没发言，剩下的就是面试官。
  * 返回按时间序排好的原始文本数组（已折叠空白、去空串）。
+ *
+ * 导出给三条降级 fork 复用——同一份文本既作确定性拼接的素材，也作
+ * `synthesizeDegradedOverviewSummary` 的 LLM 输入，保证两条路径看到的发言一致。
  */
-function collectInterviewerUtterances(transcript: TranscriptItem[]): string[] {
+export function collectInterviewerUtterances(transcript: TranscriptItem[]): string[] {
   const textOf = (item: TranscriptItem): string =>
     typeof item.text === "string" ? item.text.trim().replace(/\s+/g, " ") : "";
   const byTime = (a: TranscriptItem, b: TranscriptItem): number =>
@@ -275,15 +313,23 @@ export function buildDegradedSummarySections(params: {
   transcript: TranscriptItem[];
   freeFormNotes: string | null;
   notice: string;
+  /**
+   * R5 可选：轻量 LLM 生成的内容小结要点（`synthesizeDegradedOverviewSummary` 产物）。
+   * 非空时替代"原样拼接发言 + notes 摘要"两段——LLM 输入已包含两者，避免同一内容
+   * 在 summary 里出现两遍；为空/缺省时回退确定性拼接（原行为），降级报告绝不因
+   * LLM 失败而变空。
+   */
+  llmBullets?: string[] | null;
 }): Array<{ topic: string; bullets: string[]; evidence_ids: string[] }> {
   const sections: Array<{ topic: string; bullets: string[]; evidence_ids: string[] }> = [];
 
   // 面试官候选发言（含 stream_role fallback）。
   const interviewerUtterances = collectInterviewerUtterances(params.transcript);
 
-  // 1. notice —— 本场未检测到候选人发言。首段 bullet 直接用调用方传入的 notice，
-  //    并在有面试官发言时补一句确定性统计（发言段数 + 总时长秒）。
-  const noticeBullets: string[] = [clampText(params.notice, DEGRADED_BULLET_MAX_CHARS)];
+  // 1. notice —— 本场未检测到候选人发言。首段 bullet 直接用调用方传入的 notice
+  //    （专用大上限，不能把完整告知文案截成 "…could be…"），并在有面试官发言时
+  //    补一句确定性统计（发言段数 + 总时长秒）。
+  const noticeBullets: string[] = [clampText(params.notice, DEGRADED_NOTICE_MAX_CHARS)];
   const teacherStreamItems = params.transcript.filter((item) => item.stream_role === "teacher");
   const statSource = teacherStreamItems.length > 0 ? teacherStreamItems : params.transcript;
   const speechCount = statSource.filter(
@@ -302,6 +348,21 @@ export function buildDegradedSummarySections(params: {
     bullets: noticeBullets,
     evidence_ids: [],
   });
+
+  // R5: LLM 内容小结可用 → 用它替代下面的"原样拼接发言 + notes"两段。
+  const llmBullets = (params.llmBullets ?? [])
+    .map((bullet) => (typeof bullet === "string" ? bullet : ""))
+    .map((bullet) => clampText(bullet, DEGRADED_LLM_BULLET_MAX_CHARS))
+    .filter((bullet) => bullet.length > 0)
+    .slice(0, DEGRADED_LLM_BULLET_MAX);
+  if (llmBullets.length > 0) {
+    sections.push({
+      topic: "内容小结",
+      bullets: llmBullets,
+      evidence_ids: [],
+    });
+    return sections;
+  }
 
   // 2. 面试官/记录者发言要点。优先较长/有信息量的发言；过滤后为空则退回最长 1-2 条。
   let teacherBullets = interviewerUtterances
@@ -324,8 +385,9 @@ export function buildDegradedSummarySections(params: {
     });
   }
 
-  // 3. session notes 摘要（free-form notes）。
-  const notes = typeof params.freeFormNotes === "string" ? params.freeFormNotes.trim() : "";
+  // 3. session notes 摘要（free-form notes）。notes 是 TipTap 富文本 HTML（含 memo
+  //    <mark> 标记），必须剥成纯文本再进 summary（R5 修复：结构性 HTML 泄漏）。
+  const notes = stripHtmlToText(typeof params.freeFormNotes === "string" ? params.freeFormNotes : "");
   if (notes.length > 0) {
     sections.push({
       topic: "面试记录（Notes）",

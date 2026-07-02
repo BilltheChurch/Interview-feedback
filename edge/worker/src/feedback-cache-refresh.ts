@@ -16,7 +16,7 @@ import {
   validatePersonFeedbackEvidence,
 } from "./finalize_v2";
 import type { TranscriptItem } from "./finalize_v2";
-import { computeEligibleSpeakers } from "./services/llm-synthesizer";
+import { computeEligibleSpeakers, synthesizeDegradedOverviewSummary } from "./services/llm-synthesizer";
 import { buildReconciledTranscript } from "./reconcile";
 import {
   normalizeSessionState,
@@ -51,9 +51,11 @@ import {
   buildDegradedSummarySections,
   buildEvidenceIndex,
   buildQualityMetrics,
+  collectInterviewerUtterances,
   evaluateFeedbackQualityGates,
   mergeStatsWithRoster,
   resolveNoStudentSpeechDegradation,
+  stripHtmlToText,
   validateClaimEvidenceRefs,
   NO_STUDENT_SPEECH_NOTICE,
 } from "./feedback-helpers";
@@ -288,9 +290,20 @@ export async function maybeRefreshFeedbackCache(
       // Overview-only: drop the memo-first placeholder person cards so the UI shows
       // just the overview + notice, no phantom "unknown" student.
       finalPerPerson = [];
-      // R2: 用确定性拼接重建 overview summary，反映本场实际内容（面试官发言 +
-      // notes），并置空 evidence_ids —— 不再沿用 memo-first 那句通用占位、也不盲
-      // 挂无关头部 evidence。与 finalize-orchestrator 两条降级 fork 行为一致。
+      // R5: 先尝试轻量 LLM 内容小结（失败静默回退确定性拼接——history-reload 路径
+      // 没有 finalizeWarnings 通道，且结果会被缓存，不因 LLM 抖动阻塞重载）。
+      let degradedLlmBullets: string[] | null = null;
+      try {
+        degradedLlmBullets = await synthesizeDegradedOverviewSummary(ctx.env, {
+          interviewerUtterances: collectInterviewerUtterances(transcript),
+          notesText: stripHtmlToText(eligibilityContext.freeFormNotes ?? ""),
+        });
+      } catch {
+        degradedLlmBullets = null;
+      }
+      // R2: 重建 overview summary，反映本场实际内容（面试官发言 + notes），并置空
+      // evidence_ids —— 不再沿用 memo-first 那句通用占位、也不盲挂无关头部
+      // evidence。与 finalize-orchestrator 两条降级 fork 行为一致。
       finalOverall = {
         ...(finalOverall as Record<string, unknown>),
         notice: NO_STUDENT_SPEECH_NOTICE,
@@ -298,6 +311,7 @@ export async function maybeRefreshFeedbackCache(
           transcript,
           freeFormNotes: eligibilityContext.freeFormNotes,
           notice: NO_STUDENT_SPEECH_NOTICE,
+          llmBullets: degradedLlmBullets,
         }),
       };
     }

@@ -3,6 +3,7 @@ import {
   buildSynthesisMessages,
   estimateTokens,
   parseSynthesisResponse,
+  synthesizeDegradedOverviewSummary,
   synthesizeReportInWorker,
   truncateTranscript,
   type ChatMessage,
@@ -482,6 +483,94 @@ describe("synthesizeReportInWorker (fetch stubbed)", () => {
     await expect(synthesizeReportInWorker(noKeyEnv, payload())).rejects.toThrow(
       /API_KEY is required/
     );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── R5: synthesizeDegradedOverviewSummary（降级 overview 内容小结） ───────────
+
+describe("synthesizeDegradedOverviewSummary (fetch stubbed)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function stubFetchOnce(content: string, status = 200) {
+    const fetchMock = vi.fn(async () => ({
+      status,
+      json: async () => ({ choices: [{ message: { content } }] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  const env = (): Env => ({ ALIYUN_DASHSCOPE_API_KEY: "test-key" } as unknown as Env);
+
+  it("把面试官发言+notes 概括为要点数组（解析 JSON bullets）", async () => {
+    const fetchMock = stubFetchOnce(
+      JSON.stringify({ bullets: ["面试官 Tim 来自帝国理工计算机系。", "他说明了申请流程与选拔标准。"] })
+    );
+    const bullets = await synthesizeDegradedOverviewSummary(env(), {
+      interviewerUtterances: [
+        "My name is Tim, and I work for the Department of Computing at Imperial College London.",
+      ],
+      notesText: "这次的caption还比较不错。",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(bullets).toEqual([
+      "面试官 Tim 来自帝国理工计算机系。",
+      "他说明了申请流程与选拔标准。",
+    ]);
+    // prompt 里必须带上发言与 notes 纯文本。
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, { body: string }])[1].body);
+    const userMsg = body.messages.find((m: { role: string }) => m.role === "user");
+    expect(userMsg.content).toContain("Imperial College London");
+    expect(userMsg.content).toContain("这次的caption还比较不错。");
+  });
+
+  it("发言与 notes 皆空 → 直接返回 []，不发起网络调用", async () => {
+    const fetchMock = stubFetchOnce(JSON.stringify({ bullets: ["不应出现"] }));
+    const bullets = await synthesizeDegradedOverviewSummary(env(), {
+      interviewerUtterances: ["  ", ""],
+      notesText: "",
+    });
+    expect(bullets).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("LLM 返回非 JSON/缺 bullets → 返回 []（调用方回退确定性拼接）", async () => {
+    stubFetchOnce("not json at all");
+    const a = await synthesizeDegradedOverviewSummary(env(), {
+      interviewerUtterances: ["some speech"],
+      notesText: "",
+    });
+    expect(a).toEqual([]);
+
+    stubFetchOnce(JSON.stringify({ something_else: true }));
+    const b = await synthesizeDegradedOverviewSummary(env(), {
+      interviewerUtterances: ["some speech"],
+      notesText: "",
+    });
+    expect(b).toEqual([]);
+  });
+
+  it("要点超过 5 条被截断，空串被过滤", async () => {
+    stubFetchOnce(JSON.stringify({ bullets: ["1", "", "2", "3", "4", "5", "6"] }));
+    const bullets = await synthesizeDegradedOverviewSummary(env(), {
+      interviewerUtterances: ["speech"],
+      notesText: "",
+    });
+    expect(bullets).toEqual(["1", "2", "3", "4", "5"]);
+  });
+
+  it("API key 缺失 → 抛 SynthesizerError（调用方 catch 后回退）", async () => {
+    const fetchMock = stubFetchOnce(JSON.stringify({ bullets: ["x"] }));
+    await expect(
+      synthesizeDegradedOverviewSummary({} as unknown as Env, {
+        interviewerUtterances: ["speech"],
+        notesText: "",
+      })
+    ).rejects.toThrow(/ALIYUN_DASHSCOPE_API_KEY/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
