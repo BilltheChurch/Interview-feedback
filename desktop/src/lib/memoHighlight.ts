@@ -13,6 +13,27 @@ const MEMO_LABELS: Record<string, string> = {
 };
 
 /**
+ * Should a memo card in the post-session Session Notes HIDE its text body?
+ *
+ * A highlight memo's text IS the highlighted span — when the freeform note HTML
+ * rendered right above the card still contains that memo's mark
+ * (`data-memo-id="…"`), repeating the text on the card is a verbatim duplicate
+ * (round-5 user feedback: label chip + timestamp is enough). Other memo types
+ * carry the interviewer's own words, and an orphaned highlight (its mark edited
+ * out of the note) would lose information — both keep their text.
+ */
+export function isMemoTextDuplicateOfNotes(
+  memo: { type: string; id: string },
+  freeformHtml: string | null | undefined,
+): boolean {
+  return (
+    memo.type === 'highlight' &&
+    typeof freeformHtml === 'string' &&
+    freeformHtml.includes(`data-memo-id="${memo.id}"`)
+  );
+}
+
+/**
  * Custom TipTap Mark for memo highlighting.
  *
  * Renders selected text wrapped in a <mark> element with data-memo-type

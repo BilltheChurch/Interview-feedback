@@ -50,6 +50,7 @@ import { CandidateComparison } from '../components/CandidateComparison';
 import { RecommendationBadge } from '../components/RecommendationBadge';
 import { QuestionBreakdownSection } from '../components/QuestionBreakdownSection';
 import { sanitizeHtml } from '../lib/sanitize';
+import { isMemoTextDuplicateOfNotes } from '../lib/memoHighlight';
 import { InterviewQualityCard } from '../components/InterviewQualityCard';
 import { FollowUpQuestions } from '../components/FollowUpQuestions';
 import { ActionPlanCard } from '../components/ActionPlanCard';
@@ -221,6 +222,12 @@ function StageMemosSection({
                       {archiveMemos.map((memo) => {
                         const config = MEMO_TYPE_CONFIG[memo.type];
                         const MemoIcon = config.icon;
+                        // Highlight memos whose mark is still visible in the note
+                        // above show only the chip + timestamp (no duplicate text).
+                        const hideText = isMemoTextDuplicateOfNotes(
+                          memo,
+                          archive.freeformHtml || archive.freeformText,
+                        );
                         return (
                           <div
                             key={memo.id}
@@ -236,9 +243,11 @@ function StageMemosSection({
                                   {formatMemoTime(memo.timestamp)}
                                 </span>
                               </div>
-                              <p className="text-sm text-ink-secondary leading-relaxed flex-1">
-                                {memo.text}
-                              </p>
+                              {!hideText && (
+                                <p className="text-sm text-ink-secondary leading-relaxed flex-1">
+                                  {memo.text}
+                                </p>
+                              )}
                             </div>
                           </div>
                         );
@@ -309,6 +318,9 @@ function StageMemosSection({
                       {stageMemos.map((memo) => {
                         const config = MEMO_TYPE_CONFIG[memo.type];
                         const MemoIcon = config.icon;
+                        // Same de-dup rule as the archive path: the free-form notes
+                        // rendered above already show the highlighted span inline.
+                        const hideText = isMemoTextDuplicateOfNotes(memo, notes);
                         return (
                           <div
                             key={memo.id}
@@ -324,9 +336,11 @@ function StageMemosSection({
                                   {formatMemoTime(memo.timestamp)}
                                 </span>
                               </div>
-                              <p className="text-sm text-ink-secondary leading-relaxed flex-1">
-                                {memo.text}
-                              </p>
+                              {!hideText && (
+                                <p className="text-sm text-ink-secondary leading-relaxed flex-1">
+                                  {memo.text}
+                                </p>
+                              )}
                             </div>
                           </div>
                         );
