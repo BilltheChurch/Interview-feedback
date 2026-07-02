@@ -348,7 +348,9 @@ export function SidecarView() {
       }
       setMemosVisible(true);
 
-      storeAddMemo(type, text.slice(0, 200));
+      // Same id for the store memo AND the <mark data-memo-id> in the note —
+      // FeedbackView de-dups the memo card against the note by this id.
+      storeAddMemo(type, text.slice(0, 200), memoId);
 
       editorRef.current?.applyMemoMark(type, memoId);
 

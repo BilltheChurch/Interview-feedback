@@ -236,7 +236,10 @@ interface SessionStore {
   startSession: (config: SessionConfig) => void;
   endSession: () => void;
   restoreSession: (persisted: PersistedSession) => void;
-  addMemo: (type: MemoType, text: string) => void;
+  // `id` optional: SidecarView passes the SAME id it stamped into the note's
+  // <mark data-memo-id> so the store memo and the highlight mark stay linked
+  // (FeedbackView de-dups the memo card against the note by this id).
+  addMemo: (type: MemoType, text: string, id?: string) => void;
   advanceStage: () => void;
   addStageArchive: (archive: StageArchive) => void;
   setNotes: (html: string) => void;
@@ -371,12 +374,12 @@ export const useSessionStore = create<SessionStore>()((set, get) => ({
       partialTranscripts: {},
     }),
 
-  addMemo: (type, text) =>
+  addMemo: (type, text, id) =>
     set((s) => ({
       memos: [
         ...s.memos,
         {
-          id: `memo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          id: id || `memo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           type,
           text,
           tags: [],

@@ -436,3 +436,28 @@ describe('sessionStore — R4 live partial transcripts', () => {
     expect(useSessionStore.getState().partialTranscripts).toEqual({});
   });
 });
+
+// ── R5: memo 卡与笔记 <mark> 的 id 关联（复审揪出的 id 分叉回归） ─────────────
+// SidecarView.addMemo 生成一个 memoId，同时写进笔记的 <mark data-memo-id> 和
+// store memo——两者必须是同一个 id，FeedbackView 才能按 id 对 memo 卡去重。
+// 复审实证：此前 store.addMemo 内部自生成第二个随机 id，去重判定恒 false。
+describe('addMemo id linking (R5)', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ memos: [], elapsedSeconds: 0, currentStage: 0 } as never);
+  });
+
+  it('respects an explicit id so the note mark and the store memo stay linked', () => {
+    const memoId = 'memo-1782960444888-ofk0n5';
+    useSessionStore.getState().addMemo('highlight', '这次的caption还比较不错。', memoId);
+    const memos = useSessionStore.getState().memos;
+    expect(memos).toHaveLength(1);
+    expect(memos[0].id).toBe(memoId);
+  });
+
+  it('still generates an id when none is passed (other call sites unchanged)', () => {
+    useSessionStore.getState().addMemo('issue', 'note text');
+    const memos = useSessionStore.getState().memos;
+    expect(memos).toHaveLength(1);
+    expect(memos[0].id).toMatch(/^memo-\d+-[a-z0-9]{6}$/);
+  });
+});
