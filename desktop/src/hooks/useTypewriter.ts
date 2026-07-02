@@ -36,17 +36,18 @@ export function useTypewriter(text: string): string {
   targetLenRef.current = targetLen;
 
   // Previous partial text, used to detect mid-stream rewrites (prefix divergence).
-  const prevTextRef = useRef(text);
+  // Adjusted DURING RENDER (react.dev "adjusting state when a prop changes") rather than
+  // in an effect: React re-renders before commit, so a rewritten head is never committed
+  // to the DOM with the stale (un-clamped) reveal count — no dirty in-place-replaced frame.
+  const [prevText, setPrevText] = useState(text);
+  if (prevText !== text) {
+    setPrevText(text);
+    // Rewritten head → clamp the reveal back to the common prefix so only the
+    // changed tail is retyped; pure appends leave the reveal untouched.
+    setRevealed((prev) => clampRevealToCommonPrefix(prevText, text, prev));
+  }
 
   useEffect(() => {
-    const prevText = prevTextRef.current;
-    prevTextRef.current = text;
-    if (prevText !== text) {
-      // Rewritten head → clamp the reveal back to the common prefix so only the
-      // changed tail is retyped; pure appends leave the reveal untouched.
-      setRevealed((prev) => clampRevealToCommonPrefix(prevText, text, prev));
-    }
-
     if (prefersReducedMotion) {
       // No animation: show everything, and re-sync instantly as the text grows.
       setRevealed(targetLen);

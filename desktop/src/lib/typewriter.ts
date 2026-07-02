@@ -86,9 +86,11 @@ export function clampRevealToCommonPrefix(
   text: string,
   revealed: number,
 ): number {
+  // Fast paths: unchanged text / pure append keep the reveal untouched. Under the hook
+  // invariant (revealed <= codePointLength(prevText)) the Math.min below would return the
+  // same value; kept explicit for callers outside that invariant.
   if (prevText === text) return revealed;
   const prefix = commonPrefixLength(prevText, text);
-  // Pure append: everything previously shown is unchanged — keep the reveal as is.
   if (prefix === codePointLength(prevText)) return revealed;
   // Head diverged (or text shrank): anything revealed past the common prefix is stale.
   return Math.min(revealed, prefix);

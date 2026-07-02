@@ -120,4 +120,46 @@ describe('useTypewriter (R-D)', () => {
     flushFrame(2);
     expect(result.current).toBe('');
   });
+
+  it('rewinds the reveal to the common prefix on a head rewrite, then retypes the tail', () => {
+    const { result, rerender } = renderHook(({ text }) => useTypewriter(text), {
+      initialProps: { text: 'Imperial Killedge' },
+    });
+    flushFrame(20);
+    expect(result.current).toBe('Imperial Killedge');
+    // Speechmatics corrects the head mid-utterance.
+    rerender({ text: 'Imperial College London' });
+    // Immediately back to the 9-code-point common prefix — no in-place replacement.
+    expect(result.current).toBe('Imperial ');
+    // The tail is retyped from the divergence point (2 chars/frame).
+    flushFrame(1);
+    expect(result.current).toBe('Imperial Co');
+    flushFrame(20);
+    expect(result.current).toBe('Imperial College London');
+  });
+
+  it('clamps straight to a shorter corrected text without over-revealing', () => {
+    const { result, rerender } = renderHook(({ text }) => useTypewriter(text), {
+      initialProps: { text: 'abcdef' },
+    });
+    flushFrame(10);
+    expect(result.current).toBe('abcdef');
+    rerender({ text: 'abc' });
+    expect(result.current).toBe('abc');
+    flushFrame(2);
+    expect(result.current).toBe('abc');
+  });
+
+  it('rewinds CJK rewrites on whole-character boundaries', () => {
+    const { result, rerender } = renderHook(({ text }) => useTypewriter(text), {
+      initialProps: { text: '你好世界' },
+    });
+    flushFrame(10);
+    expect(result.current).toBe('你好世界');
+    rerender({ text: '你好朋友们' });
+    // Divergence at the 3rd character — only the shared 你好 stays visible.
+    expect(result.current).toBe('你好');
+    flushFrame(10);
+    expect(result.current).toBe('你好朋友们');
+  });
 });
