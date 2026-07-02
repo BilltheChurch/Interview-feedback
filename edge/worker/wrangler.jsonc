@@ -55,7 +55,7 @@
     // ASR_EXTRA_VOCAB formats: comma/newline-separated phrases, OR a JSON array of
     // strings / {content, sounds_like} objects. resolveSpeechmaticsVocabEnabled / resolveExtraVocab.
     "SPEECHMATICS_VOCAB": "true",
-    "ASR_EXTRA_VOCAB": "Imperial College London,University College London,UCL,London School of Economics,LSE,King's College London,KCL,University of Cambridge,University of Oxford,Russell Group,G5,A-Level,GCSE,IB,IELTS,TOEFL,UCAS,personal statement,conditional offer,unconditional offer,computer science,economics,engineering,mathematics,Frontier Academy,帝国理工,帝国理工学院,牛津大学,剑桥大学,伦敦大学学院,伦敦政经,国王学院,罗素集团,本科申请,预科,面试官,自我介绍",
+    "ASR_EXTRA_VOCAB": "Imperial College London,University College London,UCL,London School of Economics,LSE,King's College London,KCL,University of Cambridge,University of Oxford,Russell Group,G5,A-Level,GCSE,IB,IELTS,TOEFL,UCAS,personal statement,conditional offer,unconditional offer,Frontier Academy,帝国理工,帝国理工学院,牛津大学,剑桥大学,伦敦大学学院,伦敦政经,国王学院,罗素集团,预科",
     // R-D: silence gap (ms) between consecutive finals that flushes the accumulated
     // utterance. Raised 500 → 900: the live partial line now types in word-by-word
     // (Desktop typewriter reveal), so "fast to appear" no longer needs a tight flush gap;

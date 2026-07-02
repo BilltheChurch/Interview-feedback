@@ -803,6 +803,16 @@ export interface AsrRealtimeRuntime {
    *  Backpressure lag = lastSentToSpeechmaticsSeq - lastAckedSeq; when lag exceeds
    *  BACKPRESSURE_WINDOW the drain loop skips the current pass to let acks catch up. */
   lastAckedSeq: number;
+  /** R6-vocab self-heal: set true when a Speechmatics server Error arrives on a
+   *  connection that sent additional_vocab. The next (re)connect drops the custom
+   *  dictionary so a language pack that rejects the field (or a bad user-supplied name)
+   *  can't wedge the stream in an infinite reject→reconnect loop. Session-scoped
+   *  (persists across reconnects on this runtime); reset only on a fresh session. */
+  vocabRejected: boolean;
+  /** R6-vocab self-heal bookkeeping: did the CURRENT connection's StartRecognition
+   *  include additional_vocab? Scopes the vocabRejected flip to vocab-carrying
+   *  connections so an unrelated server Error never disables a vocab we never sent. */
+  lastConnectSentVocab: boolean;
   /** P0-a: session-time offset (ms) for the CURRENT Speechmatics WS connection.
    *  Speechmatics reports word-level times relative to each StartRecognition (its timeline
    *  restarts at ~0 on every reconnect). This base = the session ms already ingested when

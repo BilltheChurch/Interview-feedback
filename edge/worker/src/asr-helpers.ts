@@ -281,7 +281,9 @@ export function buildRealtimeRuntime(streamRole: StreamRole): AsrRealtimeRuntime
     lastAudioSentAt: 0,            // epoch sentinel: never sent → keepalive eligible immediately
     lastSentToSpeechmaticsSeq: 0,  // per-connection send counter (resets on each WS connect)
     lastAckedSeq: 0,               // per-connection ack counter (resets on each WS connect)
-    connectionSessionBaseMs: 0     // P0-a: session-time offset for the current Speechmatics connection (0 = first)
+    connectionSessionBaseMs: 0,    // P0-a: session-time offset for the current Speechmatics connection (0 = first)
+    vocabRejected: false,          // R6-vocab self-heal: drop additional_vocab after a config reject
+    lastConnectSentVocab: false    // R6-vocab self-heal: did this connection send additional_vocab
   };
 }
 

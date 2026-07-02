@@ -441,3 +441,50 @@ describe("resolveSttMaxUtteranceMs", () => {
     expect(resolveSttMaxUtteranceMs({ STT_MAX_UTTERANCE_MS: "1.5" })).toBe(STT_MAX_UTTERANCE_MS_DEFAULT);
   });
 });
+
+// ── R6-vocab self-heal: disable additional_vocab after a server config reject ──
+
+/** Build a Speechmatics server Error control frame. */
+function errorFrame(reason: string): string {
+  return JSON.stringify({ message: "Error", type: "invalid_config", reason });
+}
+
+describe("R6-vocab self-heal (Speechmatics Error → drop additional_vocab)", () => {
+  it("flips vocabRejected when an Error arrives on a connection that sent vocab", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    runtime.lastConnectSentVocab = true; // this connection's StartRecognition carried vocab
+    const { ctx } = makeCtx(runtime);
+
+    await handleSpeechmaticsMessage("sess", "students", errorFrame("additional_vocab not supported"), ctx);
+
+    // Next (re)connect will skip the custom dictionary so the stream can recover.
+    expect(runtime.vocabRejected).toBe(true);
+  });
+
+  it("does NOT flip vocabRejected when the connection sent no vocab (unrelated error)", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    runtime.lastConnectSentVocab = false;
+    const { ctx } = makeCtx(runtime);
+
+    await handleSpeechmaticsMessage("sess", "students", errorFrame("some transient server error"), ctx);
+
+    expect(runtime.vocabRejected).toBe(false);
+  });
+
+  it("rejects the ready promise so the connect path unwinds into a reconnect", async () => {
+    const runtime = buildRealtimeRuntime("students");
+    runtime.running = true;
+    runtime.lastConnectSentVocab = true;
+    let rejected: Error | null = null;
+    runtime.readyReject = (err: Error) => { rejected = err; };
+    const { ctx } = makeCtx(runtime);
+
+    await handleSpeechmaticsMessage("sess", "students", errorFrame("bad config"), ctx);
+
+    expect(rejected).not.toBeNull();
+    expect((rejected as unknown as Error).message).toBe("bad config");
+    expect(runtime.readyReject).toBeNull();
+  });
+});

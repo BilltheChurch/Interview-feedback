@@ -926,7 +926,10 @@ function dominantSpeaker(t: SpeechmaticsTranscript): string | null {
  *
  * Entries are deduped case-insensitively on content; single-code-point contents are
  * dropped (one CJK char / one letter biases recognition without disambiguating anything);
- * the result is capped at SPEECHMATICS_ADDITIONAL_VOCAB_MAX. Pure function for unit tests.
+ * the result is capped at SPEECHMATICS_ADDITIONAL_VOCAB_MAX. SESSION names (roster +
+ * interviewer) are pushed BEFORE the static domain list so that, at the cap boundary, a
+ * huge static list can never evict roster names — they are exactly what diarization
+ * binding later matches against, i.e. the highest-value entries. Pure function.
  */
 export function buildSessionVocab(
   state: SessionState,
@@ -947,8 +950,7 @@ export function buildSessionVocab(
     );
   };
 
-  for (const entry of staticVocab) push(entry);
-
+  // Session names first — they survive the cap even against a full static list.
   const asString = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
   const config = (state.config ?? {}) as Record<string, unknown>;
   for (const key of ["interviewer_name", "teams_interviewer_name", "company_name", "position_title"]) {
@@ -968,6 +970,9 @@ export function buildSessionVocab(
       }
     }
   }
+
+  // Static domain vocab fills the remaining headroom.
+  for (const entry of staticVocab) push(entry);
 
   return out.slice(0, SPEECHMATICS_ADDITIONAL_VOCAB_MAX);
 }
@@ -1057,8 +1062,11 @@ async function connectSpeechmaticsRealtime(
   // must never break the connection — on failure we degrade to the static list. Sent once
   // per StartRecognition; a mid-session roster change reaches the vocab on the next
   // (re)connect only (Speechmatics has no mid-session config update).
+  // Self-heal: once a prior connection was rejected with vocab attached, never send it
+  // again this session — otherwise every reconnect re-sends the poison config and the
+  // stream can never recover (drainRealtimeQueue would reconnect forever).
   let additionalVocab: SpeechmaticsVocabEntry[] = [];
-  if (resolveSpeechmaticsVocabEnabled(ctx.env)) {
+  if (resolveSpeechmaticsVocabEnabled(ctx.env) && !runtime.vocabRejected) {
     additionalVocab = resolveExtraVocab(ctx.env);
     try {
       const state = normalizeSessionState(
@@ -1069,6 +1077,7 @@ async function connectSpeechmaticsRealtime(
       // keep static-only vocab
     }
   }
+  runtime.lastConnectSentVocab = additionalVocab.length > 0;
 
   ws.send(JSON.stringify(buildStartRecognition({
     ...DEFAULT_SPEECHMATICS_CONFIG,
@@ -1121,6 +1130,15 @@ export async function handleSpeechmaticsMessage(
   }
 
   if (msg.type === "Error") {
+    // R6-vocab self-heal: a server Error on a connection that carried additional_vocab is,
+    // in practice, a config rejection (auth/handshake errors fail earlier, at socket open).
+    // Disable the custom dictionary so the imminent reconnect retries without it rather than
+    // re-sending the same poison config forever. Favors dropping vocab (degraded accuracy,
+    // recording continues) over an infinite reject loop (session produces zero transcript).
+    if (runtime.lastConnectSentVocab && !runtime.vocabRejected) {
+      runtime.vocabRejected = true;
+      log("warn", `speechmatics error with vocab attached; disabling additional_vocab for session ${sessionId} (${streamRole}): ${msg.reason}`);
+    }
     runtime.readyReject?.(new Error(msg.reason));
     runtime.readyResolve = null;
     runtime.readyReject = null;

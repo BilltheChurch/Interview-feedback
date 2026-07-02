@@ -27,13 +27,32 @@ describe("buildSessionVocab (R6-vocab)", () => {
       ] as SessionState["roster"],
     });
     const vocab = buildSessionVocab(state, [{ content: "Imperial College London" }]);
+    // Session names (interviewer + roster + aliases) come FIRST; static domain vocab last,
+    // so the cap can never evict a roster name in favor of a static term.
     expect(vocab).toEqual([
-      { content: "Imperial College London" },
       { content: "Dr. Smith" },
       { content: "Tina" },
       { content: "Kenny Tan" },
       { content: "Stephanie" },
+      { content: "Imperial College London" },
     ]);
+  });
+
+  it("keeps roster names at the cap even against a full static list (R6 review fix)", () => {
+    const state = makeState({
+      roster: [{ name: "Kenny Tan" }, { name: "Stephanie" }] as SessionState["roster"],
+    });
+    const staticVocab = Array.from(
+      { length: SPEECHMATICS_ADDITIONAL_VOCAB_MAX + 50 },
+      (_, i) => ({ content: `static-${i}` })
+    );
+    const vocab = buildSessionVocab(state, staticVocab);
+    expect(vocab).toHaveLength(SPEECHMATICS_ADDITIONAL_VOCAB_MAX);
+    const contents = vocab.map((v) => v.content);
+    expect(contents).toContain("Kenny Tan");
+    expect(contents).toContain("Stephanie");
+    // The two roster names are at the front — static domain words filled the rest.
+    expect(contents.slice(0, 2)).toEqual(["Kenny Tan", "Stephanie"]);
   });
 
   it("dedupes case-insensitively across static and session sources", () => {
