@@ -56,3 +56,6 @@ inference/tests/e2e_v1_transcript.txt
 # Desktop icon build artifacts
 desktop/build/icons/icon.iconset/
 desktop/icon_1024.png
+
+# Playwright MCP browser-session artifacts (snapshots/console logs)
+.playwright-mcp/
