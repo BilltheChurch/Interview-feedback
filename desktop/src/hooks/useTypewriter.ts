@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { advanceReveal, revealedSlice, codePointLength } from '../lib/typewriter';
+import {
+  advanceReveal,
+  clampRevealToCommonPrefix,
+  codePointLength,
+  revealedSlice,
+} from '../lib/typewriter';
 
 /**
  * useTypewriter (R-D) — drive a per-character "typing" reveal for live partial captions.
@@ -30,7 +35,18 @@ export function useTypewriter(text: string): string {
   const targetLenRef = useRef(targetLen);
   targetLenRef.current = targetLen;
 
+  // Previous partial text, used to detect mid-stream rewrites (prefix divergence).
+  const prevTextRef = useRef(text);
+
   useEffect(() => {
+    const prevText = prevTextRef.current;
+    prevTextRef.current = text;
+    if (prevText !== text) {
+      // Rewritten head → clamp the reveal back to the common prefix so only the
+      // changed tail is retyped; pure appends leave the reveal untouched.
+      setRevealed((prev) => clampRevealToCommonPrefix(prevText, text, prev));
+    }
+
     if (prefersReducedMotion) {
       // No animation: show everything, and re-sync instantly as the text grows.
       setRevealed(targetLen);

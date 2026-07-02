@@ -58,3 +58,38 @@ export function revealedSlice(text: string, count: number): string {
 export function codePointLength(text: string): number {
   return Array.from(text).length;
 }
+
+/**
+ * Code-point length of the longest common prefix of `a` and `b`.
+ * Compares whole code points (Array.from) so CJK / emoji are never split mid-surrogate.
+ */
+export function commonPrefixLength(a: string, b: string): number {
+  const ca = Array.from(a);
+  const cb = Array.from(b);
+  const max = Math.min(ca.length, cb.length);
+  let i = 0;
+  while (i < max && ca[i] === cb[i]) i += 1;
+  return i;
+}
+
+/**
+ * Clamp the revealed count when a new partial REWRITES text that was already shown.
+ *
+ * Speechmatics may correct the head of an in-progress utterance mid-stream
+ * ("Imperial Killedge" → "Imperial College London"). A pure append keeps the reveal
+ * untouched, but a prefix divergence clamps the reveal back to the common prefix so
+ * only the changed tail is retyped — characters the user already read are never
+ * replaced in place.
+ */
+export function clampRevealToCommonPrefix(
+  prevText: string,
+  text: string,
+  revealed: number,
+): number {
+  if (prevText === text) return revealed;
+  const prefix = commonPrefixLength(prevText, text);
+  // Pure append: everything previously shown is unchanged — keep the reveal as is.
+  if (prefix === codePointLength(prevText)) return revealed;
+  // Head diverged (or text shrank): anything revealed past the common prefix is stale.
+  return Math.min(revealed, prefix);
+}

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { advanceReveal, revealedSlice, TYPEWRITER_CHARS_PER_TICK } from './typewriter';
+import {
+  advanceReveal,
+  clampRevealToCommonPrefix,
+  commonPrefixLength,
+  revealedSlice,
+  TYPEWRITER_CHARS_PER_TICK,
+} from './typewriter';
 
 /**
  * R-D — typewriter reveal for live partial captions.
@@ -71,5 +77,44 @@ describe('revealedSlice (R-D)', () => {
     // A single emoji is one visual character; revealing 1 unit yields the whole emoji.
     expect(revealedSlice('👍ok', 1)).toBe('👍');
     expect(revealedSlice('👍ok', 2)).toBe('👍o');
+  });
+});
+
+describe('commonPrefixLength (R-D rewrite guard)', () => {
+  it('returns the full length for identical strings', () => {
+    expect(commonPrefixLength('hello', 'hello')).toBe(5);
+  });
+
+  it('returns the shorter length for a pure append', () => {
+    expect(commonPrefixLength('Imperial', 'Imperial College')).toBe(8);
+  });
+
+  it('stops at the first diverging character', () => {
+    // "Imperial Killedge" → "Imperial College London": shared head is "Imperial " (9 chars).
+    expect(commonPrefixLength('Imperial Killedge', 'Imperial College London')).toBe(9);
+  });
+
+  it('counts code points so CJK / emoji never split the prefix mid-surrogate', () => {
+    expect(commonPrefixLength('你好世界', '你好朋友')).toBe(2);
+    expect(commonPrefixLength('👍ok', '👍no')).toBe(1);
+  });
+});
+
+describe('clampRevealToCommonPrefix (R-D rewrite guard)', () => {
+  it('leaves the reveal untouched for a pure append (the common case)', () => {
+    expect(clampRevealToCommonPrefix('Imperial', 'Imperial College', 6)).toBe(6);
+    expect(clampRevealToCommonPrefix('same text', 'same text', 4)).toBe(4);
+  });
+
+  it('clamps the reveal back to the common prefix when the head is rewritten', () => {
+    // 15 chars were shown, but the texts diverge at code point 9 — retype the tail only.
+    expect(clampRevealToCommonPrefix('Imperial Killedge', 'Imperial College London', 15)).toBe(9);
+    // A shorter corrected text clamps the same way (divergence at its end).
+    expect(clampRevealToCommonPrefix('abcdef', 'abc', 6)).toBe(3);
+  });
+
+  it('never raises the reveal: a rewrite beyond the revealed point is a no-op', () => {
+    // Only 4 chars were shown; the divergence at code point 9 has not been revealed yet.
+    expect(clampRevealToCommonPrefix('Imperial Killedge', 'Imperial College London', 4)).toBe(4);
   });
 });
