@@ -249,13 +249,15 @@ export function stripHtmlToText(input: string): string {
       .replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, " ")
       .replace(/<[^>]+>/g, " ");
   }
+  // 实体解码：&amp; 必须最后解（复审补修）——否则 "&amp;lt;"（用户字面输入
+  // "&lt;" 被 TipTap 序列化的形态）会被两步双重解码成 "<"。
   return text
     .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
     .replace(/&#0?39;/g, "'")
+    .replace(/&amp;/gi, "&")
     .replace(/\s+/g, " ")
     .trim();
 }

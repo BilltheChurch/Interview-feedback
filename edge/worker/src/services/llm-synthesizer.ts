@@ -1045,8 +1045,12 @@ async function callDashScope(
   apiKey: string,
   model: string,
   messages: ChatMessage[],
-  timeoutMs: number
+  timeoutMs: number,
+  // Lightweight-call overrides (R5): small tasks (degraded summary) must not inherit
+  // the heavyweight report-synthesis contract (3 attempts × full token budget).
+  opts?: { maxRetries?: number; maxTokens?: number }
 ): Promise<string> {
+  const maxRetries = opts?.maxRetries ?? MAX_RETRIES;
   const trimmedKey = apiKey.trim();
   if (!trimmedKey) {
     throw new SynthesizerError("ALIYUN_DASHSCOPE_API_KEY is required for report generation");
@@ -1055,7 +1059,7 @@ async function callDashScope(
   const body = JSON.stringify({
     model,
     temperature: LLM_TEMPERATURE,
-    max_tokens: DEFAULT_MAX_TOKENS,
+    max_tokens: opts?.maxTokens ?? DEFAULT_MAX_TOKENS,
     response_format: { type: "json_object" },
     // qwen3.7-plus is a reasoning model: with thinking on, hidden reasoning_content burns
     // ~5k extra tokens and ~3x latency (133s vs 40s in testing), blowing the timeout. For
@@ -1070,7 +1074,7 @@ async function callDashScope(
     "Content-Type": "application/json",
   };
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(timeoutMs, 1000));
     let response: Response;
@@ -1084,7 +1088,7 @@ async function callDashScope(
     } catch (err) {
       clearTimeout(timer);
       // Timeout / network abort → retry, else fail.
-      if (attempt < MAX_RETRIES) {
+      if (attempt < maxRetries) {
         await sleep(Math.min(2 ** attempt * 500, 5000));
         continue;
       }
@@ -1108,7 +1112,7 @@ async function callDashScope(
     }
 
     // Retryable status → backoff + retry.
-    if (RETRYABLE_STATUS.has(response.status) && attempt < MAX_RETRIES) {
+    if (RETRYABLE_STATUS.has(response.status) && attempt < maxRetries) {
       await sleep(Math.min(2 ** attempt * 500, 5000));
       continue;
     }
@@ -1217,6 +1221,11 @@ const DEGRADED_SUMMARY_SPEECH_MAX_CHARS = 8000;
 const DEGRADED_SUMMARY_NOTES_MAX_CHARS = 2000;
 /** 降级小结：最多返回的要点条数。 */
 const DEGRADED_SUMMARY_MAX_BULLETS = 5;
+/** 降级小结：专用超时上限（复审补修）——此调用可能在 feedback-open 的用户同步
+ *  等待路径上，绝不能继承面向后台 finalize 的 INFERENCE_TIMEOUT_MS(120s)。 */
+const DEGRADED_SUMMARY_TIMEOUT_MS = 15_000;
+/** 降级小结：输出 token 上限——5 条中文要点远用不到主合成的 16384。 */
+const DEGRADED_SUMMARY_MAX_TOKENS = 512;
 
 /**
  * R5：用一次轻量 LLM 调用把"只有面试官说话"场次的发言 + notes 概括成 2-5 条
@@ -1244,7 +1253,8 @@ export async function synthesizeDegradedOverviewSummary(
 
   const apiKey = env.ALIYUN_DASHSCOPE_API_KEY ?? "";
   const model = (env as Env & { LLM_MODEL?: string }).LLM_MODEL ?? DEFAULT_LLM_MODEL;
-  const timeoutMs = parseTimeoutMs(env.INFERENCE_TIMEOUT_MS);
+  // 轻量契约：15s 上限 + 最多 1 次重试 + 512 max_tokens（见常量注释）。
+  const timeoutMs = Math.min(parseTimeoutMs(env.INFERENCE_TIMEOUT_MS), DEGRADED_SUMMARY_TIMEOUT_MS);
 
   const clip = (text: string, max: number): string =>
     text.length <= max ? text : `${text.slice(0, max)}…`;
@@ -1266,7 +1276,10 @@ export async function synthesizeDegradedOverviewSummary(
     },
   ];
 
-  const raw = await callDashScope(apiKey, model, messages, timeoutMs);
+  const raw = await callDashScope(apiKey, model, messages, timeoutMs, {
+    maxRetries: 1,
+    maxTokens: DEGRADED_SUMMARY_MAX_TOKENS,
+  });
   const parsed = extractJsonObject(raw);
   return asStringArray(parsed?.["bullets"])
     .map((bullet) => bullet.trim())

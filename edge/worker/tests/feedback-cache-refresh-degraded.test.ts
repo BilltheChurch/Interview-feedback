@@ -240,6 +240,46 @@ describe("maybeRefreshFeedbackCache — R-B degraded fork (history reload)", () 
     expect(getCache().report_source).toBe("degraded_no_participants");
   });
 
+  it("BRANCH A3 (R5) — prior degraded cache 已含'内容小结' → 直接复用，不重打 LLM（history 重开护栏）", async () => {
+    const priorSections = [
+      { topic: "本场概述", bullets: [NO_STUDENT_SPEECH_NOTICE], evidence_ids: [] },
+      { topic: "内容小结", bullets: ["面试官介绍了自己并说明了流程。"], evidence_ids: [] },
+    ];
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { ctx } = makeHarness({
+        utterances: {
+          teacher: [makeUtterance("t1", "teacher", "Mr. Lee", null, "Tell me about the role.", 0, 4000)],
+          students: [],
+        },
+        stats: [makeStat({ speaker_key: "teacher", speaker_name: "Mr. Lee", turns: 5, talk_time_ms: 40000 })],
+        reportPerPerson: [],
+        initialCache: baseCache({
+          report_source: "degraded_no_participants",
+          report: {
+            overall: { notice: NO_STUDENT_SPEECH_NOTICE, summary_sections: priorSections },
+          } as unknown as FeedbackCache["report"],
+        }),
+      });
+      // 给 env 配上 key：证明"没调 LLM"是复用护栏起效，而不是 key 缺失的回退。
+      (ctx as unknown as { env: Record<string, unknown> }).env.ALIYUN_DASHSCOPE_API_KEY = "test-key";
+
+      const result = await maybeRefreshFeedbackCache(ctx, "sess-rb", true);
+
+      expect(result.report_source).toBe("degraded_no_participants");
+      const sections = (result.overall_summary_cache as {
+        summary_sections?: Array<{ topic: string; bullets: string[]; evidence_ids: string[] }>;
+      }).summary_sections;
+      // finalize（或上次重建）产出的小结被原样沿用——不漂移、不降级。
+      expect(sections).toEqual(priorSections);
+      // 关键：一次 LLM 都没打（无重复成本、feedback-open 无新增同步延迟）。
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("BRANCH A2 — degraded summary 反映本场实际内容（面试官发言 + notes），evidence 不盲挂头部", async () => {
     // 只有面试官说话（teacher 流），且写了 session notes。降级 summary 必须重建，
     // 不再是通用占位，也不盲挂 memo/evidence 数组头部（面试官开场白 quote）。

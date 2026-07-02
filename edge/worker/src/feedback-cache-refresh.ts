@@ -290,16 +290,38 @@ export async function maybeRefreshFeedbackCache(
       // Overview-only: drop the memo-first placeholder person cards so the UI shows
       // just the overview + notice, no phantom "unknown" student.
       finalPerPerson = [];
-      // R5: 先尝试轻量 LLM 内容小结（失败静默回退确定性拼接——history-reload 路径
-      // 没有 finalizeWarnings 通道，且结果会被缓存，不因 LLM 抖动阻塞重载）。
+      // R5 复用护栏（复审补修）：已结束会话的 transcript/notes 不再变化——prior
+      // cache 若已是 degraded 报告且带 LLM"内容小结"段（finalize 或上次重建产出），
+      // 直接沿用该 summary_sections，不再重打 LLM。这条路径被 feedback-open/ready
+      // 同步 await（10s 新鲜窗过后每次历史重开都会走到这里），无复用时每次重开都
+      // 多付一次 LLM 往返（成本/延迟/措辞漂移），且重开时 LLM 失败会把 finalize
+      // 产出的好小结静默覆盖成确定性拼接。
+      const priorSections =
+        current.report_source === "degraded_no_participants"
+          ? ((current.report?.overall ?? null) as {
+              summary_sections?: Array<{ topic?: string; bullets?: string[]; evidence_ids?: string[] }>;
+            } | null)?.summary_sections ?? null
+          : null;
+      const priorLlmDigest =
+        Array.isArray(priorSections) && priorSections.some((section) => section?.topic === "内容小结")
+          ? priorSections
+          : null;
+
+      // R5: prior 无可复用小结时才尝试轻量 LLM；失败记日志后回退确定性拼接。
       let degradedLlmBullets: string[] | null = null;
-      try {
-        degradedLlmBullets = await synthesizeDegradedOverviewSummary(ctx.env, {
-          interviewerUtterances: collectInterviewerUtterances(transcript),
-          notesText: stripHtmlToText(eligibilityContext.freeFormNotes ?? ""),
-        });
-      } catch {
-        degradedLlmBullets = null;
+      if (!priorLlmDigest) {
+        try {
+          degradedLlmBullets = await synthesizeDegradedOverviewSummary(ctx.env, {
+            interviewerUtterances: collectInterviewerUtterances(transcript),
+            notesText: stripHtmlToText(eligibilityContext.freeFormNotes ?? ""),
+          });
+        } catch (llmErr) {
+          console.warn(
+            `[feedback-cache-refresh] degraded summary LLM fallback (${sessionId}): ${String(
+              (llmErr as Error)?.message ?? llmErr
+            )}`
+          );
+        }
       }
       // R2: 重建 overview summary，反映本场实际内容（面试官发言 + notes），并置空
       // evidence_ids —— 不再沿用 memo-first 那句通用占位、也不盲挂无关头部
@@ -307,12 +329,14 @@ export async function maybeRefreshFeedbackCache(
       finalOverall = {
         ...(finalOverall as Record<string, unknown>),
         notice: NO_STUDENT_SPEECH_NOTICE,
-        summary_sections: buildDegradedSummarySections({
-          transcript,
-          freeFormNotes: eligibilityContext.freeFormNotes,
-          notice: NO_STUDENT_SPEECH_NOTICE,
-          llmBullets: degradedLlmBullets,
-        }),
+        summary_sections:
+          priorLlmDigest ??
+          buildDegradedSummarySections({
+            transcript,
+            freeFormNotes: eligibilityContext.freeFormNotes,
+            notice: NO_STUDENT_SPEECH_NOTICE,
+            llmBullets: degradedLlmBullets,
+          }),
       };
     }
   }

@@ -246,6 +246,8 @@ function makeHarness(opts: {
   synthPerPerson: unknown[];
   interviewerName?: string;
   freeFormNotes?: string;
+  /** R5: 额外 env（如 ALIYUN_DASHSCOPE_API_KEY，用于驱动降级 LLM 小结的成功路径）。 */
+  envExtra?: Record<string, unknown>;
 }) {
   const captured: { cache: CapturedCache | null } = { cache: null };
   let storedResultV2: ResultV2 | null = null;
@@ -287,7 +289,7 @@ function makeHarness(opts: {
         put: vi.fn(async () => {}),
       },
     },
-    env: { RESULT_BUCKET, QUALITY_GATE_UNKNOWN_RATIO: undefined },
+    env: { RESULT_BUCKET, QUALITY_GATE_UNKNOWN_RATIO: undefined, ...(opts.envExtra ?? {}) },
     currentIsoTs: () => "2026-07-01T00:00:00.000Z",
     finalizeTimeoutMs: () => 600_000,
     getCaptionSource: () => "none" as const,
@@ -451,6 +453,58 @@ describe("degraded summary rebuild — orchestrator report-only integration", ()
     }
   });
 
+  it("R5 集成：LLM 可用时降级 summary 产出'内容小结'段（真实 orchestrator + stubbed fetch）", async () => {
+    const fetchMock = vi.fn(async () => ({
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                bullets: ["面试官介绍了自己并说明了面试流程。", "他围绕分布式系统项目经验提出了问题。"],
+              }),
+            },
+          },
+        ],
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const transcript = [
+        makeUtterance("u0", "teacher", "Mr. Lee", null, "我们今天围绕你在后端分布式系统上的项目经验展开面试，先请你做个自我介绍。", 0, 9000),
+      ];
+      const existing = makeExistingResult(
+        [stat({ speaker_key: "teacher", speaker_name: "Mr. Lee", turns: 6, talk_time_ms: 40000 })],
+        transcript
+      );
+      const { ctx, captured, getStoredResultV2 } = makeHarness({
+        existingResult: existing,
+        synthPerPerson: [],
+        freeFormNotes: "重点考察系统设计能力。",
+        envExtra: { ALIYUN_DASHSCOPE_API_KEY: "test-key" },
+      });
+
+      await runFinalizeV2Job("sess-sum", "job-sum", {}, ctx, "report-only");
+
+      expect(captured.cache?.report_source).toBe("degraded_no_participants");
+      const overall = getStoredResultV2()!.overall as {
+        summary_sections?: Array<{ topic: string; bullets: string[]; evidence_ids: string[] }>;
+      };
+      const topics = (overall.summary_sections ?? []).map((s) => s.topic);
+      // LLM 成功 → "内容小结"段替代原样拼接与 notes 段。
+      expect(topics).toContain("内容小结");
+      expect(topics).not.toContain("面试官发言要点");
+      expect(topics).not.toContain("面试记录（Notes）");
+      const digest = overall.summary_sections!.find((s) => s.topic === "内容小结")!;
+      expect(digest.bullets).toContain("面试官介绍了自己并说明了面试流程。");
+      expect(digest.evidence_ids).toEqual([]);
+      // 降级小结恰好一次 LLM 调用（主合成走 ctx mock，不经 fetch）。
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("正常路径（有候选人）：summary/evidence 行为不受影响", async () => {
     const transcript = [
       makeUtterance("u0", "teacher", "Mr. Lee", null, "Q1", 0, 3000),
@@ -513,6 +567,14 @@ describe("stripHtmlToText (R5)", () => {
   it("纯文本（含孤立 <）原样保留", () => {
     expect(stripHtmlToText("score < 10 and time > 5")).toBe("score < 10 and time > 5");
     expect(stripHtmlToText("普通中文笔记")).toBe("普通中文笔记");
+  });
+
+  it("实体解码顺序：&amp; 最后解——字面输入的 entity 文本不被双重解码（复审补修）", () => {
+    // 用户在笔记里字面输入 "&lt;"（TipTap 序列化为 &amp;lt;）→ 应还原为 &lt; 而非 <。
+    expect(stripHtmlToText("<p>a &amp;lt; b</p>")).toBe("a &lt; b");
+    expect(stripHtmlToText("<p>&amp;lt;mark&amp;gt; &amp;quot;x&amp;quot;</p>")).toBe('&lt;mark&gt; &quot;x&quot;');
+    // 常规单层实体仍正常解码。
+    expect(stripHtmlToText("Q&amp;A")).toBe("Q&A");
   });
 
   it("空输入 / 非字符串安全返回空串", () => {
